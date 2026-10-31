@@ -189,6 +189,11 @@ void DagStore::node_ids(std::vector<NodeId>& out) const {
     }
 }
 
+const DagStore::WireList* DagStore::node_wires(NodeId id) const noexcept {
+    const NodeSlot* s = slot(id);
+    return s == nullptr ? nullptr : &s->wires;
+}
+
 bool DagStore::on_member_wire(NodeId id, WireId member) const noexcept {
     const NodeSlot* s = slot(id);
     return s != nullptr && Contains(s->wires, member);

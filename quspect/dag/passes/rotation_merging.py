@@ -16,6 +16,7 @@ import logging
 
 from quspect.dag.dag_circuit import DAGCircuit
 from quspect.dag.dag_node import DAGEdge, DAGNode
+from quspect.dag.passes._native import use_native
 from quspect.dag.passes.base import BasePass
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,12 @@ class RotationMerging(BasePass):
         Returns:
             The optimized DAG.
         """
+        if (
+            type(self) is RotationMerging
+            and use_native(dag, logger)
+            and dag._native_rotation_merging()  # type: ignore[attr-defined]
+        ):
+            return dag
         changed = True
         while changed:
             changed = False

@@ -23,6 +23,7 @@ import logging
 
 from quspect.dag.dag_circuit import DAGCircuit
 from quspect.dag.dag_node import DAGEdge
+from quspect.dag.passes._native import use_native
 from quspect.dag.passes.base import BasePass
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,12 @@ class EliminateDiagonalBeforeMeasurement(BasePass):
         Returns:
             The optimized DAG (modified in-place).
         """
+        if (
+            type(self) is EliminateDiagonalBeforeMeasurement
+            and use_native(dag, logger)
+            and dag._native_diagonal_before_measure()  # type: ignore[attr-defined]
+        ):
+            return dag
         changed = True
         while changed:
             changed = False

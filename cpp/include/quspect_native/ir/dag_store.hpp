@@ -219,6 +219,8 @@ public:
 
     // 节点 id 是否位于成员线 member 上（加入时记录）。
     bool on_member_wire(NodeId id, WireId member) const noexcept;
+    // 节点加入时记录的成员线（qubits 在前、clbits 在后）；节点不存在时返回 nullptr。
+    const WireList* node_wires(NodeId id) const noexcept;
 
     // ---- 状态导出 / 导入（拷贝、序列化） ----
     DagState export_state() const;

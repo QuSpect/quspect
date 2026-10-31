@@ -19,6 +19,7 @@ import logging
 
 from quspect.dag.dag_circuit import DAGCircuit
 from quspect.dag.dag_node import DAGEdge, DAGNode
+from quspect.dag.passes._native import use_native
 from quspect.dag.passes.base import BasePass
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,12 @@ class GateCancellation(BasePass):
         Returns:
             The optimized DAG (same object, modified in-place).
         """
+        if (
+            type(self) is GateCancellation
+            and use_native(dag, logger)
+            and dag._native_gate_cancellation()  # type: ignore[attr-defined]
+        ):
+            return dag
         removed: set[int] = set()
 
         changed = True

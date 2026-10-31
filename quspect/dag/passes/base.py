@@ -19,7 +19,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from quspect.dag.dag_circuit import DAGCircuit
@@ -216,6 +216,43 @@ def _wire_sequences(
     return wires
 
 
+def _signature(
+    dag: DAGCircuit, cache: dict[int, tuple[object, str]], native: Any
+) -> Any:
+    """Wire signature for the PassManager convergence check.
+
+    With the native storage core this is an opaque per-wire sequence of
+    interned instruction reprs (``native`` is its repr cache); it compares
+    exactly like the :func:`_wire_sequences` dict of the same DAG.
+    """
+    if native is not None:
+        compute = getattr(dag, "_wire_signature", None)
+        if compute is not None:
+            sig = compute(native)
+            if sig is not None:
+                return sig
+    return _wire_sequences(dag, cache)
+
+
+def _signatures_differ(a: Any, b: Any) -> bool:
+    """Compare two signatures from :func:`_signature` (either representation)."""
+    if type(a) is type(b):
+        return bool(a != b)
+    if not isinstance(a, dict):
+        a = a.to_dict()
+    if not isinstance(b, dict):
+        b = b.to_dict()
+    return bool(a != b)
+
+
+def _native_repr_cache() -> Any:
+    """Return a native repr cache when the native passes are available."""
+    from quspect.dag.passes._native import enabled, native_core
+
+    core = native_core()
+    return core._ReprCache() if core is not None and enabled() else None
+
+
 # =========================================================================
 # PassManager
 # =========================================================================
@@ -281,7 +318,8 @@ class PassManager:
         self.stats_history.clear()
         current = dag
         repr_cache: dict[int, tuple[object, str]] = {}
-        signature = _wire_sequences(current, repr_cache)
+        native_cache = _native_repr_cache()
+        signature = _signature(current, repr_cache, native_cache)
 
         for iteration in range(max_iterations):
             initial_nodes = current.num_nodes()
@@ -309,14 +347,14 @@ class PassManager:
                     and current is dag_before
                     and current.modification_count == version_before
                 ):
-                    signature = _wire_sequences(current, repr_cache)
+                    signature = _signature(current, repr_cache, native_cache)
 
                 stats = PassStats(
                     pass_name=p.name,
                     nodes_before=nodes_before,
                     nodes_after=nodes_after,
                     elapsed_ms=(t1 - t0) * 1000,
-                    structure_changed=signature != signature_before,
+                    structure_changed=_signatures_differ(signature, signature_before),
                 )
                 self.stats_history.append(stats)
 

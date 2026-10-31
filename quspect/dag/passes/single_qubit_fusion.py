@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Collection
+from typing import Any
 
 import numpy as np
 
 from quspect.dag.dag_circuit import DAGCircuit
 from quspect.dag.dag_node import DAGEdge
+from quspect.dag.passes._native import native_core, use_native
 from quspect.dag.passes.base import BasePass
 from quspect.gates.gate import Gate
 
@@ -219,6 +221,8 @@ class SingleQubitGateFusion(BasePass):
         )
         self._cost_cache: dict[tuple[str, tuple[float, ...]], int] = {}
         self._run_cache: dict[tuple[object, ...], list[Gate] | None] = {}
+        # Same memo on the native side (keyed by gate names and parameter bits).
+        self._native_run_cache: Any = None
 
     def run(self, dag: DAGCircuit) -> DAGCircuit:
         """Execute single-qubit gate fusion on the DAG.
@@ -229,6 +233,17 @@ class SingleQubitGateFusion(BasePass):
         Returns:
             The optimized DAG (modified in-place).
         """
+        if (
+            self.basis_gates is not None
+            and type(self) is SingleQubitGateFusion
+            and use_native(dag, logger)
+        ):
+            if self._native_run_cache is None:
+                self._native_run_cache = native_core()._FusionRunCache()  # type: ignore[union-attr]
+            if dag._native_single_qubit_resynthesis(  # type: ignore[attr-defined]
+                self, self._native_run_cache
+            ):
+                return dag
         fuse_on_wire = (
             self._fuse_on_wire if self.basis_gates is None else self._resynth_on_wire
         )
@@ -312,6 +327,22 @@ class SingleQubitGateFusion(BasePass):
             return None
         return replacement
 
+    def _resynthesize_block(self, gates: list[Gate]) -> list[Gate] | None:
+        """Memoized :meth:`_resynthesized_run` for one run (basis mode).
+
+        The decision only depends on the gate sequence: memoize it (the
+        parameter reprs keep 0.0 and -0.0 apart, which Gate equality does
+        not). The native pass calls this for runs it has not seen yet.
+        """
+        basis = self.basis_gates
+        assert basis is not None
+        key = tuple((g, tuple(map(repr, g.params))) for g in gates)
+        if key in self._run_cache:
+            return self._run_cache[key]
+        replacement = self._resynthesized_run(gates, basis)
+        self._run_cache[key] = replacement
+        return replacement
+
     def _resynth_on_wire(self, dag: DAGCircuit, wire: str) -> bool:
         """Resynthesize maximal single-qubit runs on one wire (basis mode).
 
@@ -349,15 +380,7 @@ class SingleQubitGateFusion(BasePass):
                 instr = dag.get_node(nid).instruction
                 assert instr is not None and instr.gate is not None
                 gates.append(instr.gate)
-            # The decision only depends on the gate sequence: memoize it (the
-            # parameter reprs keep 0.0 and -0.0 apart, which Gate equality
-            # does not).
-            key = tuple((g, tuple(map(repr, g.params))) for g in gates)
-            if key in self._run_cache:
-                replacement = self._run_cache[key]
-            else:
-                replacement = self._resynthesized_run(gates, basis)
-                self._run_cache[key] = replacement
+            replacement = self._resynthesize_block(gates)
             if replacement is None:
                 continue
 
