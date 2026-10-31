@@ -377,6 +377,36 @@ TEST(OneQubitGauge, AbsorbMemoKeepsExistingEntries) {
     EXPECT_EQ(main.MemoGet(b), nullptr);
 }
 
+// 运算语义的设置：读回、非法取值、恢复默认；单位阵与 Pauli 矩阵的长度与语义无关。
+TEST(OneQubitGauge, ArithmeticSettingsRoundTrip) {
+    using quspect::native::transpiler::GaugeArithmetic;
+    using quspect::native::transpiler::GetGaugeArithmetic;
+    using quspect::native::transpiler::SetGaugeArithmetic;
+    const GaugeArithmetic defaults;
+    GaugeArithmetic plain;
+    plain.py_mul = 0;
+    plain.np_scalar_mul = 0;
+    plain.scalar_arr_mul = 2;
+    plain.py_div_fma = false;
+    plain.np_div_fma = false;
+    SetGaugeArithmetic(plain);
+    const GaugeArithmetic got = GetGaugeArithmetic();
+    EXPECT_EQ(got.py_mul, 0);
+    EXPECT_EQ(got.np_scalar_mul, 0);
+    EXPECT_EQ(got.scalar_arr_mul, 2);
+    EXPECT_FALSE(got.py_div_fma);
+    EXPECT_FALSE(got.np_div_fma);
+    const Matrix2 identity = {Complex{1, 0}, Complex{0, 0}, Complex{0, 0}, Complex{1, 0}};
+    ASSERT_TRUE(FastLength(identity, CzModel()).has_value());
+    EXPECT_EQ(*FastLength(identity, CzModel()), 0);
+    GaugeArithmetic bad;
+    bad.py_mul = 3;
+    EXPECT_THROW(SetGaugeArithmetic(bad), std::invalid_argument);
+    SetGaugeArithmetic(defaults);
+    EXPECT_EQ(GetGaugeArithmetic().py_mul, 1);
+    EXPECT_TRUE(GetGaugeArithmetic().np_div_fma);
+}
+
 TEST(OneQubitGauge, BeamSearchRejectsBadInput) {
     GaugeBeamSearch search(1, 4, 2, 1, CzModel());
     EXPECT_THROW(search.Prepare({1}, {0}, {0}, {0}, {-1}, {-1}, {1}, {0.0}, {0}, {0}), std::invalid_argument);

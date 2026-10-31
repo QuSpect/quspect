@@ -549,15 +549,14 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
 }
 
 void SetGaugeArithmetic(const GaugeArithmetic& arith) {
-    auto mode = [](int m) {
+    for (int m : {arith.py_mul, arith.np_scalar_mul, arith.scalar_arr_mul}) {
         if (m < 0 || m > 2) {
             throw std::invalid_argument("SetGaugeArithmetic: multiplication modes are 0, 1 or 2");
         }
-        return m;
-    };
-    g_py_mul.store(mode(arith.py_mul));
-    g_np_scalar_mul.store(mode(arith.np_scalar_mul));
-    g_scalar_arr_mul.store(mode(arith.scalar_arr_mul));
+    }
+    g_py_mul.store(arith.py_mul);
+    g_np_scalar_mul.store(arith.np_scalar_mul);
+    g_scalar_arr_mul.store(arith.scalar_arr_mul);
     g_py_div_fma.store(arith.py_div_fma);
     g_np_div_fma.store(arith.np_div_fma);
 }
