@@ -254,6 +254,9 @@ set(RUNTIME_SRCS
 
 # IR bridge layer
 set(IR_SRCS
+  src/ir/circuit.cpp
+  src/ir/dag_store.cpp
+  src/ir/qasm2_parser.cpp
   src/ir/qsal_decoder.cpp
   src/ir/program_builder.cpp
   src/ir/validation.cpp
@@ -285,15 +288,19 @@ set(TRANSPILER_SRCS
   src/transpiler/su4_routing.cpp
 )
 # 路由计分必须与 Python 参考实现逐位一致：禁止把 a + b * c 合并成 FMA（arm64 上 clang 默认会合并）。
+# QASM 参数表达式求值同理（结果必须与 Python 的 float 运算逐位一致）。
+set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} src/ir/qasm2_parser.cpp)
 if(NOT MSVC)
-  set_source_files_properties(${TRANSPILER_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(${TRANSPILER_SRCS} PROPERTIES COMPILE_OPTIONS "/fp:precise")
+  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
 # pybind11 module
 set(PYBIND_SRCS
   src/pybind/module.cpp
+  src/pybind/dag_bindings.cpp
+  src/pybind/ir_bindings.cpp
 )
 
 # ============================================================
@@ -485,6 +492,10 @@ if(QSPECT_BUILD_TESTS)
     tests/test_dilation_layout.cpp
     tests/test_one_qubit_gauge.cpp
     tests/test_cx_orientation.cpp
+    tests/test_small_vector.cpp
+    tests/test_dag_store.cpp
+    tests/test_ir_circuit.cpp
+    tests/test_qasm2_parser.cpp
   )
 
   foreach(test_src ${TEST_SRCS})

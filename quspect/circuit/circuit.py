@@ -994,6 +994,29 @@ class QuantumCircuit:
         circuit._instructions = list(snapshot)
         return circuit
 
+    def _to_native(self) -> Any:
+        """Return this circuit as a native C++ circuit, or ``None``.
+
+        The native circuit (``_Circuit``) stores the instructions
+        contiguously with their per-wire predecessors (an implicit DAG) and
+        keeps the original instruction objects, so
+        :meth:`_from_native` returns an equal circuit.  ``None`` is returned
+        when the native extension is not built.
+        """
+        from quspect.circuit._native import native_ir
+
+        core = native_ir()
+        if core is None:
+            return None
+        return core._Circuit.from_instructions(self._instructions)
+
+    @classmethod
+    def _from_native(cls, native: Any, *, name: str = "") -> QuantumCircuit:
+        """Build a circuit from a native C++ circuit (see :meth:`_to_native`)."""
+        circuit = cls(name=name)
+        circuit._instructions = native.to_instructions()
+        return circuit
+
     def dagger(self) -> QuantumCircuit:
         """Return the Hermitian conjugate (adjoint) of this circuit.
 

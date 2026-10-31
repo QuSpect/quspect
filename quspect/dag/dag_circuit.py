@@ -10,12 +10,21 @@ so that local queries (wire neighbours, adjacency tests, node removal)
 cost O(degree) instead of O(edges). Wire traversal walks the per-wire
 chain from the wire's INPUT node, and the topological order is cached
 until the next structural modification.
+
+The graph storage lives in the C++ native core (``_DagCore``, built on
+``quspect_native/ir/dag_store.hpp``) whenever the extension is available;
+:class:`_PyDagCore` is the pure-Python reference implementation with
+identical semantics, used when the extension has not been built.  Nodes
+remain :class:`~quspect.dag.dag_node.DAGNode` Python objects in both cases.
 """
 
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
+from quspect._native_loader import load_core
 from quspect.dag.dag_node import DAGEdge, DAGNode, DAGNodeType
 
 #: An adjacency entry: ``(edge sequence number, neighbour node id, wire)``.
@@ -47,32 +56,36 @@ def _node_wires(node: DAGNode) -> list[str]:
     return wires
 
 
-class DAGCircuit:
-    """DAG representation of a quantum circuit.
+def _scan_wire_fallback(dag: Any, wire: str) -> list[int]:
+    """Scan the topological order for the nodes on ``wire``.
 
-    A DAGCircuit is a directed acyclic graph that makes qubit dependencies
-    explicit. It is the primary intermediate representation for circuit
-    compilation, optimization, and analysis.
+    This is the :meth:`DAGCircuit.nodes_on_wire` fallback for wires that
+    are not a simple chain from their INPUT node (and, in the native core,
+    for wire labels that are not of the canonical ``q<i>`` / ``c<i>``
+    form).
+    """
+    nodes = dag._nodes
+    result = []
+    for nid in dag.topological_order():
+        node = nodes[nid]
+        # Check if wire is in the qubits or clbits of this node
+        if wire.startswith("q"):
+            q_idx = int(wire[1:])
+            if q_idx in node.qubits:
+                result.append(nid)
+        elif wire.startswith("c"):
+            c_idx = int(wire[1:])
+            if c_idx in node.clbits:
+                result.append(nid)
+    return result
 
-    The graph has explicit INPUT and OUTPUT nodes marking the boundaries
-    of each qubit and classical bit line. Between them, OPERATION nodes
-    are connected by edges that follow the qubit/bit flow.
 
-    .. note::
+class _PyDagCore:
+    """Pure-Python graph storage for :class:`DAGCircuit`.
 
-        Adjacency is stored per node, ordered by edge insertion, so that
-        local updates are O(degree). The topological order is cached and
-        recomputed lazily after a structural change. Node IDs are
-        assigned sequentially starting from 0 for INPUT nodes, N for
-        OUTPUT nodes, and continuing for OPERATION nodes.
-
-    Example:
-        >>> from quspect import QuantumCircuit
-        >>> circ = QuantumCircuit()
-        >>> circ.h(0).cx(0, 1)
-        >>> dag = circ.to_dag()
-        >>> dag.num_nodes()
-        6  # 2 inputs (q0,q1) + 2 gates + 2 outputs (q0,q1)
+    This is the reference implementation of the storage protocol that the
+    C++ ``_DagCore`` implements as well (same methods, same results, same
+    exceptions); :class:`DAGCircuit` derives from whichever is available.
     """
 
     def __init__(self) -> None:
@@ -104,6 +117,10 @@ class DAGCircuit:
         self._journal: list[_JournalEntry] | None = None
         self._txn_depth: int = 0
 
+    def _nodes_dict(self) -> dict[int, DAGNode]:
+        """Return the ``node_id -> DAGNode`` dict (shared, do not mutate)."""
+        return self._nodes
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -117,19 +134,6 @@ class DAGCircuit:
     def num_clbits(self) -> int:
         """Return the number of classical bit lines in this DAG."""
         return self._num_clbits
-
-    @property
-    def nodes(self) -> list[DAGNode]:
-        """Return all nodes, sorted by node_id."""
-        return [self._nodes[i] for i in sorted(self._nodes)]
-
-    @property
-    def edges(self) -> list[DAGEdge]:
-        """Return all edges in insertion order."""
-        if not self._edges_in_order:
-            self._edges = dict(sorted(self._edges.items()))
-            self._edges_in_order = True
-        return list(self._edges.values())
 
     @property
     def modification_count(self) -> int:
@@ -160,37 +164,6 @@ class DAGCircuit:
     def num_edges(self) -> int:
         """Return the total number of edges."""
         return len(self._edges)
-
-    def get_node(self, node_id: int) -> DAGNode:
-        """Get a node by its ID.
-
-        Args:
-            node_id: The node identifier.
-
-        Returns:
-            The DAGNode with the given ID.
-
-        Raises:
-            KeyError: If the node_id is not found.
-        """
-        return self._nodes[node_id]
-
-    def has_node(self, node_id: int) -> bool:
-        """Return whether a node with the given ID exists.
-
-        Args:
-            node_id: The node identifier.
-
-        Returns:
-            True if the node is part of the DAG.
-
-        Example:
-            >>> from quspect import QuantumCircuit
-            >>> dag = QuantumCircuit().h(0).to_dag()
-            >>> dag.has_node(0), dag.has_node(99)
-            (True, False)
-        """
-        return node_id in self._nodes
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -354,35 +327,14 @@ class DAGCircuit:
             self._pos.pop(node_id, None)
         self._touch()
 
-    def remove_node_and_reconnect(self, node_id: int) -> None:
-        """Remove an operation node and splice each of its wires back together.
+    def _remove_node_and_reconnect(self, node_id: int, wires: list[str]) -> None:
+        """Remove ``node_id`` and reconnect predecessor/successor on ``wires``.
 
-        For every wire of the node (qubits in instruction order, then
-        clbits) the wire predecessor is connected to the wire successor,
-        so the DAG stays a valid circuit DAG. Runs in O(degree) time.
-
-        Args:
-            node_id: The ID of the node to remove.
-
-        Raises:
-            KeyError: If the node_id is not found.
-
-        Example:
-            >>> from quspect import QuantumCircuit
-            >>> dag = QuantumCircuit().h(0).x(0).to_dag()
-            >>> h = dag.operation_nodes()[0].node_id
-            >>> dag.remove_node_and_reconnect(h)
-            >>> [n.instruction.gate.name for n in dag.operation_nodes()]
-            ['x']
+        ``wires`` are distinct wire labels in reconnection order (see
+        :meth:`DAGCircuit.remove_node_and_reconnect`).
         """
-        node = self.get_node(node_id)
-        if node.instruction is not None:
-            wires = [f"q{q}" for q in node.instruction.qubits]
-            wires.extend(f"c{c}" for c in node.instruction.clbits)
-        else:
-            wires = _node_wires(node)
         reconnect: list[tuple[int, int, str]] = []
-        for wire in dict.fromkeys(wires):
+        for wire in wires:
             pred = self.wire_predecessor(node_id, wire)
             succ = self.wire_successor(node_id, wire)
             if pred is not None and succ is not None:
@@ -391,44 +343,120 @@ class DAGCircuit:
         for pred, succ, wire in reconnect:
             self.add_edge(DAGEdge(source_id=pred, target_id=succ, wire=wire))
 
-    def substitute_node_instruction(self, node_id: int, instruction: object) -> None:
-        """Replace the instruction of an operation node in place.
+    def _bump_version(self) -> None:
+        """Count a payload change (``DAGCircuit.substitute_node_instruction``)."""
+        self._version += 1
 
-        The node keeps its ID, wires and edges; only its payload changes.
-        Using this method (rather than assigning ``node.instruction``)
-        also records the change in :attr:`modification_count`.
+    def _edge_triples(self) -> list[tuple[int, int, str]]:
+        """Return ``(source_id, target_id, wire)`` for every edge, in edge order."""
+        if not self._edges_in_order:
+            self._edges = dict(sorted(self._edges.items()))
+            self._edges_in_order = True
+        return [(e.source_id, e.target_id, e.wire) for e in self._edges.values()]
+
+    def _build_from_instructions(
+        self, instructions: Sequence[Any], num_qubits: int, num_clbits: int
+    ) -> None:
+        """Populate an empty DAG from a sequence of circuit instructions.
+
+        This is the body of :meth:`CircuitCompiler.compile`: INPUT nodes for
+        every qubit and clbit line, one OPERATION node per instruction
+        connected to the previous node on each of its wires, then OUTPUT
+        nodes.
 
         Args:
-            node_id: The node whose instruction is replaced.
-            instruction: The new
-                :class:`~quspect.circuit.instruction.CircuitInstruction`.
-                It must act on the same qubits/clbits as the old one.
-
-        Raises:
-            KeyError: If the node_id is not found.
-
-        Example:
-            >>> from quspect import QuantumCircuit
-            >>> from quspect.circuit.instruction import (
-            ...     CircuitInstruction, InstructionType)
-            >>> from quspect.gates.standard import X
-            >>> dag = QuantumCircuit().h(0).to_dag()
-            >>> h = dag.operation_nodes()[0].node_id
-            >>> dag.substitute_node_instruction(
-            ...     h, CircuitInstruction(InstructionType.GATE, gate=X, qubits=(0,)))
-            >>> dag.get_node(h).instruction.gate.name
-            'x'
+            instructions: The circuit instructions in program order.
+            num_qubits: Number of qubit lines.
+            num_clbits: Number of classical bit lines.
         """
-        from quspect.circuit.instruction import CircuitInstruction
+        self.set_qubit_count(num_qubits)
+        self.set_clbit_count(num_clbits)
 
-        node = self._nodes[node_id]
-        if not isinstance(instruction, CircuitInstruction):
-            raise TypeError(
-                "instruction must be a CircuitInstruction, got "
-                f"{type(instruction).__name__}."
+        # Track the next available node_id
+        next_id = 0
+
+        # Step 2: Create INPUT nodes
+        qubit_input_nodes: dict[int, int] = {}
+        for q in range(num_qubits):
+            node = DAGNode(
+                node_id=next_id,
+                node_type=DAGNodeType.INPUT,
+                qubits={q},
+                label=f"IN:q{q}",
             )
-        node.instruction = instruction
-        self._version += 1
+            self.add_node(node)
+            qubit_input_nodes[q] = next_id
+            next_id += 1
+
+        clbit_input_nodes: dict[int, int] = {}
+        for c in range(num_clbits):
+            node = DAGNode(
+                node_id=next_id,
+                node_type=DAGNodeType.INPUT,
+                clbits={c},
+                label=f"IN:c{c}",
+            )
+            self.add_node(node)
+            clbit_input_nodes[c] = next_id
+            next_id += 1
+
+        # Step 4: Maintain last_node per wire
+        qubit_last: dict[int, int] = dict(qubit_input_nodes)
+        clbit_last: dict[int, int] = dict(clbit_input_nodes)
+
+        # Step 5: Process each instruction
+        for instr in instructions:
+            involved_qubits = set(instr.qubits)
+            involved_clbits = set(instr.clbits)
+            op_node = DAGNode(
+                node_id=next_id,
+                node_type=DAGNodeType.OPERATION,
+                instruction=instr,
+                qubits=involved_qubits,
+                clbits=involved_clbits,
+            )
+            self.add_node(op_node)
+            op_id = next_id
+            next_id += 1
+
+            # Add edges from the last node on each involved wire
+            for q in involved_qubits:
+                self.add_edge(
+                    DAGEdge(source_id=qubit_last[q], target_id=op_id, wire=f"q{q}")
+                )
+                qubit_last[q] = op_id
+            for c in involved_clbits:
+                self.add_edge(
+                    DAGEdge(source_id=clbit_last[c], target_id=op_id, wire=f"c{c}")
+                )
+                clbit_last[c] = op_id
+
+        # Step 6: Create OUTPUT nodes and connect last nodes
+        for q in range(num_qubits):
+            out_node = DAGNode(
+                node_id=next_id,
+                node_type=DAGNodeType.OUTPUT,
+                qubits={q},
+                label=f"OUT:q{q}",
+            )
+            self.add_node(out_node)
+            self.add_edge(
+                DAGEdge(source_id=qubit_last[q], target_id=next_id, wire=f"q{q}")
+            )
+            next_id += 1
+
+        for c in range(num_clbits):
+            out_node = DAGNode(
+                node_id=next_id,
+                node_type=DAGNodeType.OUTPUT,
+                clbits={c},
+                label=f"OUT:c{c}",
+            )
+            self.add_node(out_node)
+            self.add_edge(
+                DAGEdge(source_id=clbit_last[c], target_id=next_id, wire=f"c{c}")
+            )
+            next_id += 1
 
     def set_qubit_count(self, n: int) -> None:
         """Set the number of qubit lines.
@@ -644,14 +672,6 @@ class DAGCircuit:
             if w == wire:
                 result = tgt
         return result
-
-    def input_nodes(self) -> list[DAGNode]:
-        """Return all INPUT boundary nodes."""
-        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.INPUT]
-
-    def output_nodes(self) -> list[DAGNode]:
-        """Return all OUTPUT boundary nodes."""
-        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.OUTPUT]
 
     def operation_nodes(self) -> list[DAGNode]:
         """Return all OPERATION nodes in topological order."""
@@ -883,10 +903,6 @@ class DAGCircuit:
 
         return layers_result
 
-    # ------------------------------------------------------------------
-    # Critical path
-    # ------------------------------------------------------------------
-
     def critical_path_length(self) -> int:
         """Return the length of the critical path through the DAG.
 
@@ -979,20 +995,7 @@ class DAGCircuit:
         walked = self._walk_wire(wire)
         if walked is not None:
             return walked
-        topo = self._topological_order_cached()
-        result = []
-        for nid in topo:
-            node = self._nodes[nid]
-            # Check if wire is in the qubits or clbits of this node
-            if wire.startswith("q"):
-                q_idx = int(wire[1:])
-                if q_idx in node.qubits:
-                    result.append(nid)
-            elif wire.startswith("c"):
-                c_idx = int(wire[1:])
-                if c_idx in node.clbits:
-                    result.append(nid)
-        return result
+        return _scan_wire_fallback(self, wire)
 
     def qubit_wires(self) -> list[int]:
         """Return the list of qubit indices present in this DAG."""
@@ -1002,9 +1005,150 @@ class DAGCircuit:
         """Return the list of classical bit indices present in this DAG."""
         return list(range(self._num_clbits))
 
-    # ------------------------------------------------------------------
-    # Statistics / Summary
-    # ------------------------------------------------------------------
+
+_native: Any = load_core()
+if TYPE_CHECKING:
+    _DagCoreBase = _PyDagCore
+    _MixinBase = _PyDagCore
+elif _native is not None and hasattr(_native, "_DagCore"):
+    _native._register_dag_types(
+        DAGNodeType.INPUT,
+        DAGNodeType.OUTPUT,
+        DAGNodeType.OPERATION,
+        DAGNode,
+        _scan_wire_fallback,
+    )
+    _DagCoreBase = _native._DagCore
+    _MixinBase = object
+else:
+    _DagCoreBase = _PyDagCore
+    _MixinBase = object
+
+
+class _DAGCircuitAPI(_MixinBase):
+    """Node-level :class:`DAGCircuit` API shared by both storage cores."""
+
+    _nodes: dict[int, DAGNode]
+
+    @property
+    def nodes(self) -> list[DAGNode]:
+        """Return all nodes, sorted by node_id."""
+        return [self._nodes[i] for i in sorted(self._nodes)]
+
+    @property
+    def edges(self) -> list[DAGEdge]:
+        """Return all edges in insertion order."""
+        return [
+            DAGEdge(source_id=s, target_id=t, wire=w)
+            for s, t, w in self._edge_triples()
+        ]
+
+    def get_node(self, node_id: int) -> DAGNode:
+        """Get a node by its ID.
+
+        Args:
+            node_id: The node identifier.
+
+        Returns:
+            The DAGNode with the given ID.
+
+        Raises:
+            KeyError: If the node_id is not found.
+        """
+        return self._nodes[node_id]
+
+    def has_node(self, node_id: int) -> bool:
+        """Return whether a node with the given ID exists.
+
+        Args:
+            node_id: The node identifier.
+
+        Returns:
+            True if the node is part of the DAG.
+
+        Example:
+            >>> from quspect import QuantumCircuit
+            >>> dag = QuantumCircuit().h(0).to_dag()
+            >>> dag.has_node(0), dag.has_node(99)
+            (True, False)
+        """
+        return node_id in self._nodes
+
+    def remove_node_and_reconnect(self, node_id: int) -> None:
+        """Remove an operation node and splice each of its wires back together.
+
+        For every wire of the node (qubits in instruction order, then
+        clbits) the wire predecessor is connected to the wire successor,
+        so the DAG stays a valid circuit DAG. Runs in O(degree) time.
+
+        Args:
+            node_id: The ID of the node to remove.
+
+        Raises:
+            KeyError: If the node_id is not found.
+
+        Example:
+            >>> from quspect import QuantumCircuit
+            >>> dag = QuantumCircuit().h(0).x(0).to_dag()
+            >>> h = dag.operation_nodes()[0].node_id
+            >>> dag.remove_node_and_reconnect(h)
+            >>> [n.instruction.gate.name for n in dag.operation_nodes()]
+            ['x']
+        """
+        node = self.get_node(node_id)
+        if node.instruction is not None:
+            wires = [f"q{q}" for q in node.instruction.qubits]
+            wires.extend(f"c{c}" for c in node.instruction.clbits)
+        else:
+            wires = _node_wires(node)
+        self._remove_node_and_reconnect(node_id, list(dict.fromkeys(wires)))
+
+    def substitute_node_instruction(self, node_id: int, instruction: object) -> None:
+        """Replace the instruction of an operation node in place.
+
+        The node keeps its ID, wires and edges; only its payload changes.
+        Using this method (rather than assigning ``node.instruction``)
+        also records the change in :attr:`modification_count`.
+
+        Args:
+            node_id: The node whose instruction is replaced.
+            instruction: The new
+                :class:`~quspect.circuit.instruction.CircuitInstruction`.
+                It must act on the same qubits/clbits as the old one.
+
+        Raises:
+            KeyError: If the node_id is not found.
+
+        Example:
+            >>> from quspect import QuantumCircuit
+            >>> from quspect.circuit.instruction import (
+            ...     CircuitInstruction, InstructionType)
+            >>> from quspect.gates.standard import X
+            >>> dag = QuantumCircuit().h(0).to_dag()
+            >>> h = dag.operation_nodes()[0].node_id
+            >>> dag.substitute_node_instruction(
+            ...     h, CircuitInstruction(InstructionType.GATE, gate=X, qubits=(0,)))
+            >>> dag.get_node(h).instruction.gate.name
+            'x'
+        """
+        from quspect.circuit.instruction import CircuitInstruction
+
+        node = self._nodes[node_id]
+        if not isinstance(instruction, CircuitInstruction):
+            raise TypeError(
+                "instruction must be a CircuitInstruction, got "
+                f"{type(instruction).__name__}."
+            )
+        node.instruction = instruction
+        self._bump_version()
+
+    def input_nodes(self) -> list[DAGNode]:
+        """Return all INPUT boundary nodes."""
+        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.INPUT]
+
+    def output_nodes(self) -> list[DAGNode]:
+        """Return all OUTPUT boundary nodes."""
+        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.OUTPUT]
 
     def summary(self) -> str:
         """Return a human-readable summary of the DAG.
@@ -1014,8 +1158,8 @@ class DAGCircuit:
         """
         lines = [
             f"DAGCircuit: {self.num_nodes()} nodes, {self.num_edges()} edges",
-            f"  Qubits: {self._num_qubits}",
-            f"  Clbits: {self._num_clbits}",
+            f"  Qubits: {self.num_qubits}",
+            f"  Clbits: {self.num_clbits}",
             f"  INPUT nodes: {len(self.input_nodes())}",
             f"  OUTPUT nodes: {len(self.output_nodes())}",
             f"  OPERATION nodes: {len(self.operation_nodes())}",
@@ -1023,3 +1167,46 @@ class DAGCircuit:
             f"  Depth (layers): {len(self.layers())}",
         ]
         return "\n".join(lines)
+
+
+class DAGCircuit(_DAGCircuitAPI, _DagCoreBase):
+    """DAG representation of a quantum circuit.
+
+    A DAGCircuit is a directed acyclic graph that makes qubit dependencies
+    explicit. It is the primary intermediate representation for circuit
+    compilation, optimization, and analysis.
+
+    The graph has explicit INPUT and OUTPUT nodes marking the boundaries
+    of each qubit and classical bit line. Between them, OPERATION nodes
+    are connected by edges that follow the qubit/bit flow.
+
+    .. note::
+
+        Adjacency is stored per node, ordered by edge insertion, so that
+        local updates are O(degree). The storage is the C++ native core
+        when the extension is available (pure Python otherwise). The
+        topological order is cached and recomputed lazily after a
+        structural change. Node IDs are
+        assigned sequentially starting from 0 for INPUT nodes, N for
+        OUTPUT nodes, and continuing for OPERATION nodes.
+
+    Example:
+        >>> from quspect import QuantumCircuit
+        >>> circ = QuantumCircuit()
+        >>> circ.h(0).cx(0, 1)
+        >>> dag = circ.to_dag()
+        >>> dag.num_nodes()
+        6  # 2 inputs (q0,q1) + 2 gates + 2 outputs (q0,q1)
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._nodes = self._nodes_dict()
+
+
+class _PyDAGCircuit(_DAGCircuitAPI, _PyDagCore):
+    """:class:`DAGCircuit` API on the pure-Python core (reference / tests)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._nodes = self._nodes_dict()
