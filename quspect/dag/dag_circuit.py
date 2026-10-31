@@ -354,6 +354,40 @@ class _PyDagCore:
             self._edges_in_order = True
         return [(e.source_id, e.target_id, e.wire) for e in self._edges.values()]
 
+    def _wire_sequences(
+        self, cache: dict[int, tuple[object, str]] | None
+    ) -> dict[int, list[str]]:
+        """Per-wire instruction reprs of the operation nodes, in topological order.
+
+        Qubit ``q`` maps to key ``q`` and clbit ``c`` to ``-1 - c``.  ``cache``
+        maps ``id(instruction)`` to ``(instruction, repr)`` (see
+        :func:`quspect.dag.passes.base._wire_sequences`).
+        """
+        wires: dict[int, list[str]] = {}
+        for node in self.operation_nodes():
+            instr = node.instruction
+            if cache is None:
+                key = repr(instr)
+            else:
+                hit = cache.get(id(instr))
+                if hit is not None and hit[0] is instr:
+                    key = hit[1]
+                else:
+                    key = repr(instr)
+                    cache[id(instr)] = (instr, key)
+            for q in node.qubits:
+                seq = wires.get(q)
+                if seq is None:
+                    wires[q] = seq = []
+                seq.append(key)
+            for c in node.clbits:
+                w = -1 - c
+                seq = wires.get(w)
+                if seq is None:
+                    wires[w] = seq = []
+                seq.append(key)
+        return wires
+
     def _build_from_instructions(
         self, instructions: Sequence[Any], num_qubits: int, num_clbits: int
     ) -> None:
@@ -1202,6 +1236,10 @@ class DAGCircuit(_DAGCircuitAPI, _DagCoreBase):
     def __init__(self) -> None:
         super().__init__()
         self._nodes = self._nodes_dict()
+        # Hot lookups bound straight to the node dict (same results and
+        # KeyError as the methods they shadow, without a Python frame).
+        self.get_node = self._nodes.__getitem__  # type: ignore[method-assign,assignment]
+        self.has_node = self._nodes.__contains__  # type: ignore[method-assign,assignment]
 
 
 class _PyDAGCircuit(_DAGCircuitAPI, _PyDagCore):

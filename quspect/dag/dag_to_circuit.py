@@ -11,7 +11,14 @@ from __future__ import annotations
 import logging
 
 from quspect.circuit.circuit import QuantumCircuit
-from quspect.circuit.instruction import InstructionType
+from quspect.circuit.instruction import (
+    _BARRIER,
+    _CHANNEL,
+    _GATE,
+    _MEASURE,
+    CircuitInstruction,
+    InstructionType,
+)
 from quspect.dag.dag_circuit import DAGCircuit
 
 logger = logging.getLogger(__name__)
@@ -71,6 +78,7 @@ class DAGToCircuitCompiler:
             len(op_nodes),
         )
 
+        instructions = circuit._instructions
         for node in op_nodes:
             if node.instruction is None:
                 logger.warning(
@@ -80,6 +88,29 @@ class DAGToCircuitCompiler:
                 continue
 
             instr = node.instruction
+
+            # Fast path: the instruction the circuit methods below would build
+            # is equal to ``instr`` itself (unlabelled, tuple operands, and not
+            # a qubit-less barrier), so the immutable value is reused as is.
+            if (
+                type(instr) is CircuitInstruction
+                and instr.label == ""
+                and type(instr.qubits) is tuple
+                and type(instr.clbits) is tuple
+            ):
+                kind = instr.type
+                if (
+                    (kind is _GATE and instr.gate is not None)
+                    or kind is _MEASURE
+                    or (kind is _BARRIER and instr.qubits and not instr.clbits)
+                    or (
+                        kind is _CHANNEL
+                        and instr.channel is not None
+                        and not instr.clbits
+                    )
+                ):
+                    instructions.append(instr)
+                    continue
 
             if instr.type == InstructionType.GATE:
                 if instr.gate is None:

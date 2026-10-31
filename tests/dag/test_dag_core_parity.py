@@ -98,6 +98,8 @@ def _snapshot(dag: Any) -> dict[str, Any]:
         "wires": {w: _call(dag, "nodes_on_wire", w) for w in wires},
         "layers": _call(dag, "layers"),
         "critical": _call(dag, "critical_path_length"),
+        "wire_sequences": _call(dag, "_wire_sequences", None),
+        "wire_sequences_cached": _call(dag, "_wire_sequences", {}),
         "version": dag.modification_count,
         "counts": (dag.num_nodes(), dag.num_edges(), dag.num_qubits, dag.num_clbits),
         "adj": {

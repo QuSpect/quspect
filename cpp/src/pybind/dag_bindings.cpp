@@ -403,6 +403,64 @@ public:
         return py::reinterpret_steal<py::list>(PyList_GetSlice(cached.ptr(), 0, PY_SSIZE_T_MAX));
     }
 
+    // 每条线上依次出现的操作指令的 repr（quspect.dag.passes.base._wire_sequences 的实现）：
+    // qubit q 的键为 q，clbit c 的键为 -1 - c。cache 为 id(instruction) -> (instruction, repr)。
+    py::dict wire_sequences(const py::object& cache) {
+        const std::vector<NodeId>& order = topo();
+        const bool use_cache = !cache.is_none();
+        PyObject* cache_dict = cache.ptr();
+        py::dict wires;
+        for (NodeId id : order) {
+            const NodeEntry* e = objects_.find(id);
+            if (e->kind != DagNodeKind::kOperation) {
+                continue;
+            }
+            PyObject* node = e->obj.ptr();
+            py::object instr = py::reinterpret_steal<py::object>(PyObject_GetAttr(node, N().instruction.ptr()));
+            if (!instr) {
+                throw py::error_already_set();
+            }
+            py::object key;
+            if (!use_cache) {
+                key = py::reinterpret_steal<py::object>(PyObject_Repr(instr.ptr()));
+                if (!key) {
+                    throw py::error_already_set();
+                }
+            } else {
+                py::object ident = py::reinterpret_steal<py::object>(PyLong_FromVoidPtr(instr.ptr()));
+                PyObject* hit = PyDict_GetItemWithError(cache_dict, ident.ptr());
+                if (hit == nullptr && PyErr_Occurred()) {
+                    throw py::error_already_set();
+                }
+                if (hit != nullptr && hit != Py_None) {
+                    py::object first = py::reinterpret_steal<py::object>(PySequence_GetItem(hit, 0));
+                    if (!first) {
+                        throw py::error_already_set();
+                    }
+                    if (first.ptr() == instr.ptr()) {
+                        key = py::reinterpret_steal<py::object>(PySequence_GetItem(hit, 1));
+                        if (!key) {
+                            throw py::error_already_set();
+                        }
+                    }
+                }
+                if (!key) {
+                    key = py::reinterpret_steal<py::object>(PyObject_Repr(instr.ptr()));
+                    if (!key) {
+                        throw py::error_already_set();
+                    }
+                    py::tuple entry = py::make_tuple(instr, key);
+                    if (PyDict_SetItem(cache_dict, ident.ptr(), entry.ptr()) != 0) {
+                        throw py::error_already_set();
+                    }
+                }
+            }
+            append_wire_keys(wires, node, N().qubits.ptr(), false, key);
+            append_wire_keys(wires, node, N().clbits.ptr(), true, key);
+        }
+        return wires;
+    }
+
     // ---- 线路 -> DAG（CircuitCompiler.compile 的批量实现） ----
 
     void build_from_instructions(const py::sequence& instructions, std::int64_t num_qubits, std::int64_t num_clbits) {
@@ -572,6 +630,47 @@ private:
                 throw py::error_already_set();
             }
             out.push_back(bit_wire(v, kind));
+        }
+        if (PyErr_Occurred()) {
+            throw py::error_already_set();
+        }
+    }
+
+    // wires[w].append(key)，w 为 node.<attr> 中每个比特（clbit 映射为 -1 - c）。
+    static void append_wire_keys(py::dict& wires, PyObject* node, PyObject* attr, bool clbit, const py::object& key) {
+        py::object bits = py::reinterpret_steal<py::object>(PyObject_GetAttr(node, attr));
+        if (!bits) {
+            throw py::error_already_set();
+        }
+        py::object it = py::reinterpret_steal<py::object>(PyObject_GetIter(bits.ptr()));
+        if (!it) {
+            throw py::error_already_set();
+        }
+        while (PyObject* item = PyIter_Next(it.ptr())) {
+            py::object bit = py::reinterpret_steal<py::object>(item);
+            py::object w = bit;
+            if (clbit) {
+                // -1 - c
+                py::object minus_one = py::reinterpret_steal<py::object>(PyLong_FromLong(-1));
+                w = py::reinterpret_steal<py::object>(PyNumber_Subtract(minus_one.ptr(), bit.ptr()));
+                if (!w) {
+                    throw py::error_already_set();
+                }
+            }
+            PyObject* seq = PyDict_GetItemWithError(wires.ptr(), w.ptr());
+            if (seq == nullptr) {
+                if (PyErr_Occurred()) {
+                    throw py::error_already_set();
+                }
+                py::list fresh;
+                if (PyDict_SetItem(wires.ptr(), w.ptr(), fresh.ptr()) != 0) {
+                    throw py::error_already_set();
+                }
+                seq = fresh.ptr();
+            }
+            if (PyList_Append(seq, key.ptr()) != 0) {
+                throw py::error_already_set();
+            }
         }
         if (PyErr_Occurred()) {
             throw py::error_already_set();
@@ -883,6 +982,7 @@ Returns:
                 return out;
             },
             "Return the list of classical bit indices present in this DAG.")
+        .def("_wire_sequences", &PyDagCore::wire_sequences, py::arg("cache"))
         .def("_build_from_instructions", &PyDagCore::build_from_instructions, py::arg("instructions"),
              py::arg("num_qubits"), py::arg("num_clbits"));
 }

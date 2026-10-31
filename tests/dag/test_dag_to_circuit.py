@@ -119,3 +119,53 @@ class TestDAGToCircuitChannels:
         assert channel_instr.is_channel
         assert channel_instr.channel is circ.instructions[1].channel
         assert channel_instr.qubits == (0,)
+
+
+class TestDAGToCircuitInstructionReuse:
+    """Unlabelled instructions are reused; the result equals a rebuild."""
+
+    @staticmethod
+    def _rebuild(dag: object) -> QuantumCircuit:
+        """Reference: rebuild every instruction through the circuit methods."""
+        out = QuantumCircuit()
+        for node in dag.operation_nodes():  # type: ignore[attr-defined]
+            ins = node.instruction
+            if ins.is_gate:
+                out.append(ins.gate, ins.qubits, ins.clbits)
+            elif ins.is_measure:
+                out.measure(ins.qubits, ins.clbits)
+            elif ins.is_barrier:
+                out.barrier(*ins.qubits)
+            else:
+                out.append_channel(ins.channel, ins.qubits)
+        return out
+
+    def test_matches_rebuild_with_labels_and_bare_barriers(self) -> None:
+        from quspect.circuit.instruction import CircuitInstruction, InstructionType
+        from quspect.gates.standard import H
+
+        circ = QuantumCircuit().h(0).cx(0, 1).barrier(0, 1).rz(0.5, 1)
+        circ._instructions.append(
+            CircuitInstruction(
+                type=InstructionType.GATE, gate=H, qubits=(1,), label="lbl"
+            )
+        )
+        circ._instructions.append(
+            CircuitInstruction(type=InstructionType.BARRIER, qubits=())
+        )
+        circ._instructions.append(
+            CircuitInstruction(type=InstructionType.BARRIER, qubits=(0,), clbits=(0,))
+        )
+        circ.depolarize(0.1, 0).measure([0, 1], [1, 0])
+        dag = circ.to_dag()
+        back = DAGToCircuitCompiler.compile(dag)
+        ref = self._rebuild(dag)
+        assert back.instructions == ref.instructions
+        assert [i.label for i in back] == [i.label for i in ref]
+        assert any(b is circ[0] for b in back)  # unlabelled gate reused
+        assert not any(b is circ[4] for b in back)  # labelled gate rebuilt
+        assert all(b.label == "" for b in back)
+        # the qubit-less barrier comes first in topological order (no edges),
+        # so it is rebuilt with no active qubits; the barrier with a clbit is
+        # rebuilt without it
+        assert [b.qubits for b in back if b.is_barrier] == [(), (0, 1), (0,)]

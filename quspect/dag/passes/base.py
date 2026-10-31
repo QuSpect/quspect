@@ -184,7 +184,12 @@ def _wire_sequences(
 
     Two DAGs have equal :func:`dag_signature` iff these dicts are equal;
     the pass manager compares them directly (no wire names, no sorting).
+    The DAG storage core provides the same computation natively.
     """
+    native = getattr(dag, "_wire_sequences", None)
+    if native is not None:
+        result: dict[int, list[str]] = native(cache)
+        return result
     wires: dict[int, list[str]] = {}
     for node in dag.operation_nodes():
         instr = node.instruction
