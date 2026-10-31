@@ -348,10 +348,14 @@ set(QSPECT_CORE_SRCS
   ${SYNTHESIS_SRCS}
 )
 
+# 编译阶段的任务并行（common/parallel.cpp 的 RunTasks）使用 std::thread
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # ── 与 dispatch 无关的公共部分 ──
 add_library(qspect_core_obj OBJECT ${QSPECT_CORE_SRCS})
 target_include_directories(qspect_core_obj PUBLIC ${NATIVE_INCLUDE_DIR})
-target_link_libraries(qspect_core_obj PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(qspect_core_obj PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 qspect_use_openmp(qspect_core_obj PUBLIC)
 
 # ── dispatch: scalar 变体 ──
@@ -364,6 +368,7 @@ add_library(qspect_native_scalar_static STATIC
   $<TARGET_OBJECTS:qspect_dispatch_scalar>
 )
 target_include_directories(qspect_native_scalar_static PUBLIC ${NATIVE_INCLUDE_DIR})
+target_link_libraries(qspect_native_scalar_static PUBLIC Threads::Threads)
 qspect_use_openmp(qspect_native_scalar_static PUBLIC)
 
 if(QSPECT_AVX2_ACTIVE)
@@ -386,6 +391,7 @@ if(QSPECT_AVX2_ACTIVE)
     $<TARGET_OBJECTS:qspect_kernels_avx2_obj>
   )
   target_include_directories(qspect_native_avx2_static PUBLIC ${NATIVE_INCLUDE_DIR})
+  target_link_libraries(qspect_native_avx2_static PUBLIC Threads::Threads)
   qspect_use_openmp(qspect_native_avx2_static PUBLIC)
 endif()
 

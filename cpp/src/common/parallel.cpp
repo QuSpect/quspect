@@ -1,7 +1,12 @@
 #include "quspect_native/common/parallel.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <exception>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
 
 namespace quspect::native::common {
 
@@ -48,6 +53,65 @@ int ThreadsForDim(uint64_t dim) {
         return 1;
     }
     return max_useful < static_cast<uint64_t>(requested) ? static_cast<int>(max_useful) : requested;
+}
+
+int CompileThreads() {
+    if (const char* env = std::getenv("QUSPECT_COMPILE_THREADS")) {
+        char* end = nullptr;
+        const long v = std::strtol(env, &end, 10);
+        if (end != env && *end == '\0' && v >= 1) {
+            return static_cast<int>(std::min<long>(v, 64));
+        }
+        return 1;
+    }
+    const unsigned hw = std::thread::hardware_concurrency();
+    return static_cast<int>(std::min(8u, hw == 0 ? 1u : hw));
+}
+
+void RunTasks(const std::vector<std::function<void()>>& tasks, int threads) {
+    const std::size_t count = tasks.size();
+    std::vector<std::exception_ptr> errors(count);
+    auto run = [&](std::size_t k) {
+        try {
+            tasks[k]();
+        } catch (...) {
+            errors[k] = std::current_exception();
+        }
+    };
+    const std::size_t workers = std::min<std::size_t>(count, static_cast<std::size_t>(std::max(threads, 1)));
+    if (workers <= 1) {
+        for (std::size_t k = 0; k < count; ++k) {
+            run(k);
+        }
+    } else {
+        // 任务按下标轮流取走：线程 i 依次执行 i、i + workers、……
+        auto lane = [&](std::size_t first) {
+            for (std::size_t k = first; k < count; k += workers) {
+                run(k);
+            }
+        };
+        std::vector<std::thread> pool;
+        std::size_t started = 1;
+        try {
+            for (; started < workers; ++started) {
+                pool.emplace_back(lane, started);
+            }
+        } catch (const std::system_error&) {
+            // 不能再创建线程：未分配出去的通道在本线程中执行
+        }
+        lane(0);
+        for (std::size_t first = started; first < workers; ++first) {
+            lane(first);
+        }
+        for (auto& t : pool) {
+            t.join();
+        }
+    }
+    for (const auto& e : errors) {
+        if (e) {
+            std::rethrow_exception(e);
+        }
+    }
 }
 
 }  // namespace quspect::native::common

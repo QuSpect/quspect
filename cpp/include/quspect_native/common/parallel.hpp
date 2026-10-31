@@ -14,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #ifdef QSPECT_HAS_OPENMP
@@ -45,6 +46,16 @@ void SetNumThreads(int num_threads);
 
 /// 返回处理维度为 dim 的状态向量时应使用的线程数：min(GetNumThreads(), dim / kParallelMinDim)，至少为 1。
 int ThreadsForDim(uint64_t dim);
+
+/// 编译阶段（transpile 的原生步骤）可用的线程数：环境变量 QUSPECT_COMPILE_THREADS（正整数，
+/// 最多 64；1 关闭并行；其他取值按 1 处理），未设置时取 min(8, 硬件线程数)。与 OpenMP 无关
+/// （用 std::thread），未启用 OpenMP 的构建也可并行。
+int CompileThreads();
+
+/// 用最多 threads 个线程（含调用线程）执行互相独立的任务，返回时全部完成。threads <= 1、
+/// 只有一个任务或无法创建线程（受限环境）时在调用线程中依次执行，结果相同。任务抛出的异常
+/// 在全部任务结束后按任务顺序重新抛出第一个。
+void RunTasks(const std::vector<std::function<void()>>& tasks, int threads);
 
 /// 把 [0, count) 切成最多 num_threads 段互不重叠的连续区间，并行调用 body(begin, end)。
 ///

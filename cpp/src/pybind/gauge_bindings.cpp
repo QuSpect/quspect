@@ -22,11 +22,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
+#include <functional>
 #include <stdexcept>
 #include <string>
-#include <system_error>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -38,6 +36,7 @@
 #include <pybind11/stl.h>
 
 #include "py_interned.hpp"
+#include "quspect_native/common/parallel.hpp"
 #include "quspect_native/synthesis/numpy_compat.hpp"
 #include "quspect_native/transpiler/one_qubit_gauge.hpp"
 #include "synthesis_bindings.hpp"
@@ -185,25 +184,15 @@ int SwapAxis(int axis) {
     return -1;
 }
 
-// 编译阶段并行计算的线程数：环境变量 QUSPECT_COMPILE_THREADS（正整数，最多 64；1 关闭并行），
-// 默认取 min(8, 硬件线程数)；工作量小（work < kMinParallelWork）时总是 1。
-constexpr std::size_t kMinParallelWork = 8192;
+// 初始束搜索按线分组并行的最小工作量（运行数）：更小的输入在调用线程中计算。
+constexpr std::size_t kMinParallelRuns = 8192;
 
-int CompileThreads(std::size_t work) {
-    if (work < kMinParallelWork) {
+int SearchThreads(std::size_t runs) {
+    if (runs < kMinParallelRuns) {
         return 1;
     }
-    int n = 0;
-    if (const char* env = std::getenv("QUSPECT_COMPILE_THREADS")) {
-        char* end = nullptr;
-        const long v = std::strtol(env, &end, 10);
-        n = (end != env && *end == '\0' && v >= 1) ? static_cast<int>(std::min<long>(v, 64)) : 1;
-    } else {
-        const unsigned hw = std::thread::hardware_concurrency();
-        n = static_cast<int>(std::min(8u, hw == 0 ? 1u : hw));
-    }
-    const auto useful = static_cast<int>(std::min<std::size_t>(work / (kMinParallelWork / 2), 64));
-    return std::max(1, std::min(n, useful));
+    const auto useful = static_cast<int>(std::min<std::size_t>(runs / (kMinParallelRuns / 2), 64));
+    return std::max(1, std::min(common::CompileThreads(), useful));
 }
 
 struct Options {
@@ -480,7 +469,7 @@ class Minimizer {
     //
     // 反向任何 CX 之前各条线互不相关：memo 键含运行编号（每个运行只属于一条线），一条线的计算
     // 从不读到另一条线写入的项。所以可以把线分成几组，在各自的 GaugeBeamSearch 上按层推进
-    // （可以并行，见 CompileThreads），最后把各组的 memo 并入主对象——结果与所有线一起分层
+    // （可以并行，见 SearchThreads），最后把各组的 memo 并入主对象——结果与所有线一起分层
     // 推进完全相同。
     void SolveAll() {
         const std::size_t num_wires = all_wires_.size();
@@ -488,7 +477,7 @@ class Minimizer {
         outs_.assign(num_wires, {});
         costs_.assign(num_wires, {});
         // 按运行数大致均分的连续线组
-        const int threads = num_wires == 0 ? 1 : std::min<int>(CompileThreads(runs_.size()), static_cast<int>(num_wires));
+        const int threads = num_wires == 0 ? 1 : std::min<int>(SearchThreads(runs_.size()), static_cast<int>(num_wires));
         std::vector<std::size_t> bounds{0};
         {
             const double share = static_cast<double>(runs_.size()) / threads;
@@ -504,38 +493,15 @@ class Minimizer {
         }
         const std::size_t groups = bounds.size() - 1;
         std::vector<std::unique_ptr<GaugeBeamSearch>> parts(groups);
-        std::vector<std::exception_ptr> errors(groups);
-        auto work = [&](std::size_t k) {
-            try {
-                parts[k] = SolveWires(bounds[k], bounds[k + 1]);
-            } catch (...) {
-                errors[k] = std::current_exception();
-            }
-        };
+        std::vector<std::function<void()>> tasks;
+        for (std::size_t k = 0; k < groups; ++k) {
+            tasks.emplace_back([&, k] { parts[k] = SolveWires(bounds[k], bounds[k + 1]); });
+        }
         if (groups <= 1) {
-            work(0);
+            common::RunTasks(tasks, 1);
         } else {
             py::gil_scoped_release release;
-            std::vector<std::thread> pool;
-            try {
-                for (std::size_t k = 1; k < groups; ++k) {
-                    pool.emplace_back(work, k);
-                }
-            } catch (const std::system_error&) {
-                // 不能创建线程（受限环境）：其余组在本线程中依次计算
-                for (std::size_t k = pool.size() + 1; k < groups; ++k) {
-                    work(k);
-                }
-            }
-            work(0);
-            for (auto& t : pool) {
-                t.join();
-            }
-        }
-        for (std::size_t k = 0; k < groups; ++k) {
-            if (errors[k]) {
-                std::rethrow_exception(errors[k]);
-            }
+            common::RunTasks(tasks, static_cast<int>(groups));
         }
         for (std::size_t k = 0; k < groups; ++k) {
             for (std::size_t w = bounds[k]; w < bounds[k + 1]; ++w) {

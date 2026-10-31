@@ -1,6 +1,8 @@
 // 对易感知的深度调度（quspect.transpiler._schedule 的原生实现，逐位一致）。
 #include "quspect_native/transpiler/depth_schedule.hpp"
 
+#include "quspect_native/common/parallel.hpp"
+
 #include <algorithm>
 #include <array>
 #include <complex>
@@ -17,6 +19,8 @@ namespace {
 constexpr int kNoAxis = -1;
 // 每个调度的双向调整轮数（与 Python 的 _ROUNDS 相同）
 constexpr int kRounds = 2;
+// 三个候选调度并行计算的最小节点数（更小的问题线程开销与计算量相当）。
+constexpr int kMinParallelNodes = 4096;
 
 using Score = std::pair<int, int>;
 
@@ -524,8 +528,6 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         dur_all[g] = p.counted[g] ? 1 : 0;
         dur_two[g] = p.two[g] ? 1 : 0;
     }
-    // 各次 Sgs 共用的空闲时隙表
-    FreeSlots free_slots;
     auto depth_score = [&](const std::vector<int>& order) -> Score {
         return {Metric(p, num_resources, order, dur_all), Metric(p, num_resources, order, dur_two)};
     };
@@ -534,8 +536,9 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         return {s.second, s.first};
     };
     auto make = [&](const std::vector<int>& seq, bool chain) { return Groups(p, num_resources, seq, chain); };
+    // free：本次调度链各次 Sgs 共用的空闲时隙表
     auto justify = [&](const Groups& fwd, const Groups& bwd, std::vector<int> order, const std::vector<int>& dur,
-                       const std::function<Score(const std::vector<int>&)>& score) {
+                       const std::function<Score(const std::vector<int>&)>& score, FreeSlots* free) {
         std::vector<int> best = order;
         Score best_score = score(order);
         std::vector<int> cur = std::move(order);
@@ -543,13 +546,13 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         std::vector<std::int64_t> fin;
         for (int round = 0; round < kRounds; ++round) {
             Asap(p, num_resources, cur, dur, &start, &fin);
-            cur = bwd.Sgs(fin, dur, &free_slots);
+            cur = bwd.Sgs(fin, dur, free);
             std::reverse(cur.begin(), cur.end());
             Asap(p, num_resources, cur, dur, &start, &fin);
             for (auto& s : start) {
                 s = -s;
             }
-            cur = fwd.Sgs(start, dur, &free_slots);
+            cur = fwd.Sgs(start, dur, free);
             const Score sc = score(cur);
             if (sc < best_score) {
                 best = cur;
@@ -564,11 +567,11 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         std::reverse(v.begin(), v.end());
         return v;
     };
-    auto total = [&](const std::vector<int>& seq, bool chain) {
+    auto total = [&](const std::vector<int>& seq, bool chain, FreeSlots* free) {
         const Groups fwd = make(seq, chain);
         const Groups bwd = make(reversed(seq), chain);
-        std::vector<int> first = fwd.Sgs(fwd.BottomLevels(dur_all), dur_all, &free_slots);
-        return justify(fwd, bwd, std::move(first), dur_all, depth_score);
+        std::vector<int> first = fwd.Sgs(fwd.BottomLevels(dur_all), dur_all, free);
+        return justify(fwd, bwd, std::move(first), dur_all, depth_score, free);
     };
 
     std::vector<int> seq(n);
@@ -578,16 +581,21 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
     const Score base = depth_score(seq);
     std::vector<int> best = seq;
     Score best_score = base;
-    std::vector<std::vector<int>> cands;
-    cands.push_back(total(seq, false));
-    cands.push_back(total(seq, true));
-    {
-        const Groups free = make(seq, false);
-        const Groups free_r = make(reversed(seq), false);
-        std::vector<int> by_two = free.Sgs(free.BottomLevels(dur_two), dur_two, &free_slots);
-        by_two = justify(free, free_r, std::move(by_two), dur_two, two_score);
-        cands.push_back(total(by_two, true));
-    }
+    // 三个候选调度互不相关（各自的空闲时隙表），工作量足够大时并行计算；比较按固定顺序进行。
+    std::vector<std::vector<int>> cands(3);
+    std::array<FreeSlots, 3> free_slots;
+    const std::vector<std::function<void()>> tasks{
+        [&] { cands[0] = total(seq, false, &free_slots[0]); },
+        [&] { cands[1] = total(seq, true, &free_slots[1]); },
+        [&] {
+            const Groups free = make(seq, false);
+            const Groups free_r = make(reversed(seq), false);
+            std::vector<int> by_two = free.Sgs(free.BottomLevels(dur_two), dur_two, &free_slots[2]);
+            by_two = justify(free, free_r, std::move(by_two), dur_two, two_score, &free_slots[2]);
+            cands[2] = total(by_two, true, &free_slots[2]);
+        },
+    };
+    common::RunTasks(tasks, n >= kMinParallelNodes ? common::CompileThreads() : 1);
     for (const auto& cand : cands) {
         const Score sc = depth_score(cand);
         if (sc.second <= base.second && sc < best_score) {
