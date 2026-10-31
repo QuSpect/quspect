@@ -351,3 +351,125 @@ def test_decompose_pass_keep() -> None:
     assert "ccx" not in {
         i.gate.name for i in DecomposePass(target).run(circ) if i.gate is not None
     }
+
+
+def _random_mapping_gates(rng: random.Random, n: int, count: int) -> list:
+    from quspect.gates.parameterized import RZ
+    from quspect.gates.standard import CX, H, T
+    from quspect.transpiler._mapping import _MappingGate
+
+    gates = []
+    for k in range(count):
+        r = rng.random()
+        if r < 0.15:
+            a, b, c = rng.sample(range(n), 3)
+            gates.append(_MappingGate(False, a, b, k, "ccx", None, None, c))
+        elif r < 0.5:
+            a, b = rng.sample(range(n), 2)
+            gates.append(_MappingGate(True, a, b, k, "cx", None, CX))
+        elif r < 0.55:
+            gates.append(_MappingGate(False, rng.randrange(n), 0, k, "measure", 0))
+        else:
+            q = rng.randrange(n)
+            gate = rng.choice([H, T, RZ.with_params(rng.choice([0.5, -0.0, 0.0]))])
+            gates.append(_MappingGate(False, q, q, k, gate.name, None, gate))
+    return gates
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_indexed_context_windows_match_the_plain_walk(seed: int) -> None:
+    """The per-qubit position walk collects the same windows as the full walk."""
+    from quspect.transpiler import _toffoli
+
+    rng = random.Random(seed)
+    n = 7
+    adj = [set(range(n)) - {q} for q in range(n)]  # complete graph: any triple
+    gates = _random_mapping_gates(rng, n, 160)
+    seen: list[tuple[str, tuple, list]] = []
+    real = _toffoli.synthesize_ccx_for_coupling
+
+    def spy(c1, c2, t, adjacent, *, before=(), after=()):  # type: ignore[no-untyped-def]
+        seen.append(("call", (c1, c2, t), [list(before), list(after)]))
+        return real(c1, c2, t, adjacent, before=before, after=after)
+
+    gate_of = {g.index: g.gate for g in gates}
+
+    class _Circ:
+        def __getitem__(self, i: int) -> object:
+            return type("I", (), {"gate": gate_of[i]})()
+
+    try:
+        _toffoli.synthesize_ccx_for_coupling = spy
+        indexed = _toffoli.expand_toffolis(list(gates), adj, _Circ())  # type: ignore[arg-type]
+    finally:
+        _toffoli.synthesize_ccx_for_coupling = real
+    # 参考：在已输出的门上逐门向前、在输入上逐门向后遍历（原实现）
+    from quspect.transpiler._mapping import _MappingGate
+
+    def lookup(g: _MappingGate) -> object:
+        return g.gate if g.gate is not None else gate_of[g.index]
+
+    out: list[_MappingGate] = []
+    expected = []
+    for k, g in enumerate(gates):
+        if g.q3 < 0:
+            out.append(g)
+            continue
+        triple = (g.q1, g.q2, g.q3)
+        before = _toffoli._context_window(
+            out, range(len(out) - 1, -1, -1), triple, lookup
+        )[::-1]
+        after = _toffoli._context_window(
+            gates, range(k + 1, len(gates)), triple, lookup
+        )
+        expected.append(("call", triple, [before, after]))
+        for gate, qs in real(*triple, lambda x, y: True, before=before, after=after):
+            q2 = qs[1] if len(qs) == 2 else qs[0]
+            out.append(
+                _MappingGate(len(qs) == 2, qs[0], q2, g.index, gate.name, None, gate)
+            )
+    assert seen == expected
+    assert [(g.q1, g.q2, g.name, g.gate, g.index) for g in indexed] == [
+        (g.q1, g.q2, g.name, g.gate, g.index) for g in out
+    ]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_variant_choice_cache_matches_uncached_choice(seed: int) -> None:
+    """Relabelled contexts reuse the cached variant; it equals the full search."""
+    from quspect.gates.parameterized import RZ
+    from quspect.gates.standard import CX, H, T
+    from quspect.transpiler import _toffoli
+
+    rng = random.Random(100 + seed)
+    line = {(0, 1), (1, 2), (2, 3), (3, 4), (0, 4)}
+
+    def adjacent(x: int, y: int) -> bool:
+        return (min(x, y), max(x, y)) in line or x == y
+
+    pool = [H, T, CX, RZ.with_params(0.25), RZ.with_params(-0.0)]
+    for _ in range(40):
+        c1, c2, t = rng.choice([(0, 2, 1), (1, 3, 2), (2, 0, 1), (4, 1, 0)])
+        triple = (c1, c2, t)
+
+        def side(triple: tuple[int, int, int] = triple) -> list:
+            out = []
+            for _ in range(rng.randrange(4)):
+                g = rng.choice(pool)
+                qs = tuple(rng.sample(triple, 2)) if g is CX else (rng.choice(triple),)
+                out.append((g, qs))
+            return out
+
+        before, after = side(), side()
+        got = _toffoli.synthesize_ccx_for_coupling(
+            c1, c2, t, adjacent, before=before, after=after
+        )
+        cands = ccx_candidates(c1, c2, t, adjacent)
+        if before or after:
+            keys = [
+                (*_toffoli._consolidated_cost((*before, *ops, *after)), r)
+                for r, ops in enumerate(cands)
+            ]
+            assert got == cands[min(keys)[2]]
+        else:
+            assert got == cands[0]

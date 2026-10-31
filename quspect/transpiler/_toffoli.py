@@ -35,7 +35,8 @@ extended-set terms with the cost above
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TYPE_CHECKING
 
 # Gate 在运行时导入（而非仅类型检查时）：autodoc 据此把签名中的 Gate 解析为
@@ -314,13 +315,70 @@ def synthesize_ccx_for_coupling(
     candidates = ccx_candidates(c1, c2, t, adjacent)
     if not before and not after:
         return candidates[0]
-    best = candidates[0]
+    choice_key = _choice_key(c1, c2, t, adjacent, before, after)
+    if choice_key is not None:
+        rank = _CCX_CHOICE_CACHE.get(choice_key)
+        if rank is not None:
+            return candidates[rank]
+    best_rank = 0
     best_key: tuple[int, int, int] | None = None
     for rank, ops in enumerate(candidates):
         key = (*_context_cost(before, ops, after), rank)
         if best_key is None or key < best_key:
-            best, best_key = ops, key
-    return best
+            best_rank, best_key = rank, key
+    if choice_key is not None:
+        _CCX_CHOICE_CACHE.put(choice_key, best_rank)
+    return candidates[best_rank]
+
+
+def _choice_key(
+    c1: int,
+    c2: int,
+    t: int,
+    adjacent: Callable[[int, int], bool],
+    before: Sequence[tuple[Gate, tuple[int, ...]]],
+    after: Sequence[tuple[Gate, tuple[int, ...]]],
+) -> tuple[object, ...] | None:
+    """Memo key of the variant :func:`synthesize_ccx_for_coupling` picks.
+
+    The candidates depend only on which of the three pairs are coupled and
+    on the roles of the qubits, and every candidate's :func:`_context_cost`
+    only on its gate sequence up to a renaming of the qubits.  So the
+    chosen rank is a function of the coupling pattern and of ``before``,
+    the triple and ``after`` with the qubits relabelled in order of first
+    use (gates compared as in :func:`_context_cost`).  ``None`` when a gate
+    parameter is unhashable.
+    """
+    labels: dict[int, int] = {}
+
+    def side(seq: Sequence[tuple[Gate, tuple[int, ...]]]) -> tuple[object, ...]:
+        return tuple(
+            (
+                gate,
+                tuple(map(repr, gate.params)),
+                tuple(labels.setdefault(q, len(labels)) for q in qs),
+            )
+            for gate, qs in seq
+        )
+
+    head = side(before)
+    roles = tuple(labels.setdefault(q, len(labels)) for q in (c1, c2, t))
+    key = (
+        adjacent(c1, c2),
+        adjacent(c1, t),
+        adjacent(c2, t),
+        head,
+        roles,
+        side(after),
+    )
+    try:
+        hash(key)
+    except TypeError:  # unhashable (e.g. array-valued) gate parameter
+        return None
+    return key
+
+
+_CCX_CHOICE_CACHE: BoundedCache[tuple[object, ...], int] = BoundedCache()
 
 
 #: Maximum number of neighbouring gates on each side used to pick a variant.
@@ -339,19 +397,29 @@ def _context_window(
     triple (or is a measurement / three-qubit gate); gates on other qubits
     are skipped (they commute with everything collected).
     """
+    return _collect_window((gates[j] for j in order), qubits, gate_of)
+
+
+def _gate_qubits(g: _MappingGate) -> tuple[int, ...]:
+    if g.q3 >= 0:
+        return (g.q1, g.q2, g.q3)
+    if g.is_two_qubit:
+        return (g.q1, g.q2)
+    return (g.q1,)
+
+
+def _collect_window(
+    walk: Iterable[_MappingGate],
+    qubits: tuple[int, int, int],
+    gate_of: Callable[[_MappingGate], Gate | None],
+) -> list[tuple[Gate, tuple[int, ...]]]:
+    """Body of :func:`_context_window` over the gates of a walk."""
     open_qubits = set(qubits)
     window: list[tuple[Gate, tuple[int, ...]]] = []
-    for j in order:
+    for g in walk:
         if not open_qubits or len(window) >= _CONTEXT_LIMIT:
             break
-        g = gates[j]
-        qs: tuple[int, ...]
-        if g.q3 >= 0:
-            qs = (g.q1, g.q2, g.q3)
-        elif g.is_two_qubit:
-            qs = (g.q1, g.q2)
-        else:
-            qs = (g.q1,)
+        qs = _gate_qubits(g)
         hit = open_qubits.intersection(qs)
         if not hit:
             continue
@@ -361,6 +429,43 @@ def _context_window(
             continue
         window.append((gate, qs))
     return window
+
+
+def _merged_positions(
+    lists: Sequence[list[int]], start: int, stop: int, step: int
+) -> Iterator[int]:
+    """Distinct entries of sorted ``lists`` in ``range(start, stop, step)``, in order.
+
+    Every list is sorted ascending; ``step`` is ``1`` (ascending walk from
+    ``start``) or ``-1`` (descending walk from ``start``).
+    """
+    heads: list[tuple[list[int], int]] = []
+    for lst in lists:
+        if step > 0:
+            i = bisect_left(lst, start)
+            if i < len(lst) and lst[i] < stop:
+                heads.append((lst, i))
+        else:
+            i = bisect_right(lst, start) - 1
+            if i >= 0 and lst[i] > stop:
+                heads.append((lst, i))
+    last = None
+    while heads:
+        best = 0
+        val = heads[0][0][heads[0][1]]
+        for h in range(1, len(heads)):
+            v = heads[h][0][heads[h][1]]
+            if (v < val) if step > 0 else (v > val):
+                best, val = h, v
+        lst, i = heads[best]
+        i += step
+        if 0 <= i < len(lst) and ((lst[i] < stop) if step > 0 else (lst[i] > stop)):
+            heads[best] = (lst, i)
+        else:
+            del heads[best]
+        if val != last:
+            last = val
+            yield val
 
 
 def expand_toffolis(
@@ -403,6 +508,27 @@ def expand_toffolis(
             return None
         return circuit[g.index].gate
 
+    # 每个物理比特上的门在 physical_gates 中的位置（升序）：上下文窗口只需访问作用在
+    # 三个比特之一上的门，其余的门在原来的逐门遍历中也只是被跳过
+    positions: list[list[int]] = [[] for _ in adj_sets]
+    try:
+        for j, g in enumerate(physical_gates):
+            for q in _gate_qubits(g):
+                positions[q].append(j)
+    except (IndexError, TypeError):
+        positions = []
+    # 已展开的 Toffoli：physical_gates 中的位置 → 写入 out 的门
+    expanded: dict[int, list[_MappingGate]] = {}
+
+    def walk_before(k: int, triple: tuple[int, int, int]) -> Iterator[_MappingGate]:
+        """The gates of ``out`` touching ``triple``, last first."""
+        for j in _merged_positions([positions[q] for q in triple], k - 1, -1, -1):
+            ops = expanded.get(j)
+            if ops is None:
+                yield physical_gates[j]
+            else:
+                yield from reversed(ops)
+
     out: list[_MappingGate] = []
     n_path = n_triangle = 0
     for k, g in enumerate(physical_gates):
@@ -413,6 +539,18 @@ def expand_toffolis(
         if circuit is None:
             before: GateSequence = []
             after: GateSequence = []
+        elif positions:
+            before = _collect_window(walk_before(k, triple), triple, gate_of)[::-1]
+            after = _collect_window(
+                (
+                    physical_gates[j]
+                    for j in _merged_positions(
+                        [positions[q] for q in triple], k + 1, len(physical_gates), 1
+                    )
+                ),
+                triple,
+                gate_of,
+            )
         else:
             before = _context_window(out, range(len(out) - 1, -1, -1), triple, gate_of)[
                 ::-1
@@ -427,6 +565,7 @@ def expand_toffolis(
             n_triangle += 1
         else:
             n_path += 1
+        start = len(out)
         for gate, qs in ops:
             if len(qs) == 2:
                 out.append(
@@ -436,6 +575,7 @@ def expand_toffolis(
                 out.append(
                     _MappingGate(False, qs[0], qs[0], g.index, gate.name, None, gate)
                 )
+        expanded[k] = out[start:]
     logger.debug(
         "Synthesized %d Toffoli(s) on coupling triangles and %d on paths",
         n_triangle,

@@ -34,6 +34,7 @@ def clear_synthesis_caches() -> None:
     one_qubit_synthesis._SYNTH_1Q_CACHE.clear()
     _consolidate._EULER_CACHE.clear()
     _toffoli._CONTEXT_COST_CACHE.clear()
+    _toffoli._CCX_CHOICE_CACHE.clear()
 
 
 def _without_round_17(mp: pytest.MonkeyPatch) -> None:
