@@ -36,6 +36,7 @@
 #include <pybind11/stl.h>
 
 #include "py_interned.hpp"
+#include "run_helpers.hpp"
 #include "quspect_native/common/parallel.hpp"
 #include "quspect_native/synthesis/numpy_compat.hpp"
 #include "quspect_native/transpiler/one_qubit_gauge.hpp"
@@ -53,100 +54,13 @@ using transpiler::Matrix2;
 
 constexpr double kTwoPi = 2.0 * 3.141592653589793;
 
-// 输入不能逐项复刻：交回 Python。
-struct Decline {};
-
-struct GaugeNames {
-    py::str type = InternedStr("type");
-    py::str qubits = InternedStr("qubits");
-    py::str clbits = InternedStr("clbits");
-    py::str gate = InternedStr("gate");
-    py::str label = InternedStr("label");
-    py::str channel = InternedStr("channel");
-    py::str name = InternedStr("name");
-    py::str params = InternedStr("params");
-    py::str num_qubits = InternedStr("num_qubits");
-};
-
-GaugeNames& Names() {
-    static GaugeNames* names = new GaugeNames();
-    return *names;
-}
-
-py::object Attr(PyObject* obj, const py::str& name) {
-    PyObject* v = PyObject_GetAttr(obj, name.ptr());
-    if (v == nullptr) {
-        throw py::error_already_set();
-    }
-    return py::reinterpret_steal<py::object>(v);
-}
-
-bool Truthy(PyObject* obj) {
-    const int r = PyObject_IsTrue(obj);
-    if (r < 0) {
-        throw py::error_already_set();
-    }
-    return r != 0;
-}
-
-// 由 int 组成的 tuple（元素为普通 int，不溢出 long long），否则 Decline。
-void ReadBits(PyObject* t, std::vector<long long>* out) {
-    out->clear();
-    if (!PyTuple_CheckExact(t)) {
-        throw Decline{};
-    }
-    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(t); ++i) {
-        PyObject* item = PyTuple_GET_ITEM(t, i);
-        if (!PyLong_CheckExact(item)) {
-            throw Decline{};
-        }
-        int overflow = 0;
-        const long long v = PyLong_AsLongLongAndOverflow(item, &overflow);
-        if (overflow != 0) {
-            throw Decline{};
-        }
-        out->push_back(v);
-    }
-}
-
-// C 连续 complex128 的 2×2 数组 → Matrix2；其他布局 Decline（numpy 的乘法会按布局选不同的 BLAS 调用）。
-Matrix2 ReadMatrix2(PyObject* obj) {
-    if (!py::isinstance<py::array>(obj)) {
-        throw Decline{};
-    }
-    auto arr = py::reinterpret_borrow<py::array>(obj);
-    const py::dtype dt = arr.dtype();
-    if (dt.kind() != 'c' || dt.itemsize() != 16 || dt.byteorder() != '=' || arr.ndim() != 2 || arr.shape(0) != 2
-        || arr.shape(1) != 2 || (arr.flags() & py::array::c_style) == 0) {
-        throw Decline{};
-    }
-    Matrix2 m;
-    std::memcpy(m.data(), arr.data(), sizeof(m));
-    return m;
-}
-
-py::array_t<std::complex<double>> MatrixArray(const Matrix2& m) {
-    py::array_t<std::complex<double>> out({static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)});
-    std::memcpy(out.mutable_data(), m.data(), sizeof(m));
-    return out;
-}
-
-struct MatrixKeyHash {
-    std::size_t operator()(const std::array<std::uint64_t, 8>& k) const {
-        std::uint64_t h = 0x9E3779B97F4A7C15ULL;
-        for (std::uint64_t v : k) {
-            h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
-        }
-        return static_cast<std::size_t>(h);
-    }
-};
-
-std::array<std::uint64_t, 8> MatrixKey(const Matrix2& m) {
-    std::array<std::uint64_t, 8> k;
-    static_assert(sizeof(k) == sizeof(Matrix2), "Matrix2 is four (re, im) pairs");
-    std::memcpy(k.data(), m.data(), sizeof(k));
-    return k;
-}
+using runs::Attr;
+using runs::Decline;
+using runs::ReadBits;
+using runs::ReadMatrix2;
+using runs::Truthy;
+using GaugeNames = runs::RunNames;
+using runs::Names;
 
 struct GateRun {
     std::vector<PyObject*> gates;   // 借用：由输入指令持有
@@ -217,7 +131,11 @@ struct Options {
 class Minimizer {
  public:
     Minimizer(const synthesis::NumpyLinalg& la, const transpiler::LengthModel& model, const Options& opt)
-        : la_(la), model_(model), opt_(opt) {}
+        : mat_(la),
+          model_(model),
+          opt_(opt),
+          synth_(opt.synthesize),
+          factory_(opt.instr_cls, opt.type_gate, opt.gate_cls) {}
 
     // 结果：新指令列表；py::none() 表示原线路不变（单比特门不减少）。Decline：交回 Python。
     py::object Run(const py::sequence& instrs) {
@@ -241,20 +159,12 @@ class Minimizer {
  private:
     // ---- 矩阵运算（numpy 语义） ----
     Matrix2 MatMul(const Matrix2& a, const Matrix2& b) const {
-        Matrix2 out;
-        la_.MatMul(2, Cv(a), Cv(b), reinterpret_cast<synthesis::Cx*>(out.data()));
-        return out;
+        return mat_.Mul(a, b);
     }
     // ``V†·m·V``：numpy 的 ``v.conj().T @ m @ v``（左操作数是 C 连续数组的转置视图）。
     Matrix2 ZFrame(const Matrix2& m, int axis) const {
-        const Matrix2& vc = opt_.to_z_conj[static_cast<std::size_t>(axis)];
-        Matrix2 tmp;
-        la_.MatMul(2, synthesis::CView{reinterpret_cast<const synthesis::Cx*>(vc.data()), 1, 2}, Cv(m),
-                   reinterpret_cast<synthesis::Cx*>(tmp.data()));
-        return MatMul(tmp, opt_.to_z[static_cast<std::size_t>(axis)]);
-    }
-    static synthesis::CView Cv(const Matrix2& m) {
-        return {reinterpret_cast<const synthesis::Cx*>(m.data()), 2, 1};
+        const Matrix2 tmp = mat_.MulT(opt_.to_z_conj[static_cast<std::size_t>(axis)], m);
+        return mat_.Mul(tmp, opt_.to_z[static_cast<std::size_t>(axis)]);
     }
 
     int Length(const Matrix2& m) const {
@@ -295,7 +205,7 @@ class Minimizer {
     }
 
     static Matrix2 Identity() {
-        return {Complex{1.0, 0.0}, Complex{0.0, 0.0}, Complex{0.0, 0.0}, Complex{1.0, 0.0}};
+        return runs::Identity2();
     }
 
     // matrix_of(gate)（每个门对象只调用一次；None → −1）。
@@ -869,21 +779,6 @@ class Minimizer {
     }
 
     // ---- 4. 输出 ----
-    // synthesize_one_qubit(m, one_qubit)：同一矩阵（逐位相同）只调用一次。
-    py::object Synthesize(const Matrix2& m) {
-        const auto key = MatrixKey(m);
-        const auto it = synth_cache_.find(key);
-        if (it != synth_cache_.end()) {
-            return it->second;
-        }
-        py::object seq = opt_.synthesize(MatrixArray(m));
-        if (!seq.is_none() && !PyList_CheckExact(seq.ptr())) {
-            throw Decline{};
-        }
-        synth_cache_.emplace(key, seq);
-        return seq;
-    }
-
     // abs(m[k]) < atol（numpy 复数标量 abs）；离阈值太近时交回 Python。
     bool Below(const Complex& v) const {
         const double a = std::hypot(v.re, v.im);
@@ -891,66 +786,6 @@ class Minimizer {
             throw Decline{};
         }
         return a < opt_.atol;
-    }
-
-    py::object NewGateInstruction(PyObject* gate, long long q) {
-        GaugeNames& n = Names();
-        PyObject* qobj = PyLong_FromLongLong(q);
-        if (qobj == nullptr) {
-            throw py::error_already_set();
-        }
-        py::object qubits = py::reinterpret_steal<py::object>(PyTuple_Pack(1, qobj));
-        Py_DECREF(qobj);
-        if (!qubits) {
-            throw py::error_already_set();
-        }
-        bool simple = q >= 0 && Py_TYPE(gate) == reinterpret_cast<PyTypeObject*>(opt_.gate_cls.ptr());
-        if (simple) {
-            py::object nq = Attr(gate, n.num_qubits);
-            simple = PyLong_CheckExact(nq.ptr()) && PyLong_AsLong(nq.ptr()) == 1;
-            if (PyErr_Occurred()) {
-                PyErr_Clear();
-                simple = false;
-            }
-        }
-        if (!simple) {
-            py::dict kw;
-            kw[n.type] = opt_.type_gate;
-            kw[n.gate] = py::handle(gate);
-            kw[n.qubits] = qubits;
-            return opt_.instr_cls(**kw);
-        }
-        // CircuitInstruction(type=GATE, gate=gate, qubits=(q,))：字段顺序与数据类 __init__ 相同，
-        // __post_init__ 的校验在这里必然通过（普通单比特门、非负 int 比特）。
-        auto* type = reinterpret_cast<PyTypeObject*>(opt_.instr_cls.ptr());
-        PyObject* empty = PyTuple_New(0);
-        if (empty == nullptr) {
-            throw py::error_already_set();
-        }
-        PyObject* raw = PyBaseObject_Type.tp_new(type, empty, nullptr);
-        if (raw == nullptr) {
-            Py_DECREF(empty);
-            throw py::error_already_set();
-        }
-        py::object obj = py::reinterpret_steal<py::object>(raw);
-        auto set = [&](const py::str& name, PyObject* value) {
-            if (PyObject_GenericSetAttr(obj.ptr(), name.ptr(), value) != 0) {
-                throw py::error_already_set();
-            }
-        };
-        set(n.type, opt_.type_gate.ptr());
-        set(n.qubits, qubits.ptr());
-        set(n.clbits, empty);
-        set(n.gate, gate);
-        set(n.channel, Py_None);
-        set(n.label, EmptyStr().ptr());
-        Py_DECREF(empty);
-        return obj;
-    }
-
-    static const py::str& EmptyStr() {
-        static py::str* s = new py::str(InternedStr(""));
-        return *s;
     }
 
     py::object Emit(PyObject** items, Py_ssize_t count) {
@@ -989,7 +824,7 @@ class Minimizer {
                     total += static_cast<long long>(run.gates.size());
                     continue;
                 }
-                py::object seq = Synthesize(m);
+                py::object seq = synth_.Get(m);
                 if (!changed && run.native
                     && (seq.is_none() || static_cast<Py_ssize_t>(run.gates.size()) <= PyList_GET_SIZE(seq.ptr()))) {
                     keep[rid] = 1;
@@ -1022,14 +857,14 @@ class Minimizer {
                     }
                 } else {
                     for (PyObject* g : run.gates) {
-                        out.append(NewGateInstruction(g, q));
+                        out.append(factory_.OneQubit(g, q));
                     }
                 }
                 return;
             }
             const py::object& seq = final_seq[r];
             for (Py_ssize_t k = 0; k < PyList_GET_SIZE(seq.ptr()); ++k) {
-                out.append(NewGateInstruction(PyList_GET_ITEM(seq.ptr(), k), q));
+                out.append(factory_.OneQubit(PyList_GET_ITEM(seq.ptr(), k), q));
             }
         };
         std::unordered_map<int, int> flip_of;
@@ -1069,9 +904,11 @@ class Minimizer {
         return std::move(out);
     }
 
-    const synthesis::NumpyLinalg& la_;
+    runs::Mat2 mat_;
     const transpiler::LengthModel& model_;
     const Options& opt_;
+    runs::SynthCache synth_;
+    runs::InstructionFactory factory_;
 
     std::vector<GateRun> runs_;
     std::vector<int> run_len_;
@@ -1096,7 +933,6 @@ class Minimizer {
     std::vector<std::vector<double>> outs_;
     std::vector<std::vector<int>> costs_;
 
-    std::unordered_map<std::array<std::uint64_t, 8>, py::object, MatrixKeyHash> synth_cache_;
 };
 
 Matrix2 ArgMatrix(const py::handle& obj) {

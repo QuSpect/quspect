@@ -317,3 +317,72 @@ def test_consolidate_emits_target_entangler(basis: str) -> None:
     assert {i.gate.name for i in out if i.gate} <= BASES[basis]
     assert _two_qubit(out) <= 3
     _assert_unitary_equal(circ, out, 2)
+
+
+def _working_circuit(
+    seed: int, working: frozenset[str], n: int, size: int
+) -> QuantumCircuit:
+    """Random circuit in a plan's working gates plus measurements / barriers."""
+    from quspect.circuit.parameter import Parameter
+
+    rng = random.Random(seed)
+    one = sorted(g for g in working if g not in ("cz", "rz"))
+    theta = Parameter("t")
+    qc = QuantumCircuit()
+    for _ in range(size):
+        a, b = rng.sample(range(n), 2)
+        r = rng.randrange(12)
+        if r < 4:
+            qc.cz(a, b)
+        elif r < 6:
+            qc.rz(rng.choice([rng.uniform(-4, 4), math.pi / 2, 0.0, -0.0]), a)
+        elif r < 9:
+            getattr(qc, rng.choice(one))(a)
+        elif r == 9:
+            qc.measure([a], [b])
+        elif r == 10:
+            qc.barrier(a, b) if rng.random() < 0.7 else qc.barrier()
+        elif "rz" in working:
+            qc.rz(theta, a)  # symbolic native gate: kept as is
+    return qc
+
+
+@pytest.mark.parametrize("basis", ["cx", "ibm", "cz_sx"])
+@pytest.mark.parametrize("seed", range(10))
+def test_native_translation_matches_python(
+    basis: str, seed: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The C++ translate_to_target equals the Python body instruction by instruction."""
+    from quspect.transpiler import _basis
+
+    plan = plan_basis(BASES[basis])
+    qc = _working_circuit(seed, plan.working, 2 + seed % 5, 40 + 25 * seed)
+    monkeypatch.setenv(_basis.TRANSLATE_DRIVER_ENV, "python")
+    ref = translate_to_target(qc, plan)
+    monkeypatch.setenv(_basis.TRANSLATE_DRIVER_ENV, "auto")
+    if _basis._translate_native(qc, plan) is None:
+        pytest.skip("native translation not available")
+    got = translate_to_target(qc, plan)
+    assert [repr(i) for i in got.instructions] == [repr(i) for i in ref.instructions]
+    reused = {id(i) for i in qc.instructions}
+    assert [id(i) in reused for i in got.instructions] == [
+        id(i) in reused for i in ref.instructions
+    ]
+
+
+def test_native_translation_leaves_errors_to_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quspect.circuit.parameter import Parameter
+    from quspect.transpiler import _basis
+
+    plan = plan_basis(BASES["ibm"])
+    qc = QuantumCircuit().h(0).cz(0, 1).ry(Parameter("p"), 1)
+    assert _basis._translate_native(qc, plan) is None
+    for driver in ("python", "auto"):
+        monkeypatch.setenv(_basis.TRANSLATE_DRIVER_ENV, driver)
+        with pytest.raises(ValueError, match="not in the target basis"):
+            translate_to_target(qc, plan)
+    monkeypatch.setenv(_basis.TRANSLATE_DRIVER_ENV, "fast")
+    with pytest.raises(ValueError, match=_basis.TRANSLATE_DRIVER_ENV):
+        translate_to_target(QuantumCircuit().h(0).cz(0, 1), plan)
