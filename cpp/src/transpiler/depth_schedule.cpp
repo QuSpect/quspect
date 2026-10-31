@@ -20,7 +20,162 @@ constexpr int kRounds = 2;
 
 using Score = std::pair<int, int>;
 
+// Sgs 的最早空闲时隙查询：每个资源一张"下一个空闲时隙"并查集（占用的时隙 t 指向 t + 1，
+// 查询时路径减半），与逐个时隙试探得到同一个时隙，但跳过成段已占用的时隙。
+//
+// 表项带代编号：Reset 只把代编号加一（旧代的表项视为空闲），表在同一次 BestDepthOrder 的
+// 各次 Sgs 之间复用，不必每次重新填充整个时间范围。
+class FreeSlots {
+ public:
+    void Reset(int num_resources) {
+        if (static_cast<int>(slots_.size()) < num_resources) {
+            slots_.resize(num_resources);
+        }
+        if (++gen_ == 0) {  // 代编号回绕：清空所有表项
+            for (auto& v : slots_) {
+                v.clear();
+            }
+            gen_ = 1;
+        }
+    }
+
+    // 资源 q 上不早于 t 的第一个空闲时隙。
+    std::int64_t Find(int q, std::int64_t t) {
+        std::vector<Slot>& e = slots_[q];
+        const auto size = static_cast<std::int64_t>(e.size());
+        std::int64_t x = t;
+        for (;;) {
+            if (x >= size || e[x].gen != gen_) {
+                return x;
+            }
+            const std::int64_t y = e[x].next;
+            if (y >= size || e[y].gen != gen_) {
+                return y;
+            }
+            const std::int32_t z = e[y].next;
+            e[x].next = z;
+            x = z;
+        }
+    }
+
+    void Occupy(int q, std::int64_t t) {
+        std::vector<Slot>& e = slots_[q];
+        if (static_cast<std::int64_t>(e.size()) <= t) {
+            e.resize(static_cast<std::size_t>(std::max<std::int64_t>(t + 1, 2 * static_cast<std::int64_t>(e.size()))));
+        }
+        e[t].next = static_cast<std::int32_t>(t + 1);
+        e[t].gen = gen_;
+    }
+
+ private:
+    struct Slot {
+        std::int32_t next = 0;
+        std::uint32_t gen = 0;
+    };
+    std::vector<std::vector<Slot>> slots_;
+    std::uint32_t gen_ = 0;
+};
+
+// Sgs 的就绪堆：按 (−prio, 节点) 取最小。−prio 的取值范围在 2^32 以内时打包成一个 64 位整数
+// 放进四叉堆（键互不相同，出堆次序与按对比较的二叉堆相同），否则按对比较。
+class ReadyHeap {
+ public:
+    ReadyHeap(const std::vector<std::int64_t>& prio, const std::vector<int>& nodes) {
+        std::int64_t lo = 0;
+        std::int64_t hi = 0;
+        bool first = true;
+        for (int g : nodes) {
+            const std::int64_t k = -prio[g];
+            if (first || k < lo) {
+                lo = k;
+            }
+            if (first || k > hi) {
+                hi = k;
+            }
+            first = false;
+        }
+        // hi ≥ lo，无符号差即真实差值（不会溢出）
+        packed_ = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo) < (std::uint64_t{1} << 32)
+                  && nodes.size() < (std::size_t{1} << 31);
+        base_ = lo;
+        if (packed_) {
+            keys_.reserve(nodes.size());
+        }
+    }
+
+    void Push(std::int64_t neg_prio, int node) {
+        if (packed_) {
+            // 四叉最小堆：上浮
+            const std::uint64_t key =
+                (static_cast<std::uint64_t>(neg_prio - base_) << 32) | static_cast<std::uint32_t>(node);
+            std::size_t i = keys_.size();
+            keys_.push_back(key);
+            while (i > 0) {
+                const std::size_t parent = (i - 1) / 4;
+                if (keys_[parent] <= key) {
+                    break;
+                }
+                keys_[i] = keys_[parent];
+                i = parent;
+            }
+            keys_[i] = key;
+        } else {
+            pairs_.emplace_back(neg_prio, node);
+            std::push_heap(pairs_.begin(), pairs_.end(), std::greater<std::pair<std::int64_t, int>>());
+        }
+    }
+
+    bool Empty() const {
+        return packed_ ? keys_.empty() : pairs_.empty();
+    }
+
+    int Pop() {
+        if (packed_) {
+            const int node = static_cast<int>(keys_.front() & 0xffffffffu);
+            const std::uint64_t key = keys_.back();
+            keys_.pop_back();
+            const std::size_t size = keys_.size();
+            if (size > 0) {
+                // 下沉
+                std::size_t i = 0;
+                for (;;) {
+                    const std::size_t first = 4 * i + 1;
+                    if (first >= size) {
+                        break;
+                    }
+                    std::size_t best = first;
+                    const std::size_t last = std::min(first + 4, size);
+                    for (std::size_t c = first + 1; c < last; ++c) {
+                        if (keys_[c] < keys_[best]) {
+                            best = c;
+                        }
+                    }
+                    if (keys_[best] >= key) {
+                        break;
+                    }
+                    keys_[i] = keys_[best];
+                    i = best;
+                }
+                keys_[i] = key;
+            }
+            return node;
+        }
+        std::pop_heap(pairs_.begin(), pairs_.end(), std::greater<std::pair<std::int64_t, int>>());
+        const int node = pairs_.back().second;
+        pairs_.pop_back();
+        return node;
+    }
+
+ private:
+    bool packed_ = false;
+    std::int64_t base_ = 0;
+    std::vector<std::uint64_t> keys_;
+    std::vector<std::pair<std::int64_t, int>> pairs_;
+};
+
 // 一个输入序列上各比特的对易组与（可选）双比特门链的先后约束。
+//
+// 组员与链后继按 CSR 存放（每个组 / 节点占一段连续下标，顺序与逐个追加相同）。
 class Groups {
  public:
     Groups(const ScheduleProblem& p, int num_resources, const std::vector<int>& seq, bool chain)
@@ -29,10 +184,11 @@ class Groups {
         const int slots = p.offsets.back();
         group_.assign(slots, 0);
         chain_pred_.assign(slots, -1);
-        chain_succ_.assign(n, {});
         std::vector<int> last_group(num_resources, -1);
         std::vector<int> last_axis(num_resources, kNoAxis);
         std::vector<int> last_two(num_resources, -1);
+        std::vector<int> group_size;
+        std::vector<int> succ_count(n, 0);
         for (int g : seq_) {
             for (int s = p.offsets[g]; s < p.offsets[g + 1]; ++s) {
                 const int q = p.resources[s];
@@ -40,10 +196,10 @@ class Groups {
                 int gid;
                 if (last_group[q] >= 0 && a != kNoAxis && last_axis[q] == a) {
                     gid = last_group[q];
-                    members_[gid].push_back(g);
+                    ++group_size[gid];
                 } else {
-                    gid = static_cast<int>(members_.size());
-                    members_.push_back({g});
+                    gid = static_cast<int>(group_size.size());
+                    group_size.push_back(1);
                     next_.push_back(-1);
                     if (last_group[q] >= 0) {
                         next_[last_group[q]] = gid;
@@ -56,24 +212,45 @@ class Groups {
                     const int prev = last_two[q];
                     if (prev >= 0 && group_[SlotOf(prev, q)] == gid) {
                         chain_pred_[s] = prev;
-                        chain_succ_[prev].push_back(g);
+                        ++succ_count[prev];
                     }
                     last_two[q] = g;
                 }
             }
         }
-        prev_.assign(members_.size(), -1);
-        for (std::size_t gid = 0; gid < next_.size(); ++gid) {
+        const int num_groups = static_cast<int>(group_size.size());
+        member_begin_.assign(num_groups + 1, 0);
+        for (int gid = 0; gid < num_groups; ++gid) {
+            member_begin_[gid + 1] = member_begin_[gid] + group_size[gid];
+        }
+        succ_begin_.assign(n + 1, 0);
+        for (int g = 0; g < n; ++g) {
+            succ_begin_[g + 1] = succ_begin_[g] + succ_count[g];
+        }
+        members_.resize(member_begin_.back());
+        succ_.resize(succ_begin_.back());
+        std::vector<int> member_fill(member_begin_.begin(), member_begin_.end() - 1);
+        std::vector<int> succ_fill(succ_begin_.begin(), succ_begin_.end() - 1);
+        for (int g : seq_) {
+            for (int s = p.offsets[g]; s < p.offsets[g + 1]; ++s) {
+                members_[member_fill[group_[s]]++] = g;
+                if (chain_pred_[s] >= 0) {
+                    succ_[succ_fill[chain_pred_[s]]++] = g;
+                }
+            }
+        }
+        prev_.assign(num_groups, -1);
+        for (int gid = 0; gid < num_groups; ++gid) {
             if (next_[gid] >= 0) {
-                prev_[next_[gid]] = static_cast<int>(gid);
+                prev_[next_[gid]] = gid;
             }
         }
     }
 
     // 关键路径优先级（剩余时间的下界；组的尾部还受同一比特上组员总时长的约束）。
     std::vector<std::int64_t> BottomLevels(const std::vector<int>& dur) const {
-        std::vector<std::int64_t> tail(members_.size(), 0);
-        std::vector<std::int64_t> bl(chain_succ_.size(), 0);
+        std::vector<std::int64_t> tail(prev_.size(), 0);
+        std::vector<std::int64_t> bl(succ_begin_.size() - 1, 0);
         for (auto it = seq_.rbegin(); it != seq_.rend(); ++it) {
             const int g = *it;
             std::int64_t b = 0;
@@ -83,7 +260,8 @@ class Groups {
                     b = tail[nx];
                 }
             }
-            for (int succ : chain_succ_[g]) {
+            for (int k = succ_begin_[g]; k < succ_begin_[g + 1]; ++k) {
+                const int succ = succ_[k];
                 if (bl[succ] > b) {
                     b = bl[succ];
                 }
@@ -91,14 +269,14 @@ class Groups {
             bl[g] = dur[g] + b;
             for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
                 const int gid = group_[s];
-                const std::vector<int>& mem = members_[gid];
-                if (mem.front() != g) {
+                if (members_[member_begin_[gid]] != g) {
                     continue;
                 }
                 const int nx = next_[gid];
                 std::int64_t t = nx >= 0 ? tail[nx] : 0;
                 std::int64_t worst = 0;
-                for (int h : mem) {
+                for (int k = member_begin_[gid]; k < member_begin_[gid + 1]; ++k) {
+                    const int h = members_[k];
                     t += dur[h];
                     worst = std::max(worst, bl[h]);
                 }
@@ -109,16 +287,16 @@ class Groups {
     }
 
     // 插入式串行调度生成；返回按（开始时间、时长、调度次序）排列的节点顺序。
-    std::vector<int> Sgs(const std::vector<std::int64_t>& prio, const std::vector<int>& dur) const {
-        const int n = static_cast<int>(chain_succ_.size());
-        std::vector<int> remaining(members_.size());
-        for (std::size_t gid = 0; gid < members_.size(); ++gid) {
-            remaining[gid] = static_cast<int>(members_[gid].size());
+    std::vector<int> Sgs(const std::vector<std::int64_t>& prio, const std::vector<int>& dur, FreeSlots* free) const {
+        const int n = static_cast<int>(succ_begin_.size()) - 1;
+        const int num_groups = static_cast<int>(prev_.size());
+        std::vector<int> remaining(num_groups);
+        for (int gid = 0; gid < num_groups; ++gid) {
+            remaining[gid] = member_begin_[gid + 1] - member_begin_[gid];
         }
-        std::vector<std::int64_t> group_fin(members_.size(), 0);
+        std::vector<std::int64_t> group_fin(num_groups, 0);
         std::vector<int> pending(n, 0);
-        using Entry = std::pair<std::int64_t, int>;  // (−prio, node)：小者先出
-        std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> heap;
+        ReadyHeap heap(prio, seq_);
         for (int g : seq_) {
             int c = 0;
             for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
@@ -131,21 +309,16 @@ class Groups {
             }
             pending[g] = c;
             if (c == 0) {
-                heap.emplace(-prio[g], g);
+                heap.Push(-prio[g], g);
             }
         }
-        std::vector<std::vector<std::uint8_t>> busy(num_resources_);
+        free->Reset(num_resources_);
         std::vector<std::int64_t> start(n, 0);
         std::vector<std::int64_t> fin(n, 0);
-        std::vector<int> pos(n, 0);
-        int count = 0;
-        auto occupied = [&](int q, std::int64_t t) {
-            const auto& b = busy[q];
-            return t < static_cast<std::int64_t>(b.size()) && b[t] != 0;
-        };
-        while (!heap.empty()) {
-            const int g = heap.top().second;
-            heap.pop();
+        std::vector<int> popped;
+        popped.reserve(n);
+        while (!heap.Empty()) {
+            const int g = heap.Pop();
             std::int64_t est = 0;
             for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
                 const int pg = prev_[group_[s]];
@@ -159,30 +332,24 @@ class Groups {
             }
             std::int64_t t = est;
             if (dur[g] != 0) {
-                for (;;) {
-                    bool free = true;
+                // 所有资源都空闲的最早时隙 ≥ est
+                for (bool moved = true; moved;) {
+                    moved = false;
                     for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
-                        if (occupied(p_.resources[s], t)) {
-                            free = false;
-                            break;
+                        const std::int64_t f = free->Find(p_.resources[s], t);
+                        if (f != t) {
+                            t = f;
+                            moved = true;
                         }
                     }
-                    if (free) {
-                        break;
-                    }
-                    ++t;
                 }
                 for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
-                    auto& b = busy[p_.resources[s]];
-                    if (static_cast<std::int64_t>(b.size()) <= t) {
-                        b.resize(static_cast<std::size_t>(std::max<std::int64_t>(t + 1, 2 * b.size())), 0);
-                    }
-                    b[t] = 1;
+                    free->Occupy(p_.resources[s], t);
                 }
             }
             start[g] = t;
             fin[g] = t + dur[g];
-            pos[g] = count++;
+            popped.push_back(g);
             for (int s = p_.offsets[g]; s < p_.offsets[g + 1]; ++s) {
                 const int gid = group_[s];
                 if (fin[g] > group_fin[gid]) {
@@ -191,34 +358,26 @@ class Groups {
                 if (--remaining[gid] == 0) {
                     const int nx = next_[gid];
                     if (nx >= 0) {
-                        for (int h : members_[nx]) {
+                        for (int k = member_begin_[nx]; k < member_begin_[nx + 1]; ++k) {
+                            const int h = members_[k];
                             if (--pending[h] == 0) {
-                                heap.emplace(-prio[h], h);
+                                heap.Push(-prio[h], h);
                             }
                         }
                     }
                 }
             }
-            for (int succ : chain_succ_[g]) {
+            for (int k = succ_begin_[g]; k < succ_begin_[g + 1]; ++k) {
+                const int succ = succ_[k];
                 if (--pending[succ] == 0) {
-                    heap.emplace(-prio[succ], succ);
+                    heap.Push(-prio[succ], succ);
                 }
             }
         }
-        if (count != n) {
+        if (static_cast<int>(popped.size()) != n) {
             throw std::logic_error("BestDepthOrder: cyclic precedence");
         }
-        std::vector<int> order(seq_);
-        std::sort(order.begin(), order.end(), [&](int a, int b) {
-            if (start[a] != start[b]) {
-                return start[a] < start[b];
-            }
-            if (dur[a] != dur[b]) {
-                return dur[a] < dur[b];
-            }
-            return pos[a] < pos[b];
-        });
-        return order;
+        return SortedBySchedule(popped, start, dur);
     }
 
  private:
@@ -231,15 +390,68 @@ class Groups {
         throw std::logic_error("BestDepthOrder: resource not found");
     }
 
+    // popped（调度次序）按（开始时间、时长、调度次序）排序。键的取值范围不大时用稳定的
+    // 计数排序（popped 已按调度次序排列），否则比较排序；两者结果相同（键互不相同）。
+    static std::vector<int> SortedBySchedule(const std::vector<int>& popped, const std::vector<std::int64_t>& start,
+                                             const std::vector<int>& dur) {
+        const auto n = static_cast<std::int64_t>(popped.size());
+        std::int64_t max_start = 0;
+        int max_dur = 0;
+        bool small = true;
+        for (int g : popped) {
+            if (start[g] < 0 || dur[g] < 0) {
+                small = false;
+                break;
+            }
+            max_start = std::max(max_start, start[g]);
+            max_dur = std::max(max_dur, dur[g]);
+        }
+        const std::int64_t width = static_cast<std::int64_t>(max_dur) + 1;
+        small = small && max_dur < (1 << 20) && max_start < (std::int64_t{1} << 40)
+                && (max_start + 1) * width <= 8 * n + 1024;
+        if (!small) {
+            std::vector<int> order(popped);
+            std::vector<int> pos(start.size(), 0);
+            for (std::size_t k = 0; k < popped.size(); ++k) {
+                pos[popped[k]] = static_cast<int>(k);
+            }
+            std::sort(order.begin(), order.end(), [&](int a, int b) {
+                if (start[a] != start[b]) {
+                    return start[a] < start[b];
+                }
+                if (dur[a] != dur[b]) {
+                    return dur[a] < dur[b];
+                }
+                return pos[a] < pos[b];
+            });
+            return order;
+        }
+        const std::int64_t keys = (max_start + 1) * width;
+        std::vector<int> count(static_cast<std::size_t>(keys) + 1, 0);
+        for (int g : popped) {
+            ++count[static_cast<std::size_t>(start[g] * width + dur[g]) + 1];
+        }
+        for (std::int64_t k = 0; k < keys; ++k) {
+            count[k + 1] += count[k];
+        }
+        std::vector<int> order(popped.size());
+        for (int g : popped) {
+            order[count[static_cast<std::size_t>(start[g] * width + dur[g])]++] = g;
+        }
+        return order;
+    }
+
     const ScheduleProblem& p_;
     std::vector<int> seq_;
     int num_resources_;
     std::vector<int> group_;
-    std::vector<std::vector<int>> members_;
+    std::vector<int> member_begin_;
+    std::vector<int> members_;
     std::vector<int> next_;
     std::vector<int> prev_;
     std::vector<int> chain_pred_;
-    std::vector<std::vector<int>> chain_succ_;
+    std::vector<int> succ_begin_;
+    std::vector<int> succ_;
 };
 
 // 按顺序 ASAP 排布的开始 / 结束时间。
@@ -312,6 +524,8 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         dur_all[g] = p.counted[g] ? 1 : 0;
         dur_two[g] = p.two[g] ? 1 : 0;
     }
+    // 各次 Sgs 共用的空闲时隙表
+    FreeSlots free_slots;
     auto depth_score = [&](const std::vector<int>& order) -> Score {
         return {Metric(p, num_resources, order, dur_all), Metric(p, num_resources, order, dur_two)};
     };
@@ -329,13 +543,13 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
         std::vector<std::int64_t> fin;
         for (int round = 0; round < kRounds; ++round) {
             Asap(p, num_resources, cur, dur, &start, &fin);
-            cur = bwd.Sgs(fin, dur);
+            cur = bwd.Sgs(fin, dur, &free_slots);
             std::reverse(cur.begin(), cur.end());
             Asap(p, num_resources, cur, dur, &start, &fin);
             for (auto& s : start) {
                 s = -s;
             }
-            cur = fwd.Sgs(start, dur);
+            cur = fwd.Sgs(start, dur, &free_slots);
             const Score sc = score(cur);
             if (sc < best_score) {
                 best = cur;
@@ -353,7 +567,7 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
     auto total = [&](const std::vector<int>& seq, bool chain) {
         const Groups fwd = make(seq, chain);
         const Groups bwd = make(reversed(seq), chain);
-        std::vector<int> first = fwd.Sgs(fwd.BottomLevels(dur_all), dur_all);
+        std::vector<int> first = fwd.Sgs(fwd.BottomLevels(dur_all), dur_all, &free_slots);
         return justify(fwd, bwd, std::move(first), dur_all, depth_score);
     };
 
@@ -370,7 +584,7 @@ std::vector<int> BestDepthOrder(const ScheduleProblem& p) {
     {
         const Groups free = make(seq, false);
         const Groups free_r = make(reversed(seq), false);
-        std::vector<int> by_two = free.Sgs(free.BottomLevels(dur_two), dur_two);
+        std::vector<int> by_two = free.Sgs(free.BottomLevels(dur_two), dur_two, &free_slots);
         by_two = justify(free, free_r, std::move(by_two), dur_two, two_score);
         cands.push_back(total(by_two, true));
     }
