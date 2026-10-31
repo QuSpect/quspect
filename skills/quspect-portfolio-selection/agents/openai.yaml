@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Portfolio Selection"
+  short_description: "Build mean-variance portfolio QUBO applications."
+  default_prompt: "Use $quspect-portfolio-selection to model and solve a fixed-cardinality mean-variance portfolio with QuSpect."

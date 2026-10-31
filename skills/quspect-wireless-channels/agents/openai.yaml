@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Wireless Channels"
+  short_description: "Build interference-aware channel assignments."
+  default_prompt: "Use $quspect-wireless-channels to model and solve an interference-aware wireless channel assignment with QuSpect."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Optimization"
+  short_description: "Use QuSpect layered BQM and Ising APIs."
+  default_prompt: "Use $quspect-optimization to build, lower, solve, and decode a binary quadratic optimization problem with QuSpect."

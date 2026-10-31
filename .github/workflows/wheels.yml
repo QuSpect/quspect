@@ -1,0 +1,493 @@
+name: Wheels
+
+# 构建并测试 PyPI 发布物：cibuildwheel 构建 CPython 二进制 wheel
+# （manylinux_2_28 x86_64 / manylinux_2_28 aarch64 / Windows AMD64 / macOS arm64），
+# 外加 sdist。Linux aarch64 wheel 在 GitHub 原生 arm runner（ubuntu-24.04-arm）上构建，
+# 不走 QEMU 模拟；build_wheels 按 runner 架构设置 CIBW_ARCHS_LINUX。
+# macOS wheel 在 macos-15 runner 上构建，但以 macOS 14 为最低系统版本
+# （平台标签 macosx_14_0_arm64），build_wheels 中有检查步骤保证这一点。
+# 每个（操作系统, Python 版本）组合都是一个独立的并行作业。
+# Python 版本列表只在一处定义：pyproject.toml 的 [tool.cibuildwheel] build
+# （cp310-* … cp315-*），由 plan 作业读取后生成矩阵。
+# - pull_request 到 main：只构建最旧与最新的 Python（4 个平台 x 2 = 8 个作业）
+# - workflow_dispatch：默认构建全部版本（full 输入默认 true，可手动取消）
+# - workflow_call：release.yml 打 tag 发布时以 full: true 调用，构建全部 wheel
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Build every supported Python version (otherwise only the oldest and newest)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      full:
+        description: "Build every supported Python version (otherwise only the oldest and newest)"
+        type: boolean
+        default: false
+    outputs:
+      wheel-count:
+        description: "Number of wheels the build matrix produces (one per OS/Python job)"
+        value: ${{ jobs.plan.outputs.wheel-count }}
+
+# 同一个 PR（或同一 ref）有新运行时取消旧的运行。
+# 前缀 wheels- 与调用方（release.yml）的并发组区分开，避免嵌套调用时互相等待。
+concurrency:
+  group: wheels-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # macOS wheel 的最低系统版本，必须与 pyproject.toml [tool.cibuildwheel.macos] 中的
+  # MACOSX_DEPLOYMENT_TARGET 及 before-all 的 --deployment-target 一致。
+  QSPECT_MACOS_DEPLOYMENT_TARGET: "14.0"
+
+jobs:
+  # 从 pyproject.toml 读取 Python 版本列表，生成 os x python 矩阵。
+  # full 为 true（发布 / 手动触发）时取全部版本，否则（PR）只取最旧与最新两个版本。
+  # newest 供 no-avx2-check 选择 wheel；wheel-count 供 release.yml 校验发布物数量。
+  plan:
+    name: plan build matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      newest: ${{ steps.plan.outputs.newest }}
+      wheel-count: ${{ steps.plan.outputs.wheel-count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: pyproject.toml
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compute matrix
+        id: plan
+        env:
+          FULL: ${{ inputs.full == true }}
+          # ubuntu-latest 构建 Linux x86_64，ubuntu-24.04-arm（GitHub 原生 arm64 runner）
+          # 构建 Linux aarch64。macos-15 是 arm64 runner；只发布 macOS arm64 wheel。
+          # 不用 macos-14：该 runner 池排队经常 5–15 分钟。
+          OSES: '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-15"]'
+        run: |
+          set -euo pipefail
+          python - <<'EOF'
+          import json
+          import os
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          config = tomllib.loads(Path("pyproject.toml").read_text())
+          patterns = config["tool"]["cibuildwheel"]["build"]
+          versions = []
+          for pattern in patterns:
+              match = re.fullmatch(r"cp3(\d+)-\*", pattern)
+              if match is None:
+                  sys.exit(f"unsupported [tool.cibuildwheel] build pattern {pattern!r}; expected 'cp3XX-*'")
+              versions.append(int(match.group(1)))
+          tags = [f"cp3{minor}" for minor in sorted(set(versions))]
+          if not tags:
+              sys.exit("[tool.cibuildwheel] build is empty")
+          full = os.environ["FULL"] == "true"
+          pythons = tags if full else sorted({tags[0], tags[-1]}, key=tags.index)
+          oses = json.loads(os.environ["OSES"])
+          matrix = {"os": oses, "python": pythons}
+          print(f"full={full} matrix={matrix}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"matrix={json.dumps(matrix)}\n")
+              out.write(f"newest={tags[-1]}\n")
+              out.write(f"wheel-count={len(oses) * len(pythons)}\n")
+          EOF
+
+  build_wheels:
+    name: wheels (${{ matrix.os }}, ${{ matrix.python }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      # setuptools-scm 需要完整历史和 tag 才能算出版本号。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Windows 一律用 Ninja + MSVC 构建（PR 与发布相同），而不是 Visual Studio 生成器：
+      # VS 生成器会忽略 CMAKE_CXX_COMPILER_LAUNCHER，PR 构建的 sccache 无法生效。
+      # msvc-dev-cmd 通过 vswhere -latest 选择最新的 VS（VS 18 2026，MSVC 14.5x 工具集）
+      # 并导出 x64 开发环境（cl.exe、INCLUDE/LIB、VCToolsRedistDir 等）；
+      # scikit-build-core 读取 CMAKE_GENERATOR，ninja 不在 PATH 上时自动安装。
+      # Release 配置的 MSVC 标志是 /O2 /Ob2 /DNDEBUG，不含与 sccache 不兼容的 /Zi。
+      - name: Set up MSVC developer environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      - name: Use the Ninja generator (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "VCToolsVersion=${VCToolsVersion:-unset}"
+          command -v cl
+
+      # ---- sccache：只用于 pull_request 构建 ----
+      # 发布（release.yml 以 workflow_call 调用，事件为 push）与 workflow_dispatch
+      # 构建一律从头编译，不设置编译器 launcher，也不读写缓存。
+      # sccache 以 GitHub Actions 缓存为后端（SCCACHE_GHA_ENABLED）；
+      # SCCACHE_IGNORE_SERVER_IO_ERROR=1 让客户端在与服务进程通信失败时退回本地编译，
+      # 服务进程本身在构建前单独启动，启动失败（如缓存后端不可用）时不设置 launcher，
+      # 因此缓存问题永远不会导致构建失败。
+      - name: Install sccache (pull requests)
+        if: github.event_name == 'pull_request'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+
+      # 命中缓存要求编译参数与预处理结果中的绝对路径稳定：
+      # - SKBUILD_BUILD_DIR 固定 CMake 构建目录（默认是随机临时目录，FetchContent
+      #   的 nlohmann_json 头文件位于其中）。每个作业只构建一个 Python 版本，目录名
+      #   不含版本号，以便纯 C++ 编译单元在不同 Python 版本之间共享缓存。
+      #   build/ 已在 sdist.exclude 中（scikit-build-core 复制 wheel.packages 时同样套用），
+      #   不会进入 sdist 或 wheel。
+      # - 已知限制：pybind11 头文件来自 build 的隔离环境（每次随机的临时路径），
+      #   Windows 上 Python 头文件也位于 cibuildwheel 的随机临时目录，因此
+      #   src/pybind/module.cpp 这一编译单元通常无法命中；其余编译单元不受影响。
+      # Linux：cibuildwheel 在 manylinux 容器内编译。sccache-action 安装的是静态 musl
+      # 二进制，before-all 经容器内的 /host 挂载把它复制进容器并启动服务进程
+      # （tools/sccache_manylinux_setup.sh）。缓存凭据写入 RUNNER_TEMP 下的环境文件
+      # 交给容器内的服务进程，而不经 environment-pass 传递（cibuildwheel 会在日志中
+      # 打印 environment 选项）。before-test 时打印容器内的统计。
+      # sccache-action 按 runner 架构下载对应的 musl 二进制（x86_64 / aarch64），
+      # 与同架构的 manylinux 容器匹配；tools/sccache_manylinux_setup.sh 与架构无关。
+      - name: Configure sccache (pull requests)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "SKBUILD_BUILD_DIR=build/sccache"
+          } >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            env_file="$RUNNER_TEMP/sccache-gha.env"
+            (
+              umask 077
+              {
+                printf 'SCCACHE_GHA_ENABLED=true\n'
+                printf 'SCCACHE_IDLE_TIMEOUT=0\n'
+                for name in ACTIONS_RESULTS_URL ACTIONS_RUNTIME_TOKEN ACTIONS_CACHE_SERVICE_V2 ACTIONS_CACHE_URL; do
+                  if [ -n "${!name:-}" ]; then
+                    printf '%s=%q\n' "$name" "${!name}"
+                  fi
+                done
+              } > "$env_file"
+            )
+            {
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+              echo "QSPECT_SCCACHE_HOST_BIN=$SCCACHE_PATH"
+              echo "QSPECT_SCCACHE_ENV_FILE=$env_file"
+              echo "CIBW_ENVIRONMENT_PASS_LINUX=CMAKE_CXX_COMPILER_LAUNCHER SKBUILD_BUILD_DIR SCCACHE_IGNORE_SERVER_IO_ERROR SCCACHE_IDLE_TIMEOUT QSPECT_SCCACHE_HOST_BIN QSPECT_SCCACHE_ENV_FILE"
+              echo "CIBW_BEFORE_ALL_LINUX=bash {project}/tools/sccache_manylinux_setup.sh"
+              echo "CIBW_BEFORE_TEST_LINUX=sccache --show-stats || true"
+            } >> "$GITHUB_ENV"
+          else
+            export SCCACHE_GHA_ENABLED=true SCCACHE_IDLE_TIMEOUT=0
+            "$SCCACHE_PATH" --version
+            if "$SCCACHE_PATH" --start-server; then
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache" >> "$GITHUB_ENV"
+            else
+              echo "::warning::sccache server failed to start; compiling without the cache"
+            fi
+          fi
+
+      # macOS：before-all 在宿主机上用 tools/build_libomp_macos.sh 从 LLVM 源码构建
+      # libomp（minos = deployment target），安装到 ~/.cache/quspect-libomp。
+      # 缓存键包含脚本哈希（其中固定了 LLVM 版本与源码 sha256）与 deployment target；
+      # 脚本另外用 stamp 文件校验缓存内容，不匹配时重新构建。
+      - name: Cache libomp (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/quspect-libomp
+          key: libomp-${{ runner.os }}-${{ runner.arch }}-macos${{ env.QSPECT_MACOS_DEPLOYMENT_TARGET }}-${{ hashFiles('tools/build_libomp_macos.sh') }}
+
+      # 构建 / 测试配置全部在 pyproject.toml 的 [tool.cibuildwheel] 中；
+      # CIBW_BUILD 覆盖其中的 build 列表，使本作业只构建一个 Python 版本。
+      # skip（musllinux）与 macOS / Windows 的 archs 仍然生效；cp3XXt（free-threaded）
+      # 标识符不匹配 cp3XX-*，因此不会被构建。
+      # CIBW_ARCHS_LINUX 覆盖 pyproject 中 Linux 的 archs（x86_64、aarch64），让每个
+      # Linux runner 只构建本机架构：x86 runner 只构建 x86_64，arm runner 只构建
+      # aarch64，从不经 QEMU 交叉构建。runner 上下文在 job 级 env 中不可用，
+      # 因此写在 step 级 env 里；该变量只影响 Linux，在 macOS / Windows 上被忽略。
+      # extras: uv 让 action 一并安装 uv 并放进 PATH：pyproject 中
+      # build-frontend = "build[uv]" 在 macOS / Windows 上需要宿主机的 uv。
+      - name: Build and test wheels
+        uses: pypa/cibuildwheel@v4.3.5
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-*
+          CIBW_ARCHS_LINUX: ${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+        with:
+          output-dir: wheelhouse
+          extras: uv
+
+      # Linux 的统计在容器内由 before-test 打印（宿主机上的 sccache 未参与编译）。
+      - name: sccache statistics (pull requests)
+        if: always() && github.event_name == 'pull_request' && runner.os != 'Linux'
+        shell: bash
+        run: '"$SCCACHE_PATH" --show-stats || true'
+
+      - name: List wheels
+        shell: bash
+        run: ls -l wheelhouse
+
+      # delocate 会把 wheel 的平台标签提升到被打包 dylib 中最大的 minos。
+      # 这里确认标签仍是 macosx_<deployment target>_arm64，且 wheel 内所有 Mach-O
+      # （扩展模块与 .dylibs 中的 libomp）的 minos 都不高于 deployment target。
+      - name: Check macOS wheel platform tag and minos
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$QSPECT_MACOS_DEPLOYMENT_TARGET"
+          expected="macosx_${target//./_}_arm64"
+          shopt -s nullglob
+          wheels=(wheelhouse/*.whl)
+          if [ ${#wheels[@]} -eq 0 ]; then
+            echo "::error::no wheels in wheelhouse"
+            exit 1
+          fi
+          status=0
+          for whl in "${wheels[@]}"; do
+            name=$(basename "$whl" .whl)
+            tag=${name##*-}
+            echo "$whl: platform tag $tag"
+            if [ "$tag" != "$expected" ]; then
+              echo "::error::$whl has platform tag $tag, expected $expected"
+              status=1
+            fi
+            dir=$(mktemp -d)
+            unzip -q "$whl" -d "$dir"
+            if ! find "$dir" -path '*/.dylibs/libomp*.dylib' | grep -q .; then
+              echo "::error::$whl does not bundle libomp"
+              status=1
+            fi
+            while IFS= read -r -d '' binary; do
+              minos=$(vtool -show-build "$binary" | awk '$1 == "minos" { print $2; exit }')
+              echo "  ${binary#"$dir"/}: minos ${minos:-unknown}"
+              if [ -z "$minos" ] || [ "$(printf '%s\n%s\n' "$minos" "$target" | sort -V | tail -n 1)" != "$target" ]; then
+                echo "::error::${binary#"$dir"/} in $whl requires macOS ${minos:-unknown} (> $target)"
+                status=1
+              fi
+            done < <(find "$dir" -type f \( -name '*.so' -o -name '*.dylib' \) -print0)
+            rm -rf "$dir"
+          done
+          exit "$status"
+
+      # auditwheel（manylinux_2_28 镜像）给 wheel 打的是复合平台标签，例如
+      # manylinux_2_27_x86_64.manylinux_2_28_x86_64：除镜像对应的 manylinux_2_28 外，
+      # 还会附上 wheel 实际满足的更旧 glibc 策略。因此用 packaging 解析出标签集合，
+      # 要求其中包含 manylinux_2_28_<arch>，且每个平台标签都是 glibc ≤ 2.28、架构为
+      # 本 runner 架构的 manylinux 标签（不能混入其他架构，也不能要求更新的 glibc）。
+      # 同时检查 wheel 内容：扩展模块后缀与架构一致；_core_scalar 恰有一个；
+      # _core_avx2 在 x86_64 上恰有一个、在 aarch64 上不存在；auditwheel 把 libgomp
+      # 打包进 quspect.libs/（libgomp-<hash>.so.*）。
+      - name: Set up Python for the Linux wheel check
+        if: runner.os == 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check Linux wheel platform tag and contents
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          WHEEL_ARCH: ${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet "packaging>=24"
+          python - <<'EOF'
+          import os
+          import re
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          from packaging.utils import parse_wheel_filename
+
+          arch = os.environ["WHEEL_ARCH"]
+          expected = f"manylinux_2_28_{arch}"
+          platform_re = re.compile(rf"manylinux_(\d+)_(\d+)_{re.escape(arch)}")
+          wheels = sorted(Path("wheelhouse").glob("*.whl"))
+          if not wheels:
+              print("::error::no wheels in wheelhouse")
+              sys.exit(1)
+          errors = []
+
+          def fail(message):
+              print(f"::error::{message}")
+              errors.append(message)
+
+          for whl in wheels:
+              _, _, _, tags = parse_wheel_filename(whl.name)
+              platforms = sorted({tag.platform for tag in tags})
+              print(f"{whl}: platform tags {platforms}")
+              if expected not in platforms:
+                  fail(f"{whl.name} lacks platform tag {expected} (has {platforms})")
+              for plat in platforms:
+                  match = platform_re.fullmatch(plat)
+                  if match is None or (int(match[1]), int(match[2])) > (2, 28):
+                      fail(f"{whl.name} has unexpected platform tag {plat} (expected manylinux_2_X_{arch}, X <= 28)")
+              with zipfile.ZipFile(whl) as zf:
+                  names = zf.namelist()
+              ext_re = re.compile(r"quspect/(_core_scalar|_core_avx2)\.[^/]+\.so")
+              modules = [n for n in names if ext_re.fullmatch(n)]
+              print(f"  extension modules: {modules}")
+              for module in modules:
+                  if not module.endswith(f"-{arch}-linux-gnu.so"):
+                      fail(f"{module} in {whl.name} is not built for {arch}")
+              scalar = [n for n in modules if n.startswith("quspect/_core_scalar.")]
+              avx2 = [n for n in modules if n.startswith("quspect/_core_avx2.")]
+              if len(scalar) != 1:
+                  fail(f"{whl.name} must contain exactly one _core_scalar module, found {scalar}")
+              if arch == "x86_64" and len(avx2) != 1:
+                  fail(f"{whl.name} must contain exactly one _core_avx2 module, found {avx2}")
+              if arch != "x86_64" and avx2:
+                  fail(f"{whl.name} must not contain _core_avx2 on {arch}, found {avx2}")
+              gomp = [n for n in names if re.fullmatch(r"quspect\.libs/libgomp[^/]*\.so[^/]*", n)]
+              print(f"  bundled libgomp: {gomp}")
+              if not gomp:
+                  fail(f"{whl.name} does not bundle libgomp in quspect.libs/")
+          sys.exit(1 if errors else 0)
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ matrix.python }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      # sdist 必须小且干净：不能带本地构建产物、缓存或仓库内部工具。
+      - name: Check sdist contents
+        run: |
+          set -euo pipefail
+          sdist=$(ls dist/*.tar.gz)
+          size=$(stat -c %s "$sdist")
+          echo "sdist: $sdist ($size bytes)"
+          if [ "$size" -gt 5000000 ]; then
+            echo "::error::sdist is larger than 5 MB ($size bytes)"
+            exit 1
+          fi
+          tar tzf "$sdist" > sdist-files.txt
+          # 顶层目录模式锚定到 sdist 根（<name>-<ver>/），与 pyproject 的 sdist.exclude
+          # 中以 / 开头的条目对应；扩展名与 __pycache__ 在任意层级都排除。
+          wc -l sdist-files.txt
+          if grep -E '\.(so|pyd|dylib|dll)$|__pycache__|^[^/]+/(cpp/build|build-|build/|dist/|docs/build/|qiskit_tests/|skills/|tools/|\.github/|\.venv/)|^[^/]+/uv\.lock$' sdist-files.txt; then
+            echo "::error::sdist contains files that must be excluded (listed above)"
+            exit 1
+          fi
+          for required in PKG-INFO pyproject.toml LICENSE NOTICE README.md cpp/CMakeLists.txt quspect/__init__.py quspect/py.typed; do
+            if ! grep -Eq "^[^/]+/${required}$" sdist-files.txt; then
+              echo "::error::sdist is missing ${required}"
+              exit 1
+            fi
+          done
+
+      # 证明 sdist 可以独立构建并安装（不依赖 git 历史，版本号来自 PKG-INFO）。
+      - name: Install from sdist
+        run: python -m pip install -v dist/*.tar.gz
+
+      # 在仓库外运行，确保导入的是刚安装的包。
+      - name: Smoke test the sdist build
+        working-directory: ${{ runner.temp }}
+        env:
+          QUSPECT_EXPECT_OPENMP: "1"
+        run: python "$GITHUB_WORKSPACE/tools/wheel_smoke.py" --project-dir "$GITHUB_WORKSPACE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cibw-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # 在 Intel SDE 模拟的 Nehalem（无 AVX/AVX2）CPU 上运行最新 Python 的 manylinux wheel，
+  # 证明不会加载 _core_avx2、scalar 路径中也没有 AVX 指令（否则 SDE 报错 / SIGILL）。
+  # ubuntu-latest（26.04）的 glibc 以 x86-64-v3 为基线构建，在 -nhm 下 ld.so 直接
+  # 报 "CPU does not support x86-64-v3"；因此 SDE 部分放进 manylinux_2_28 容器
+  # （AlmaLinux 8，基线 x86-64 glibc 2.28）运行。JS action（setup-sde、
+  # download-artifact）留在宿主执行，容器内只跑 tools/sde_manylinux_check.sh。
+  no-avx2-check:
+    name: no-AVX2 CPU (Intel SDE)
+    needs: [plan, build_wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cibw-wheels-ubuntu-latest-${{ needs.plan.outputs.newest }}
+          path: wheelhouse
+
+      # SDE 二进制托管在该 action 仓库的 GitHub Release 中（不依赖 Intel 下载站）；
+      # 按提交 SHA 固定（v6.0）。
+      - name: Set up Intel SDE
+        uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
+        with:
+          environmentVariableName: SDE_PATH
+          sdeVersion: 10.13.1
+
+      # 工作区与 SDE 目录按宿主同一路径只读挂载；容器内用 plan 给出的最新 Python
+      # （PYTHON_TAG，如 cp315；PR 与发布构建都包含它）创建 venv 安装 wheel，
+      # 把 tests/tools 复制到工作区外的临时目录，再用 tools/sde_chip_check.sh 运行
+      # 冒烟测试与 tests/native。SDE/Pin 依赖 ptrace，因此放开 SYS_PTRACE 与 seccomp。
+      # 宿主库（ld.so、libc、libpython、numpy、libgomp 等）中的违规仅汇总，
+      # 只有 QuSpect 自身模块（已安装包目录、_core_scalar/_core_avx2）中的违规判定失败。
+      - name: Smoke + native tests under SDE (-nhm) in manylinux_2_28
+        env:
+          MANYLINUX_IMAGE: quay.io/pypa/manylinux_2_28_x86_64
+          PYTHON_TAG: ${{ needs.plan.outputs.newest }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            -v "$SDE_PATH:$SDE_PATH:ro" \
+            -e GITHUB_WORKSPACE \
+            -e SDE_PATH \
+            -e PYTHON_TAG \
+            -e WHEEL_DIR="$GITHUB_WORKSPACE/wheelhouse" \
+            -w / \
+            "$MANYLINUX_IMAGE" \
+            bash "$GITHUB_WORKSPACE/tools/sde_manylinux_check.sh"

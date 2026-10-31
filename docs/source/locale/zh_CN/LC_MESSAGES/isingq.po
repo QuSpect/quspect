@@ -1,0 +1,134 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect 0.1\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-28 07:11-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/isingq.rst:2
+msgid "iSing cloud optimization"
+msgstr "iSing 云端优化"
+
+#: ../../source/isingq.rst:4
+msgid ""
+"Install ``quspect[isingq]`` to submit optimization models to iSing. This "
+"backend accepts binary quadratic models and logical Ising problems; it "
+"does not execute quantum circuits. The native extension is not required "
+"for compilation or cloud transport."
+msgstr ""
+"安装 ``quspect[isingq]`` 后即可向 iSing 提交优化模型。该后端接受二元二次模型和逻辑 Ising "
+"问题，不执行量子线路。编译和云端传输都不需要原生扩展。"
+
+#: ../../source/isingq.rst:10
+msgid "Compile without submitting"
+msgstr "仅编译不提交"
+
+#: ../../source/isingq.rst:21
+msgid ""
+"The uploaded CSV is upper triangular and minimizes ``x.T @ Q @ x``. "
+"Conversion preserves the original variable order and constants. Logical "
+"spins use ``s = 2x - 1``; maximization negates the uploaded coefficients."
+" Decoding evaluates the original objective independently of the "
+"provider's reported energy. Do not upload ``HardwareIsingProgram.matrix``"
+" unchanged: its ``-s.T @ M @ s`` convention is different."
+msgstr ""
+"上传的 CSV 是上三角矩阵，最小化 ``x.T @ Q @ x``。转换保留原始变量顺序和常数项。逻辑自旋采用 ``s = 2x - "
+"1``；最大化问题会对上传的系数取负。解码时独立于服务商报告的能量，直接计算原始目标函数。不要原样上传 "
+"``HardwareIsingProgram.matrix``：它采用的 ``-s.T @ M @ s`` 约定与此不同。"
+
+#: ../../source/isingq.rst:28
+msgid ""
+"For a symbolic ``QuadraticProgram``, first call ``compile_program`` and "
+"pass its ``model`` to ``compile_isingq``. Keep that compilation result to"
+" call ``is_feasible`` and ``evaluate_objective`` on returned bits. The "
+"uploaded model includes penalties; the cloud result alone cannot "
+"establish constraint feasibility or global optimality."
+msgstr ""
+"对于符号化的 ``QuadraticProgram``，先调用 ``compile_program``，再将其 ``model`` 传给 "
+"``compile_isingq``。保留该编译结果，以便对返回的比特调用 ``is_feasible`` 和 "
+"``evaluate_objective``。上传的模型包含惩罚项；仅凭云端结果无法确认约束可行性或全局最优性。"
+
+#: ../../source/isingq.rst:35
+msgid "Submit and recover"
+msgstr "提交与恢复"
+
+#: ../../source/isingq.rst:37
+msgid ""
+"The following submit call creates a real hardware task and may consume "
+"quota or credit. Supply the key explicitly from your credential store; "
+"never save it in a job reference."
+msgstr "下面的提交调用会创建真实的硬件任务，并可能消耗配额或额度。请从凭据存储中显式提供密钥；切勿将其保存在任务引用中。"
+
+#: ../../source/isingq.rst:51
+msgid ""
+"Polling is a separate read and can be resumed in a new client. "
+"``calculate_count`` is the vendor's calculation count, not circuit shots "
+"or a promise of that many returned samples. The API returns a best "
+"vector, not a frequency distribution. The SDK does not automatically "
+"retry submission. An ``IsingQError`` with ``submission_outcome == "
+"\"unknown\"`` requires reconciliation with the provider before starting "
+"another run. Failures before creation use ``not_created``. Polling "
+"failures use ``not_applicable``: retry the read using the saved task ID, "
+"never treat a read failure as evidence that submission failed."
+msgstr ""
+"轮询是独立的读取操作，可以在新的客户端中恢复。``calculate_count`` 是服务商的计算次数，不是线路 "
+"shots，也不保证返回同样数量的样本。API 返回的是一个最优向量，而不是频率分布。SDK 不会自动重试提交。若 ``IsingQError``"
+" 的 ``submission_outcome == \"unknown\"``，必须先与服务商核对，再开始新的运行。任务创建之前的失败使用 "
+"``not_created``。轮询失败使用 ``not_applicable``：请使用已保存的任务 ID "
+"重试读取，切勿把读取失败当作提交失败的证据。"
+
+#: ../../source/isingq.rst:61
+msgid "Cloud limitations"
+msgstr "云端限制"
+
+#: ../../source/isingq.rst:63
+msgid ""
+"The adapter follows the published ``plectrum-core`` 0.1.2 and ``isingq-"
+"toolkit`` 0.5.0 protocol. It uses bounded HTTPS requests and sends only "
+"temporary OSS form credentials to the upload host. API account "
+"credentials remain on the API origin. There is no public device discovery"
+" or cancellation contract. ``computer_type_id`` is a vendor routing "
+"value, not proof of which physical machine executes a job. ``gear`` is "
+"not exposed because the published cloud implementation does not send it. "
+"Coefficient quantization and its admissible ranges remain provider-"
+"defined; this adapter does not silently round coefficients or claim exact"
+" hardware energy equivalence."
+msgstr ""
+"该适配器遵循已发布的 ``plectrum-core`` 0.1.2 与 ``isingq-toolkit`` 0.5.0 协议。它使用有界的 "
+"HTTPS 请求，只向上传主机发送临时 OSS 表单凭据；API 账户凭据只发送到 API "
+"源站。目前没有公开的设备发现或取消任务约定。``computer_type_id`` "
+"是服务商的路由值，不能证明任务由哪台物理机器执行。``gear`` "
+"未对外暴露，因为已发布的云端实现并不发送该参数。系数量化及其允许范围仍由服务商定义；本适配器不会静默舍入系数，也不声称与硬件能量严格等价。"
+
+#: ../../source/isingq.rst:73
+msgid ""
+"The conversion and transport are covered by exhaustive small-model "
+"identities and mocked protocol tests. Live account acceptance is a "
+"separate deployment check."
+msgstr "转换与传输由小规模模型的穷举恒等式测试和模拟协议测试覆盖。真实账户验收是单独的部署检查。"
+
+#: ../../source/isingq.rst:76
+msgid ""
+"References: `iSing SDK documentation <https://help-"
+"center.isingq.com/8744708m0>`_, `Plectrum source <https://github.com"
+"/ising-tech/plectrum-core>`_, and `iSing MCP toolkit <https://github.com"
+"/ising-tech/isingq-toolkit>`_."
+msgstr ""
+"参考资料：`iSing SDK 文档 <https://help-center.isingq.com/8744708m0>`_、`Plectrum"
+" 源码 <https://github.com/ising-tech/plectrum-core>`_ 以及 `iSing MCP 工具包 "
+"<https://github.com/ising-tech/isingq-toolkit>`_。"
+

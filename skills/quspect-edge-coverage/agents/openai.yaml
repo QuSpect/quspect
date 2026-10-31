@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Edge Coverage"
+  short_description: "Model fixed-cardinality service coverage in QuSpect."
+  default_prompt: "Use $quspect-edge-coverage to model and validate a fixed-cardinality edge-site coverage problem in QuSpect."

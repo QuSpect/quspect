@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Genome Assembly"
+  short_description: "Assemble reads with directed overlap optimization."
+  default_prompt: "Use $quspect-genome-assembly to model, solve, decode, and validate sequence-read assembly with QuSpect."

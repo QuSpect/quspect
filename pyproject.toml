@@ -1,0 +1,229 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "quspect"
+dynamic = ["version"]
+description = "QuSpect — A quantum computing SDK for research and education"
+readme = "README.md"
+license = "Apache-2.0 AND MIT"
+license-files = [
+    "LICENSE",
+    "NOTICE",
+    "cpp/third_party/libcerf/LICENSE",
+    "cpp/third_party/envelopes_qc/LICENSE",
+]
+authors = [{ name = "Quspect" }]
+requires-python = ">=3.10"
+keywords = ["quantum computing", "quantum circuits", "simulation", "qsal"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Education",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/QuSpect/quspect"
+Repository = "https://github.com/QuSpect/quspect"
+Issues = "https://github.com/QuSpect/quspect/issues"
+
+[project.optional-dependencies]
+isingq = [
+    "httpx>=0.27,<1",
+]
+logicalqubit = [
+    "lqcloud>=0.4.1,<0.6",
+]
+validation = [
+    "qiskit>=1.0",
+]
+qiskit-tests = [
+    "qiskit>=2",
+]
+dev = [
+    "httpx>=0.27,<1",
+    "pytest>=8",
+    "pytest-cov>=6",
+    "qiskit>=1.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "sphinx>=8",
+    "sphinx-rtd-theme>=2",
+    "sphinx-intl>=2",
+]
+
+# ---------------------------------------------------------------------------
+# 构建后端：scikit-build-core 驱动 cpp/ 下的 CMake 工程，通过 CMake install()
+# 规则把 pybind11 扩展模块（quspect._core_scalar，x86_64 上另有
+# quspect._core_avx2）安装进 wheel。
+# ---------------------------------------------------------------------------
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.source-dir = "cpp"
+cmake.build-type = "Release"
+wheel.packages = ["quspect"]
+# 版本号来自 git tag（见 [tool.setuptools_scm]）。
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+# sdist 排除列表。scikit-build-core 从源码树复制 wheel.packages 时同样套用
+# sdist.exclude，因此源码树里残留的本地构建扩展（非 scikit-build 的 CMake 构建
+# 写进 quspect/ 的 *.so / *.pyd）不会进入 wheel，wheel 里只有 CMake 安装的模块。
+# 不要把 *.so / *.pyd 写进 wheel.exclude：该列表也会作用于 CMake 的安装产物。
+sdist.exclude = [
+    "*.so",
+    "*.pyd",
+    "*.dylib",
+    "*.dll",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".coverage*",
+    "htmlcov",
+    "/build",
+    "/dist",
+    "/cpp/build*",
+    "/build-*",
+    "/docs/build",
+    "/qiskit_tests",
+    "/skills",
+    "/tools",
+    "/uv.lock",
+    "/.venv",
+    "/.github",
+]
+
+[tool.scikit-build.cmake.define]
+QSPECT_BUILD_TESTS = "OFF"
+
+# 可编辑安装（pip install -e .）保持纯 Python、原地生效，与之前一致：
+# C++ 扩展仍由开发者手动用 CMake 构建到 quspect/（见 README），
+# 因此 lint / 类型检查不需要编译器或网络。
+[[tool.scikit-build.overrides]]
+if.state = "editable"
+wheel.cmake = false
+editable.mode = "inplace"
+
+[tool.setuptools_scm]
+# 版本号取自最近的 "vX.Y.Z" git tag。
+
+# ---------------------------------------------------------------------------
+# cibuildwheel（.github/workflows/wheels.yml 中固定为 4.x）
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = ["cp310-*", "cp311-*", "cp312-*", "cp313-*", "cp314-*", "cp315-*"]
+skip = ["*-musllinux_*"]
+build-verbosity = 1
+# 用 uv 创建构建 / 测试环境并安装依赖（build --installer=uv），比 pip 快。
+# manylinux 镜像自带 uv；macOS / Windows 需要宿主机上有 uv：wheels.yml 以
+# extras: uv 安装 cibuildwheel（本地运行时请先安装 uv 或 cibuildwheel[uv]）。
+# 注意：此时构建 venv 中没有 pip，需要额外安装包时用 uv pip install。
+build-frontend = "build[uv]"
+# CI 构建的每个 wheel 都必须链接 OpenMP；找不到时 CMake 直接失败而不是静默去掉。
+environment = { SKBUILD_CMAKE_DEFINE = "QSPECT_REQUIRE_OPENMP=ON" }
+# 测试文件被复制到一个不含 quspect/ 源码包的临时目录中运行，
+# 保证测试导入的一定是已安装的 wheel。
+test-sources = ["tests", "examples", "tools"]
+test-requires = ["pytest>=8"]
+# tests/optimization 中的 iSing 客户端测试需要 httpx，经 isingq extra 安装。
+# tests/pulse 校验 quspect._pulse 包络模块（与 envelopes-qc 0.1.5 逐位一致的黄金值）。
+test-extras = ["isingq"]
+test-environment = { QUSPECT_EXPECT_OPENMP = "1" }
+test-command = [
+    "python tools/wheel_smoke.py --project-dir {project}",
+    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "QUSPECT_DISABLE_AVX2=1 python tools/wheel_smoke.py --project-dir {project}",
+    "QUSPECT_DISABLE_AVX2=1 python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+]
+
+[tool.cibuildwheel.linux]
+# x86_64 与 aarch64 都在原生 runner 上构建（不走 QEMU 模拟）：wheels.yml 按 runner
+# 架构设置 CIBW_ARCHS_LINUX，使 ubuntu-latest 只构建 x86_64、ubuntu-24.04-arm 只构建
+# aarch64。本地运行 cibuildwheel 时请加 --archs native（或 CIBW_ARCHS_LINUX=native），
+# 否则会尝试在 QEMU 中构建另一种架构。
+archs = ["x86_64", "aarch64"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+# libomp 从 LLVM 源码以 deployment target 14.0 构建（tools/build_libomp_macos.sh），
+# 不用 Homebrew 的 bottle：delocate 会把 wheel 标签提升到被打包 dylib 的最大 minos，
+# 而 Homebrew 在 macos-15 runner 上的 bottle 要求 macOS 15，wheel 会变成 macosx_15_0。
+# 安装前缀由 wheels.yml 的 actions/cache 缓存；三处 14.0（此处两处与 wheels.yml 的
+# 标签检查）必须保持一致。
+before-all = "bash {project}/tools/build_libomp_macos.sh --prefix $HOME/.cache/quspect-libomp --deployment-target 14.0"
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", SKBUILD_CMAKE_DEFINE = "QSPECT_REQUIRE_OPENMP=ON;OpenMP_ROOT=$HOME/.cache/quspect-libomp" }
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+# 构建 venv 由 uv 创建、不含 pip；cibuildwheel 设置了 VIRTUAL_ENV，
+# uv pip install 会装进该 venv（cibuildwheel 预装的 delvewheel 被固定到此版本）。
+before-build = "uv pip install delvewheel==1.13.2"
+# python.org 的 CPython 自带 vcruntime140.dll，但不带 msvcp140.dll；vcomp140.dll
+# 是 MSVC 的 OpenMP 运行时。两者都打包进 wheel，用户无需安装 VC++ 运行库。
+# 脚本从 VS 安装目录的 VC\Redist\MSVC 中选取与构建工具集匹配的最新版本（而不是
+# System32 中较旧的副本）交给 delvewheel，并校验打包进 wheel 的运行库不旧于工具集。
+repair-wheel-command = "python {project}/tools/windows_repair_wheel.py --wheel {wheel} --dest-dir {dest_dir}"
+# Windows 上 test-command 由 cmd.exe 执行：用 set 设置环境变量。
+test-command = [
+    "python tools/wheel_smoke.py --project-dir {project}",
+    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "set \"QUSPECT_DISABLE_AVX2=1\"",
+    "python tools/wheel_smoke.py --project-dir {project}",
+    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"quspect/transpiler/_mapping.py" = ["N802", "N803", "N806"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = "numpy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["quspect._core_scalar", "quspect._core_avx2"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "lqcloud.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=quspect --cov-report=term-missing"
+markers = [
+    "hardware: tests that may submit work to real quantum hardware and require explicit opt-in",
+]

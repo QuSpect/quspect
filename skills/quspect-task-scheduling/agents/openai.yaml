@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Task Scheduling"
+  short_description: "Model assignment and load-balancing schedules in QuSpect."
+  default_prompt: "Use $quspect-task-scheduling to model and validate a QuSpect task-assignment or load-balancing problem."

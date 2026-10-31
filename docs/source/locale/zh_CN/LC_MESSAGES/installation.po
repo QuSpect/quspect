@@ -1,0 +1,216 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-28 21:20-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/installation.rst:2
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/installation.rst:5
+msgid "Install from PyPI"
+msgstr "从 PyPI 安装"
+
+#: ../../source/installation.rst:11
+msgid ""
+"QuSpect is published on PyPI as pre-built binary wheels that already "
+"contain the C++ simulation engine, compiled with OpenMP.  ``Simulator``, "
+"``NativeExecutor`` and exact adjoint gradients therefore work immediately"
+" after ``pip install``; no compiler is required."
+msgstr ""
+"QuSpect 以预编译的二进制 wheel 形式发布在 PyPI 上，wheel 中已包含启用 OpenMP 编译的 C++ 模拟引擎。因此 "
+"``pip install`` 之后即可直接使用 ``Simulator``、``NativeExecutor`` 和精确伴随梯度，无需编译器。"
+
+#: ../../source/installation.rst:17
+msgid "Supported platforms"
+msgstr "支持的平台"
+
+#: ../../source/installation.rst:22
+msgid "Platform"
+msgstr "平台"
+
+#: ../../source/installation.rst:23
+msgid "Architecture"
+msgstr "架构"
+
+#: ../../source/installation.rst:24
+msgid "Python"
+msgstr "Python"
+
+#: ../../source/installation.rst:25
+msgid "Wheel tag"
+msgstr "Wheel 标签"
+
+#: ../../source/installation.rst:26 ../../source/installation.rst:30
+msgid ""
+"Linux with glibc 2.28 or newer (Ubuntu 20.04+, Debian 10+, RHEL/Rocky 8+,"
+" ...)"
+msgstr "glibc 2.28 及以上的 Linux（Ubuntu 20.04+、Debian 10+、RHEL/Rocky 8+ 等）"
+
+#: ../../source/installation.rst:27
+msgid "x86_64"
+msgstr "x86_64"
+
+#: ../../source/installation.rst:28 ../../source/installation.rst:32
+#: ../../source/installation.rst:36 ../../source/installation.rst:40
+msgid "3.10 -- 3.15"
+msgstr "3.10 -- 3.15"
+
+#: ../../source/installation.rst:29
+msgid "``manylinux_2_28_x86_64``"
+msgstr "``manylinux_2_28_x86_64``"
+
+#: ../../source/installation.rst:31
+msgid "aarch64 (arm64)"
+msgstr "aarch64（arm64）"
+
+#: ../../source/installation.rst:33
+msgid "``manylinux_2_28_aarch64``"
+msgstr "``manylinux_2_28_aarch64``"
+
+#: ../../source/installation.rst:34
+msgid "Windows 10/11"
+msgstr "Windows 10/11"
+
+#: ../../source/installation.rst:35
+msgid "x86_64 (64-bit Python)"
+msgstr "x86_64（64 位 Python）"
+
+#: ../../source/installation.rst:37
+msgid "``win_amd64``"
+msgstr "``win_amd64``"
+
+#: ../../source/installation.rst:38
+msgid "macOS 14 (Sonoma) or newer"
+msgstr "macOS 14（Sonoma）及以上"
+
+#: ../../source/installation.rst:39
+msgid "Apple Silicon (arm64)"
+msgstr "Apple Silicon（arm64）"
+
+#: ../../source/installation.rst:41
+msgid "``macosx_14_0_arm64``"
+msgstr "``macosx_14_0_arm64``"
+
+#: ../../source/installation.rst:43
+msgid ""
+"On Windows, 64-bit CPython 3.10 -- 3.15 needs nothing extra: the MSVC C++"
+" runtime (``msvcp140.dll``) and the OpenMP runtime (``vcomp140.dll``) are"
+" bundled in the wheel."
+msgstr ""
+"在 Windows 上，64 位 CPython 3.10 -- 3.15 无需任何额外安装：MSVC C++ "
+"运行库（``msvcp140.dll``）和 OpenMP 运行库（``vcomp140.dll``）都已打包在 wheel 中。"
+
+#: ../../source/installation.rst:48
+msgid "Installing from source"
+msgstr "从源码安装"
+
+#: ../../source/installation.rst:50
+msgid ""
+"On any other platform -- for example musl-based distributions such as "
+"Alpine, 32-bit Windows, Intel Macs, macOS older than 14, or PyPy -- "
+"``pip`` falls back to the source distribution and compiles the C++ "
+"extension locally.  This requires:"
+msgstr ""
+"在其他任何平台上——例如 Alpine 等基于 musl 的发行版、32 位 Windows、Intel Mac、低于"
+" 14 的 macOS 或 PyPy——``pip`` 会退回到源码包并在本地编译 C++ 扩展。这需要："
+
+#: ../../source/installation.rst:54
+msgid ""
+"CMake 3.22 or newer and a C++17 compiler: Visual Studio Build Tools on "
+"Windows, the Xcode Command Line Tools on macOS (plus ``brew install "
+"libomp`` for OpenMP support), or GCC / Clang on Linux;"
+msgstr ""
+"CMake 3.22 及以上和 C++17 编译器：Windows 上为 Visual Studio Build Tools，macOS 上为 "
+"Xcode Command Line Tools（OpenMP 支持需另外 ``brew install libomp``），Linux 上为 "
+"GCC / Clang；"
+
+#: ../../source/installation.rst:57
+msgid ""
+"network access during the build, to fetch the header-only nlohmann/json "
+"library."
+msgstr "构建期间需要网络，用于获取仅头文件的 nlohmann/json 库。"
+
+#: ../../source/installation.rst:61
+msgid "Runtime configuration"
+msgstr "运行时配置"
+
+#: ../../source/installation.rst:63
+msgid "``QUSPECT_DISABLE_AVX2``"
+msgstr "``QUSPECT_DISABLE_AVX2``"
+
+#: ../../source/installation.rst:64
+msgid ""
+"On x86_64 the wheel ships two extension modules: a portable scalar build "
+"and an AVX2 + FMA build.  The AVX2 module is loaded only when the CPU and"
+" operating system support AVX2 and FMA.  Set ``QUSPECT_DISABLE_AVX2=1`` "
+"to force the scalar kernels.  The variable is read once, the first time "
+"the native backend is loaded."
+msgstr ""
+"在 x86_64 上，wheel 包含两个扩展模块：可移植的标量版本和 AVX2 + FMA 版本。只有当 CPU 和操作系统都支持 AVX2 与"
+" FMA 时才会加载 AVX2 模块。设置 ``QUSPECT_DISABLE_AVX2=1`` "
+"可强制使用标量内核。该变量只在首次加载原生后端时读取一次。"
+
+#: ../../source/installation.rst:70
+msgid "``OMP_NUM_THREADS``"
+msgstr "``OMP_NUM_THREADS``"
+
+#: ../../source/installation.rst:71
+msgid ""
+"The parallel kernels use OpenMP.  Set ``OMP_NUM_THREADS`` to limit the "
+"number of threads."
+msgstr "并行内核基于 OpenMP。设置 ``OMP_NUM_THREADS`` 可限制线程数。"
+
+#: ../../source/installation.rst:74
+msgid "Check which backend is active:"
+msgstr "查看当前使用的后端："
+
+#: ../../source/installation.rst:81
+msgid "Detecting the native core"
+msgstr "检测原生核心"
+
+#: ../../source/installation.rst:83
+msgid ""
+"Use :func:`quspect.native.load_core` to check whether the C++ native core"
+" is available.  It is the supported, stable public way to detect the "
+"native core and never raises when the extension is simply missing: it "
+"returns ``None`` when the native core has not been built, and the loaded "
+"extension module otherwise.  Treat the returned module only as an "
+"availability signal; its name (``quspect._core_scalar`` or "
+"``quspect._core_avx2``) is an implementation detail."
+msgstr ""
+"使用 :func:`quspect.native.load_core` 检查 C++ "
+"原生核心是否可用。这是检测原生核心的受支持且稳定的公开方式，仅在扩展缺失时不会抛出异常：未构建原生核心时返回 "
+"``None``，否则返回已加载的扩展模块。请仅将返回的模块视为可用性信号；其模块名（``quspect._core_scalar`` 或 "
+"``quspect._core_avx2``）属于实现细节。"
+
+#: ../../source/installation.rst:101
+msgid "Development install"
+msgstr "开发安装"
+
+#: ../../source/installation.rst:110
+msgid ""
+"The editable install is pure Python and does not compile the C++ "
+"extension. Build it into the local ``quspect/`` package with CMake:"
+msgstr "可编辑安装是纯 Python 的，不会编译 C++ 扩展。请用 CMake 将扩展构建到本地 ``quspect/`` 包中："
+
+#: ../../source/installation.rst:120
+msgid "Pass ``-DQSPECT_BUILD_AVX2=OFF`` for a scalar-only build."
+msgstr "如果只需要标量实现，可传入 ``-DQSPECT_BUILD_AVX2=OFF``。"
+

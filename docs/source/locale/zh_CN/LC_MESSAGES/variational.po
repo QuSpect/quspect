@@ -1,0 +1,309 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-27 18:47-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/variational.rst:2
+msgid "Variational Objectives"
+msgstr "变分目标"
+
+#: ../../source/variational.rst:4
+msgid ""
+"QuSpect represents a variational calculation as data that is compiled "
+"into a reusable numerical plan.  The four layers have deliberately "
+"separate jobs:"
+msgstr "QuSpect 将变分计算表示为数据，并将其编译为可复用的数值计划。四个层次的职责被有意区分开来："
+
+#: ../../source/variational.rst:17
+msgid ""
+"An :class:`~quspect.variational.ObservableObjective` describes *what* to "
+"evaluate: one parameterized circuit and a named mapping of observables.  "
+"An :class:`~quspect.variational.AdjointEngine` selects *how* to evaluate "
+"it.  Its :meth:`~quspect.variational.AdjointEngine.compile` method "
+"validates and lowers the objective once.  The resulting "
+":class:`~quspect.variational.PreparedObjective` can then be evaluated "
+"repeatedly with small parameter mappings while the circuit tape, Pauli "
+"masks, and parameter layout remain cached in the native backend."
+msgstr ""
+"一个 :class:`~quspect.variational.ObservableObjective` 描述 "
+"*计算什么*：一个参数化线路以及一组具名的可观测量映射。一个 "
+":class:`~quspect.variational.AdjointEngine` 选择 *如何计算*。它的 "
+":meth:`~quspect.variational.AdjointEngine.compile` "
+"方法对目标进行一次性校验和降级（lowering）。所得的 "
+":class:`~quspect.variational.PreparedObjective` "
+"随后可以使用小型参数映射反复求值，而线路磁带（tape）、Pauli 掩码和参数布局则始终缓存在原生后端中。"
+
+#: ../../source/variational.rst:26
+msgid ""
+"An objective is not tied to a decorated QNode or one provider's "
+"primitive. The native adjoint plan evaluates directly.  A sampled plan "
+"can instead submit a provider-neutral execution job, persist its "
+"credential-free reference, and decode the recovered batch later.  Both "
+"strategies return the same structured value/Jacobian result."
+msgstr ""
+"目标并不绑定到某个经过装饰的 QNode "
+"或某个提供方的原语。原生伴随计划直接求值；而采样计划则可以提交一个与提供方无关的执行作业，持久化其不含凭据的引用，并在稍后解码恢复出的批次。两种策略都返回相同的结构化值/雅可比结果。"
+
+#: ../../source/variational.rst:33
+msgid "H2-style VQE"
+msgstr "H2 风格的 VQE"
+
+#: ../../source/variational.rst:35
+msgid ""
+"The following two-qubit example uses a reduced H2-style Pauli "
+"Hamiltonian.  A single adjoint evaluation returns both its expectation "
+"value and the complete derivative vector."
+msgstr "以下双量子比特示例使用一个简化的 H2 风格 Pauli 哈密顿量。一次伴随求值即可同时返回其期望值和完整的导数向量。"
+
+#: ../../source/variational.rst:64
+msgid ""
+"``plan`` is the object to retain inside an optimizer loop.  Constructing "
+"a new engine or recompiling the objective for every optimizer step "
+"discards the main benefit of the prepared representation."
+msgstr "``plan`` 是应在优化器循环中保留的对象。如果在每个优化步骤都构造新的引擎或重新编译目标，就会丧失预编译表示的主要优势。"
+
+#: ../../source/variational.rst:68
+msgid ""
+"For example, SciPy can consume the value and derivative from the same "
+"native evaluation (SciPy is an optional user dependency, not required by "
+"QuSpect):"
+msgstr "例如，SciPy 可以直接使用同一次原生求值得到的值和导数（SciPy 是用户可选的依赖，QuSpect 本身并不需要它）："
+
+#: ../../source/variational.rst:88
+msgid "Named observables and fixed shapes"
+msgstr "具名可观测量与固定形状"
+
+#: ../../source/variational.rst:90
+msgid ""
+"Observables are always supplied as a mapping.  Their names make selection"
+" explicit and are retained in ``observable_order``:"
+msgstr "可观测量始终以映射的形式提供。其名称使选择更加明确，并保留在 ``observable_order`` 中："
+
+#: ../../source/variational.rst:110
+msgid ""
+"The structured result has a stable array contract.  If an objective "
+"contains ``M`` observables and ``P`` parameters, an "
+":class:`~quspect.variational.ObjectiveEvaluation` always contains:"
+msgstr ""
+"结构化结果具有稳定的数组约定。如果目标包含 ``M`` 个可观测量和 ``P`` 个参数，则 "
+":class:`~quspect.variational.ObjectiveEvaluation` 始终包含："
+
+#: ../../source/variational.rst:114
+msgid "``values`` with shape ``(M,)``;"
+msgstr "形状为 ``(M,)`` 的 ``values``；"
+
+#: ../../source/variational.rst:115
+msgid "``jacobian`` with shape ``(M, P)``;"
+msgstr "形状为 ``(M, P)`` 的 ``jacobian``；"
+
+#: ../../source/variational.rst:116
+msgid ""
+"``observable_order`` and ``parameter_order`` describing the corresponding"
+" axes; and"
+msgstr "描述对应坐标轴的 ``observable_order`` 和 ``parameter_order``；以及"
+
+#: ../../source/variational.rst:118
+msgid "``metadata`` for engine-specific diagnostic information."
+msgstr "用于引擎特定诊断信息的 ``metadata``。"
+
+#: ../../source/variational.rst:120
+msgid ""
+"The arrays do not collapse when ``M == 1`` or ``P == 1``.  Use "
+"``value(name_or_index)`` and ``derivative(name_or_index)`` when selecting"
+" one observable is more convenient.  This avoids an API whose return type"
+" silently changes between a scalar and an array as observables are added."
+msgstr ""
+"当 ``M == 1`` 或 ``P == 1`` 时，数组也不会降维。如果只选取一个可观测量更方便，请使用 "
+"``value(name_or_index)`` 和 "
+"``derivative(name_or_index)``。这避免了返回类型随可观测量的增加而在标量和数组之间悄然变化的 API。"
+
+#: ../../source/variational.rst:125
+msgid ""
+"Parameter mappings are the recommended interface.  Binding by parameter "
+"makes optimizer boundaries explicit and prevents a circuit edit from "
+"silently changing the meaning of a vector element.  A one-dimensional "
+"sequence in ``parameter_order`` is also accepted for vector-based "
+"optimizer adapters; code using that form should read and retain the "
+"plan's authoritative order rather than reconstructing it independently.  "
+"Mapping keys may be :class:`~quspect.circuit.Parameter` objects "
+"(recommended) or their string names."
+msgstr ""
+"推荐使用参数映射作为接口。按参数绑定使优化器边界更加明确，并防止对线路的修改悄然改变向量元素的含义。对于基于向量的优化器适配器，也接受按 "
+"``parameter_order`` 排列的一维序列；使用这种形式的代码应读取并保留计划给出的权威顺序，而不是自行重建。映射的键可以是 "
+":class:`~quspect.circuit.Parameter` 对象（推荐）或其字符串名称。"
+
+#: ../../source/variational.rst:135
+msgid "Batch sweeps"
+msgstr "批量扫描"
+
+#: ../../source/variational.rst:137
+msgid ""
+":meth:`~quspect.variational.PreparedObjective.evaluate_many` evaluates "
+"several parameter mappings without recompiling the objective:"
+msgstr ""
+":meth:`~quspect.variational.PreparedObjective.evaluate_many` "
+"可在不重新编译目标的情况下对多个参数映射求值："
+
+#: ../../source/variational.rst:151
+msgid ""
+"For a dense optimizer or grid-search workload, the same sweep can be "
+"supplied as a numeric matrix whose columns follow "
+"``plan.parameter_order``:"
+msgstr "对于稠密优化器或网格搜索工作负载，同样的扫描也可以以数值矩阵的形式提供，矩阵的列遵循 ``plan.parameter_order``："
+
+#: ../../source/variational.rst:161
+msgid ""
+"For ``B`` points, ``M`` observables, and ``P`` parameters, an "
+":class:`~quspect.variational.ObjectiveSweep` stores ``values`` with shape"
+" ``(B, M)`` and ``jacobian`` with shape ``(B, M, P)``.  Calling "
+"``at(index)`` returns the corresponding "
+":class:`~quspect.variational.ObjectiveEvaluation` without changing the "
+"single-point result contract."
+msgstr ""
+"对于 ``B`` 个点、``M`` 个可观测量和 ``P`` "
+"个参数，:class:`~quspect.variational.ObjectiveSweep` 存储形状为 ``(B, M)`` 的 "
+"``values`` 和形状为 ``(B, M, P)`` 的 ``jacobian``。调用 ``at(index)`` 会返回对应的 "
+":class:`~quspect.variational.ObjectiveEvaluation`，而不改变单点结果约定。"
+
+#: ../../source/variational.rst:168
+msgid "Current adjoint engine scope"
+msgstr "当前伴随引擎的适用范围"
+
+#: ../../source/variational.rst:170
+msgid ""
+"The adjoint engine performs exact full-state-vector differentiation in "
+"C++. It is intended for noiseless expectation objectives with real "
+"Hermitian Pauli Hamiltonians.  Symbolic ``RX``, ``RY``, and ``RZ`` angles"
+" may be affine expressions and may share parameters.  Measurements and "
+"noise operations are not part of a differentiable objective.  Use the "
+"regular simulation APIs for sampling and measurement workflows."
+msgstr ""
+"伴随引擎在 C++ 中执行精确的全态矢量微分。它适用于具有实厄米 Pauli 哈密顿量的无噪声期望值目标。符号化的 ``RX``、``RY`` 和"
+" ``RZ`` 角度可以是仿射表达式，并且可以共享参数。测量和噪声操作不属于可微目标的一部分。采样和测量工作流请使用常规的模拟 API。"
+
+#: ../../source/variational.rst:177
+msgid "The engine precision is chosen independently from the problem description:"
+msgstr "引擎精度的选择独立于问题描述："
+
+#: ../../source/variational.rst:184
+msgid ""
+"This separation lets exact and sampled engines share one objective and "
+"result contract without changing circuit construction or optimizer "
+"integration code."
+msgstr "这种分离让精确引擎和采样引擎可以共享同一个目标和结果约定，而无需更改线路构造或优化器集成代码。"
+
+#: ../../source/variational.rst:188
+msgid "Shot-based and hardware objectives"
+msgstr "基于采样次数的目标与硬件目标"
+
+#: ../../source/variational.rst:190
+msgid ""
+":class:`~quspect.variational.SamplingEngine` lowers each Pauli observable"
+" into measurement circuits.  Qubit-wise commuting terms share a "
+"measurement basis; identity terms are exact constants.  Gradients use "
+"local parameter shifts for each symbolic ``RX``, ``RY``, or ``RZ`` "
+"occurrence, followed by the affine chain rule.  This remains correct when"
+" one parameter appears in several gates or a gate angle is an expression "
+"such as ``2 * theta - phi``."
+msgstr ""
+":class:`~quspect.variational.SamplingEngine` 将每个 Pauli "
+"可观测量降级为测量线路。按量子比特对易的项共享同一测量基；单位项是精确常数。梯度对每一处符号化的 ``RX``、``RY`` 或 ``RZ`` "
+"使用局部参数平移，再应用仿射链式法则。即使一个参数出现在多个门中，或者门角度是 ``2 * theta - phi`` "
+"这样的表达式，结果依然正确。"
+
+#: ../../source/variational.rst:197
+msgid "The same H2-style objective can be evaluated through the local sampler:"
+msgstr "同一个 H2 风格目标可以通过本地采样器求值："
+
+#: ../../source/variational.rst:206
+msgid "Or submitted to a LogicalQubit device without changing the objective:"
+msgstr "也可以在不修改目标的情况下提交到 LogicalQubit 设备："
+
+#: ../../source/variational.rst:229
+msgid ""
+"The execution request carries stable labels for every base, shift, and "
+"Pauli group circuit.  LogicalQubit native batches are limited to 64 "
+"circuits; QuSpect partitions a larger objective into child jobs and "
+"exposes one :class:`~quspect.backends.CompositeJob` while preserving "
+"label order. Several points passed to ``sampled.submit_many(...)`` are "
+"flattened into one recoverable execution request; "
+"``sampled.evaluate_many(...)`` is its blocking shortcut.  An optimizer "
+"sweep therefore does not create one cloud task per point.  The ``auto`` "
+"result format lets lqcloud choose between counts and per-shot memory "
+"according to readout width."
+msgstr ""
+"执行请求为每个基础线路、平移线路和 Pauli 分组线路都携带稳定的标签。LogicalQubit 原生批次最多包含 64 个线路；QuSpect"
+" 会将更大的目标拆分为多个子作业，并对外暴露单个 "
+":class:`~quspect.backends.CompositeJob`，同时保持标签顺序。传给 "
+"``sampled.submit_many(...)`` "
+"的多个点会被展平为一个可恢复的执行请求；``sampled.evaluate_many(...)`` "
+"是它的阻塞式快捷方式。因此，优化器扫描不会为每个点创建一个云端任务。``auto`` 结果格式允许 lqcloud "
+"根据读出宽度在计数（counts）和逐次采样记录（memory）之间进行选择。"
+
+#: ../../source/variational.rst:239
+msgid ""
+"For older servers where the SDK's private native-batch fallback must be "
+"avoided, pass ``provider_batching=\"individual\"`` in "
+"``execution_options``. QuSpect will then submit and track each circuit "
+"itself, allowing complete ``PartialSubmissionError`` reporting and best-"
+"effort cancellation at the cost of additional provider tasks."
+msgstr ""
+"对于需要避免 SDK 私有原生批处理回退机制的旧版服务器，请在 ``execution_options`` 中传入 "
+"``provider_batching=\"individual\"``。此时 QuSpect 会自行提交并跟踪每个线路，从而能够完整报告 "
+"``PartialSubmissionError`` 并尽力取消，代价是产生额外的提供方任务。"
+
+#: ../../source/variational.rst:245
+msgid ""
+"After a process restart, reconstruct the provider job and attach the "
+"compiled decoder.  A job reference intentionally contains no API key or "
+"token:"
+msgstr "进程重启后，重建提供方作业并附加已编译的解码器。作业引用有意不包含任何 API 密钥或令牌："
+
+#: ../../source/variational.rst:254
+msgid ""
+"``attach`` validates a stable plan fingerprint together with the backend,"
+" labels, experiment shapes, shots, and result format.  A reference from a"
+" different objective is therefore rejected even if its circuit batch "
+"happens to have the same size.  Multi-point jobs are recovered with "
+"``sampled.attach_many(execution_job)``."
+msgstr ""
+"``attach`` "
+"会校验稳定的计划指纹，以及后端、标签、实验形状、采样次数和结果格式。因此，即使另一个目标的线路批次恰好大小相同，其引用也会被拒绝。多点作业通过 "
+"``sampled.attach_many(execution_job)`` 恢复。"
+
+#: ../../source/variational.rst:260
+msgid ""
+"A job reference is a credential-free manifest rather than a signed "
+"platform receipt.  Store it in a trusted location: the fingerprint "
+"prevents accidental misattachment, but it is not intended to authenticate"
+" JSON modified by an untrusted party."
+msgstr ""
+"作业引用是一份不含凭据的清单，而不是经过签名的平台回执。请将其存放在可信的位置：指纹可以防止意外的错误附加，但并不用于验证被不可信方修改过的 "
+"JSON。"
+
+#: ../../source/variational.rst:265
+msgid ""
+"The current sampled gradient rules cover symbolic ``RX``, ``RY``, and "
+"``RZ``. Symbolic controlled rotations and symbolic observable "
+"coefficients are rejected explicitly rather than evaluated with an "
+"invalid two-point rule."
+msgstr ""
+"当前的采样梯度规则覆盖符号化的 ``RX``、``RY`` 和 "
+"``RZ``。符号化的受控旋转门和符号化的可观测量系数会被显式拒绝，而不是用无效的两点规则求值。"
+

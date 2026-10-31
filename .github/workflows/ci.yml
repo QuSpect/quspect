@@ -1,0 +1,267 @@
+name: CI
+
+# 只在指向 main 的 PR 上运行；合入 main 后不再重复跑（不配 push 触发）。
+# workflow_dispatch 用于手动触发。
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个 PR（或同一分支的手动触发）有新运行时，取消旧的运行。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # mypy 不依赖编译好的 C++ 扩展：pyproject 中对 quspect._core_scalar /
+      # quspect._core_avx2 设置了 ignore_missing_imports，且扩展通过
+      # quspect._native_loader 用 importlib 动态导入。
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check quspect tests qiskit_tests
+
+      - name: ruff format --check
+        run: ruff format --check quspect tests qiskit_tests
+
+      - name: mypy
+        run: mypy quspect
+
+      # 叙述性文档页的 zh_CN 翻译必须完整；api.po（英文 API 参考）在白名单中。
+      - name: zh_CN translations complete
+        run: python tools/check_translations.py
+
+      # 不做 clang-format 检查：runner 上可用的 clang-format 版本与本地开发使用的
+      # Apple clang-format 21 不同，不同大版本的格式化结果存在差异，容易误报。
+
+  test:
+    name: test (${{ matrix.kernel }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64：必须实际跑到 AVX2 内核。
+          - os: ubuntu-latest
+            kernel: avx2
+            avx2_flag: "ON"
+          # arm64 macOS：-mavx2 不可用，测 scalar 内核。scalar 不放在 x86 上测，
+          # 因为在支持 AVX2 的 CPU 上用 QSPECT_BUILD_AVX2=OFF 构建时，
+          # test_dispatch 断言 backend_name == "avx2" 会误报失败。
+          - os: macos-latest
+            kernel: scalar
+            avx2_flag: "OFF"
+          # arm64 Linux（GitHub 原生 arm runner）：与发布的 manylinux aarch64 wheel
+          # 同架构，测 scalar 内核。CMake 在非 x86_64 上也会自动关闭 AVX2，
+          # 这里显式传 OFF 只是与内核名保持一致。
+          - os: ubuntu-24.04-arm
+            kernel: scalar
+            avx2_flag: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ninja (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Install ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if command -v ninja >/dev/null 2>&1; then
+            echo "ninja already installed: $(ninja --version)"
+          else
+            brew install ninja
+          fi
+
+      # 防止静默退回 scalar：AVX2 组合要求 runner CPU 支持 AVX2（内核以 -mavx2 -mfma 编译）。
+      - name: Verify CPU supports AVX2
+        if: matrix.kernel == 'avx2'
+        run: |
+          if ! grep -qw avx2 /proc/cpuinfo || ! grep -qw fma /proc/cpuinfo; then
+            echo "::error::This runner's CPU does not report AVX2/FMA in /proc/cpuinfo; the AVX2 kernels cannot be exercised here. Refusing to fall back to the scalar kernels."
+            grep -m1 'model name' /proc/cpuinfo || true
+            exit 1
+          fi
+          grep -m1 'model name' /proc/cpuinfo
+
+      # 有意不缓存 cpp/build/_deps（FetchContent 的 googletest / nlohmann_json）：
+      # 两个依赖都是浅克隆，下载只需几秒；而 _deps 下的 *-subbuild / *-build 目录
+      # 记录了 CMake 版本、编译器路径和 stamp 文件，runner 镜像升级后恢复旧缓存
+      # 可能产生难以排查的陈旧状态。收益太小，不值得承担这个风险。
+      #
+      # 只缓存编译结果（ccache）：ccache 以编译器、参数和预处理结果为键，
+      # 编译器或依赖源码变化时自然失配，不会产生陈旧状态。
+      # 缓存键按 OS + 内核区分（各组合的编译器、架构与 -mavx2 选项都不同）；
+      # ccache-action 自动在键后追加时间戳，并按前缀恢复最近一次的缓存。
+      # evict-old-files: job 在保存前清除本次作业未用到的条目，避免缓存无限增长。
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ matrix.os }}-${{ matrix.kernel }}
+          max-size: 500M
+          evict-old-files: job
+
+      - name: Install Python dependencies
+        run: python -m pip install pybind11 -e ".[dev,qiskit-tests]"
+
+      # C++ 扩展不由 pip 构建：CMake 把 .so 直接写进 quspect/，
+      # 所以必须使用 setup-python 提供的同一个解释器。
+      - name: Configure C++ build
+        run: >-
+          cmake -S cpp -B cpp/build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DQSPECT_BUILD_AVX2=${{ matrix.avx2_flag }}
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DPython_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+
+      - name: Build C++
+        run: cmake --build cpp/build
+
+      # 项目只有 CXX 语言（含 googletest），因此只设置 CXX 的 launcher。
+      - name: ccache statistics
+        if: always()
+        run: ccache -s
+
+      # 其中 test_dispatch 断言 backend_name == (CpuSupportsAVX2() ? "avx2" : "scalar")；
+      # test_dispatch_scalar 链接 scalar dispatch 变体，断言 backend_name 始终为 "scalar"。
+      - name: C++ tests (ctest)
+        run: ctest --test-dir cpp/build --output-on-failure
+
+      # 加载器 quspect._native_loader 在 _core_scalar / _core_avx2 之间选择；
+      # 扩展通过 get_runtime_capabilities() 暴露当前调度到的内核名称，
+      # 在这里断言 Python 侧实际使用的就是本组合预期的内核与模块。
+      - name: Verify Python uses the expected kernel
+        env:
+          EXPECTED_KERNEL: ${{ matrix.kernel }}
+        run: |
+          python - <<'EOF'
+          import os
+          from quspect._native_loader import kernel_backend, load_core
+
+          core = load_core()
+          if core is None:
+              raise SystemExit("native extension quspect._core_scalar not found")
+          caps = core.get_runtime_capabilities()
+          expected = os.environ["EXPECTED_KERNEL"]
+          print(f"module: {core.__name__} ({core.__file__})")
+          print(f"capabilities: {caps}")
+          expected_module = f"quspect._core_{expected}"
+          if core.__name__ != expected_module:
+              raise SystemExit(f"loaded {core.__name__!r}, expected {expected_module!r}")
+          if kernel_backend() != expected:
+              raise SystemExit(f"kernel_backend() is {kernel_backend()!r}, expected {expected!r}")
+          for key in ("backend_f64", "backend_f32"):
+              if caps[key] != expected:
+                  raise SystemExit(
+                      f"{key} is {caps[key]!r}, expected {expected!r}"
+                  )
+          if caps["avx2_available"] != (expected == "avx2"):
+              raise SystemExit(f"unexpected avx2_available={caps['avx2_available']!r}")
+          EOF
+
+      # QUSPECT_DISABLE_AVX2=1 必须强制加载 scalar 模块（AVX2 runner 上也是）。
+      - name: Verify QUSPECT_DISABLE_AVX2 forces the scalar kernel
+        env:
+          QUSPECT_DISABLE_AVX2: "1"
+        run: |
+          python - <<'EOF'
+          from quspect._native_loader import kernel_backend, load_core
+
+          core = load_core()
+          if core is None or core.__name__ != "quspect._core_scalar":
+              raise SystemExit(f"expected quspect._core_scalar, got {core!r}")
+          if kernel_backend() != "scalar":
+              raise SystemExit(f"kernel_backend() is {kernel_backend()!r}, expected 'scalar'")
+          EOF
+
+      # COVERAGE_FILE 单独指定，避免与下一步 generate_report 的覆盖率数据冲突。
+      - name: pytest tests
+        env:
+          COVERAGE_FILE: .coverage.tests
+        run: pytest tests -q
+
+      # 注意：generate_report.main() 在拿到 junit.xml / coverage.json 后总是返回 0
+      # （测试失败只写进报告），只有结果文件缺失时才返回 1。因此这里再检查
+      # REPORT.md 中记录的 pytest 退出码，非 0（或找不到该行）时让这一步失败。
+      - name: qiskit cross-validation (generate_report)
+        run: |
+          python -m qiskit_tests.generate_report
+          if ! grep -Fxq -- '- pytest 退出码：0' qiskit_tests/reports/REPORT.md; then
+            echo "::error::qiskit_tests pytest run did not exit with code 0"
+            grep -F -- '- pytest 退出码' qiskit_tests/reports/REPORT.md || echo "exit-code line missing from REPORT.md"
+            exit 1
+          fi
+
+      - name: Append REPORT.md to job summary
+        if: always()
+        run: |
+          if [ -f qiskit_tests/reports/REPORT.md ]; then
+            cat qiskit_tests/reports/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "qiskit_tests/reports/REPORT.md was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload qiskit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # 名字包含 os：两个 scalar 组合（macOS、arm64 Linux）的 artifact 不能重名。
+          name: qiskit-reports-${{ matrix.os }}-${{ matrix.kernel }}
+          path: |
+            qiskit_tests/reports/REPORT.md
+            qiskit_tests/reports/junit.xml
+            qiskit_tests/reports/coverage.json
+            qiskit_tests/reports/htmlcov/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # 汇总 job：分支保护里只需把 `ci-ok` 这一个稳定的 check 名设为 required，
+  # 不必逐个列出 matrix 展开后的 job 名（matrix 增减组合时也无需改分支保护）。
+  ci-ok:
+    name: ci-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lint, test]
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          echo "lint: $LINT_RESULT"
+          echo "test: $TEST_RESULT"
+          if [ "$LINT_RESULT" != "success" ] || [ "$TEST_RESULT" != "success" ]; then
+            echo "::error::One or more required jobs did not succeed."
+            exit 1
+          fi

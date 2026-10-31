@@ -1,0 +1,1154 @@
+"""Tests for the OpenQASM 2.0 exporter.
+
+Covers all standard gates, parameterized gates, measurements, barriers,
+error conditions, and configuration options.
+"""
+
+from __future__ import annotations
+
+import math
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from quspect.circuit.circuit import QuantumCircuit
+from quspect.circuit.parameter import Parameter
+from quspect.gates.gate import Gate
+from quspect.gates.parameterized import RX, RZ
+from quspect.gates.standard import CX, H
+from quspect.ir.compilation import (
+    GateDecompositionRule,
+    clear_extra_rules,
+    register_decomposition,
+)
+from quspect.ir.errors import (
+    ParameterizedGateError,
+    UnsupportedGateError,
+)
+from quspect.ir.qasm2 import (
+    _QASM2_GATE_MAP,
+    QASM2ExportConfig,
+    QASM2Exporter,
+    QASM2ExportMode,
+    _format_float,
+    _get_qasm_gate_name,
+    get_supported_gates,
+)
+from quspect.ir.qasm_importer import qasm2_loads
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _export(circuit: QuantumCircuit, **kwargs) -> str:
+    """Shortcut: export circuit with STRICT config."""
+    config = QASM2ExportConfig(**kwargs)
+    return QASM2Exporter(config).export(circuit)
+
+
+# =============================================================================
+# Gate registry tests
+# =============================================================================
+
+
+class TestGateRegistry:
+    """Tests for the gate name mapping and registry functions."""
+
+    def test_all_standard_gates_have_mapping(self) -> None:
+        """Every standard gate name maps to a valid QASM name."""
+        from quspect.gates.standard import ALL_STANDARD
+
+        for gate in ALL_STANDARD:
+            qasm_name = _get_qasm_gate_name(gate.name)
+            assert qasm_name is not None, (
+                f"Standard gate {gate.name!r} has no QASM mapping"
+            )
+
+    def test_all_parameterized_gates_have_mapping(self) -> None:
+        """Every parameterized gate template has a QASM mapping."""
+        from quspect.gates.parameterized import ALL_PARAMETERIZED
+
+        for gate in ALL_PARAMETERIZED:
+            qasm_name = _get_qasm_gate_name(gate.name)
+            assert qasm_name is not None, (
+                f"Parameterized gate {gate.name!r} has no QASM mapping"
+            )
+
+    def test_unknown_gate_returns_none(self) -> None:
+        """A gate not in the registry returns None."""
+        assert _get_qasm_gate_name("nonexistent_gate") is None
+
+    def test_p_gate_maps_to_u1(self) -> None:
+        """The P (Phase) gate maps to u1 in QASM 2.0."""
+        assert _QASM2_GATE_MAP["p"] == "u1"
+
+    def test_cp_gate_maps_to_cu1(self) -> None:
+        assert _QASM2_GATE_MAP["cp"] == "cu1"
+
+    def test_get_supported_gates_count(self) -> None:
+        """get_supported_gates() covers all mapped gates."""
+        supported = get_supported_gates()
+        assert len(supported) == len(_QASM2_GATE_MAP)
+        for name in _QASM2_GATE_MAP:
+            assert name in supported
+
+
+# =============================================================================
+# Float formatting tests
+# =============================================================================
+
+
+class TestFormatFloat:
+    """Tests for the _format_float helper."""
+
+    def test_zero(self) -> None:
+        assert _format_float(0.0) == "0"
+
+    def test_integer_value(self) -> None:
+        assert _format_float(1.0) == "1"
+
+    def test_half(self) -> None:
+        assert _format_float(0.5) == "0.5"
+
+    def test_small_fraction(self) -> None:
+        assert _format_float(0.125) == "0.125"
+
+    def test_pi(self) -> None:
+        # Full round-trip precision (shortest repr), so re-import is exact.
+        result = _format_float(3.141592653589793)
+        assert result == "3.141592653589793"
+        assert float(result) == 3.141592653589793
+
+    def test_negative(self) -> None:
+        result = _format_float(-1.5)
+        assert result.startswith("-")
+        assert "1.5" in result
+
+    def test_int_argument(self) -> None:
+        assert _format_float(2) == "2"
+
+
+# =============================================================================
+# Header and register tests
+# =============================================================================
+
+
+class TestHeaderAndRegisters:
+    """Tests for QASM header and register emission."""
+
+    def test_basic_header(self) -> None:
+        """A simple circuit produces the standard header."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        qasm = _export(circ)
+        assert qasm.startswith("OPENQASM 2.0;")
+        assert 'include "qelib1.inc";' in qasm
+
+    def test_header_comment(self) -> None:
+        """header_comment adds QASM comments."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        qasm = _export(circ, header_comment="Generated by QuSpect")
+        assert qasm.startswith("// Generated by QuSpect")
+        assert "OPENQASM 2.0;" in qasm
+
+    def test_multi_line_comment(self) -> None:
+        """Multi-line header comments produce multiple // lines."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        qasm = _export(circ, header_comment="Line 1\nLine 2")
+        lines = qasm.split("\n")
+        assert lines[0] == "// Line 1"
+        assert lines[1] == "// Line 2"
+
+    def test_no_qelib_include(self) -> None:
+        """Setting include_qelib=False omits the include."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        qasm = _export(circ, include_qelib=False)
+        assert "qelib1.inc" not in qasm
+
+    def test_qreg_declaration(self) -> None:
+        """The qreg declaration matches the circuit qubit count."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1).x(3)
+        qasm = _export(circ)
+        assert "qreg q[4];" in qasm
+
+    def test_creg_declaration_when_measured(self) -> None:
+        """A creg is emitted only when the circuit has measurements."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).measure([0], [0])
+        qasm = _export(circ)
+        assert "creg c[1];" in qasm
+
+    def test_no_creg_without_measurements(self) -> None:
+        """No creg is emitted if there are no measurements."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1)
+        qasm = _export(circ)
+        assert "creg" not in qasm
+
+
+# =============================================================================
+# Standard gate emission tests
+# =============================================================================
+
+
+class TestStandardGateEmission:
+    """Tests for emission of standard (fixed-parameter) gates."""
+
+    # Single-qubit standard gates
+    @pytest.mark.parametrize(
+        "method_name,args,expected_prefix",
+        [
+            ("id", (0,), "id q[0]"),
+            ("h", (0,), "h q[0]"),
+            ("x", (0,), "x q[0]"),
+            ("y", (0,), "y q[0]"),
+            ("z", (0,), "z q[0]"),
+            ("s", (0,), "s q[0]"),
+            ("sdg", (0,), "sdg q[0]"),
+            ("t", (0,), "t q[0]"),
+            ("tdg", (0,), "tdg q[0]"),
+        ],
+    )
+    def test_single_qubit_standard_gate(
+        self, method_name: str, args: tuple, expected_prefix: str
+    ) -> None:
+        """Each single-qubit standard gate emits the correct QASM."""
+        circ = QuantumCircuit(name="test")
+        getattr(circ, method_name)(*args)
+        qasm = _export(circ)
+        assert f"{expected_prefix};" in qasm
+
+    # Two-qubit standard gates
+    @pytest.mark.parametrize(
+        "method_name,args,expected",
+        [
+            ("cx", (0, 1), "cx q[0],q[1];"),
+            ("cz", (0, 1), "cz q[0],q[1];"),
+            ("swap", (0, 1), "swap q[0],q[1];"),
+        ],
+    )
+    def test_two_qubit_standard_gate(
+        self, method_name: str, args: tuple, expected: str
+    ) -> None:
+        """Each two-qubit standard gate emits the correct QASM."""
+        circ = QuantumCircuit(name="test")
+        getattr(circ, method_name)(*args)
+        qasm = _export(circ)
+        assert expected in qasm
+
+    def test_toffoli_ccx(self) -> None:
+        """The Toffoli (CCX) gate emits correctly for 3 qubits."""
+        circ = QuantumCircuit(name="test")
+        circ.ccx(0, 1, 2)
+        qasm = _export(circ)
+        assert "ccx q[0],q[1],q[2];" in qasm
+
+
+# =============================================================================
+# Parameterized gate emission tests
+# =============================================================================
+
+
+class TestParameterizedGateEmission:
+    """Tests for emission of parameterized gates with numeric values."""
+
+    @pytest.mark.parametrize(
+        "method_name,args,expected_substr",
+        [
+            ("rx", (0.5, 0), "rx(0.5) q[0];"),
+            ("ry", (0.3, 0), "ry(0.3) q[0];"),
+            ("rz", (1.57, 0), "rz(1.57) q[0];"),
+            ("p", (0.25, 0), "u1(0.25) q[0];"),
+        ],
+    )
+    def test_single_param_gate(
+        self,
+        method_name: str,
+        args: tuple,
+        expected_substr: str,
+    ) -> None:
+        """Single-parameter gates emit with the parameter inline."""
+        circ = QuantumCircuit(name="test")
+        getattr(circ, method_name)(*args)
+        qasm = _export(circ)
+        assert expected_substr in qasm
+
+    @pytest.mark.parametrize(
+        "method_name,args,expected_substr",
+        [
+            ("crx", (0.5, 0, 1), "crx(0.5) q[0],q[1];"),
+            ("cry", (0.3, 0, 1), "cry(0.3) q[0],q[1];"),
+            ("crz", (1.57, 0, 1), "crz(1.57) q[0],q[1];"),
+        ],
+    )
+    def test_two_qubit_param_gate(
+        self,
+        method_name: str,
+        args: tuple,
+        expected_substr: str,
+    ) -> None:
+        """Two-qubit parameterized gates emit correctly."""
+        circ = QuantumCircuit(name="test")
+        getattr(circ, method_name)(*args)
+        qasm = _export(circ)
+        assert expected_substr in qasm
+
+    def test_u1_gate(self) -> None:
+        """U1 gate emits as u1(lambda)."""
+        from quspect.gates.parameterized import U1
+
+        circ = QuantumCircuit(name="test")
+        circ.append(U1.with_params(0.5), (0,))
+        qasm = _export(circ)
+        assert "u1(0.5) q[0];" in qasm
+
+    def test_u2_gate(self) -> None:
+        """U2 gate emits as u2(phi, lambda)."""
+        from quspect.gates.parameterized import U2
+
+        circ = QuantumCircuit(name="test")
+        circ.append(U2.with_params(0.5, 0.3), (0,))
+        qasm = _export(circ)
+        assert "u2(0.5,0.3) q[0];" in qasm
+
+    def test_u3_gate(self) -> None:
+        """U3 gate emits as u3(theta, phi, lambda)."""
+        from quspect.gates.parameterized import U3
+
+        circ = QuantumCircuit(name="test")
+        circ.append(U3.with_params(0.5, 0.3, 0.1), (0,))
+        qasm = _export(circ)
+        assert "u3(0.5,0.3,0.1) q[0];" in qasm
+
+    def test_cu3_gate(self) -> None:
+        """CU3 gate emits as cu3 with three params."""
+        from quspect.gates.parameterized import CU3
+
+        circ = QuantumCircuit(name="test")
+        circ.append(CU3.with_params(0.5, 0.3, 0.1), (0, 1))
+        qasm = _export(circ)
+        assert "cu3(0.5,0.3,0.1) q[0],q[1];" in qasm
+
+
+# =============================================================================
+# Error condition tests
+# =============================================================================
+
+
+class TestErrorConditions:
+    """Tests for expected error conditions during export."""
+
+    def test_empty_circuit_raises(self) -> None:
+        """An empty circuit raises ValueError."""
+        circ = QuantumCircuit(name="empty")
+        exporter = QASM2Exporter()
+        with pytest.raises(ValueError, match="empty circuit"):
+            exporter.export(circ)
+
+    def test_symbolic_parameter_raises(self) -> None:
+        """A gate with an unbound Parameter raises ParameterizedGateError."""
+        theta = Parameter("θ")
+        circ = QuantumCircuit(name="test")
+        circ.rx(theta, 0)
+        exporter = QASM2Exporter()
+        with pytest.raises(ParameterizedGateError) as exc_info:
+            exporter.export(circ)
+        assert exc_info.value.gate_name == "rx"
+        assert "θ" in exc_info.value.param_names
+
+    def test_symbolic_parameter_in_u3_raises(self) -> None:
+        """U3 gate with symbolic params raises ParameterizedGateError."""
+        theta = Parameter("θ")
+        phi = Parameter("φ")
+        circ = QuantumCircuit(name="test")
+        circ.u3(theta, phi, 0.5, 0)
+        exporter = QASM2Exporter()
+        with pytest.raises(ParameterizedGateError) as exc_info:
+            exporter.export(circ)
+        assert exc_info.value.gate_name == "u3"
+        assert "θ" in exc_info.value.param_names
+        assert "φ" in exc_info.value.param_names
+
+    def test_unsupported_gate_in_strict_mode(self) -> None:
+        """A gate not in the registry raises UnsupportedGateError."""
+        from quspect.gates.gate import Gate
+
+        custom = Gate(name="my_custom_gate", num_qubits=2)
+        circ = QuantumCircuit(name="test")
+        circ.append(custom, (0, 1))
+        exporter = QASM2Exporter()
+        with pytest.raises(UnsupportedGateError) as exc_info:
+            exporter.export(circ)
+        assert exc_info.value.gate_name == "my_custom_gate"
+
+    def test_bound_parameter_succeeds(self) -> None:
+        """After binding, a parameterized gate exports without error."""
+        theta = Parameter("θ")
+        circ = QuantumCircuit(name="test")
+        circ.rx(theta, 0)
+        bound = circ.bind_parameters({theta: 0.5})
+        qasm = _export(bound)
+        assert "rx(0.5) q[0];" in qasm
+
+    def test_unbound_parameter_error_message_has_hint(self) -> None:
+        """The error message suggests calling bind_parameters."""
+        theta = Parameter("θ")
+        circ = QuantumCircuit(name="test")
+        circ.rx(theta, 0)
+        exporter = QASM2Exporter()
+        with pytest.raises(ParameterizedGateError) as exc_info:
+            exporter.export(circ)
+        assert "bind_parameters" in str(exc_info.value)
+
+
+# =============================================================================
+# Measurement tests
+# =============================================================================
+
+
+class TestMeasureEmission:
+    """Tests for measurement instruction emission."""
+
+    def test_single_measure(self) -> None:
+        """A single measurement emits measure → syntax."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        circ.measure([0], [0])
+        qasm = _export(circ)
+        assert "measure q[0] -> c[0];" in qasm
+
+    def test_multi_measure(self) -> None:
+        """Multiple measurements each get their own statement."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).h(1)
+        circ.measure([0, 1], [0, 1])
+        qasm = _export(circ)
+        assert "measure q[0] -> c[0];" in qasm
+        assert "measure q[1] -> c[1];" in qasm
+
+    def test_measure_all(self) -> None:
+        """measure_all() emits measures for all active qubits."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1).x(2)
+        circ.measure_all()
+        qasm = _export(circ)
+        assert "measure q[0] -> c[0];" in qasm
+        assert "measure q[1] -> c[1];" in qasm
+        assert "measure q[2] -> c[2];" in qasm
+        assert "creg c[3];" in qasm
+
+
+# =============================================================================
+# Barrier tests
+# =============================================================================
+
+
+class TestBarrierEmission:
+    """Tests for barrier instruction emission."""
+
+    def test_single_qubit_barrier(self) -> None:
+        """A single-qubit barrier emits correctly."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        circ.barrier(0)
+        circ.x(0)
+        qasm = _export(circ)
+        assert "barrier q[0];" in qasm
+
+    def test_multi_qubit_barrier(self) -> None:
+        """A multi-qubit barrier emits with all qubits."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).h(1)
+        circ.barrier(0, 1)
+        circ.cx(0, 1)
+        qasm = _export(circ)
+        assert "barrier q[0],q[1];" in qasm
+
+    def test_barrier_all_active_qubits(self) -> None:
+        """barrier() with no arguments applies to all active qubits."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).x(2)
+        circ.barrier()
+        qasm = _export(circ)
+        assert "barrier q[0],q[2];" in qasm
+
+    def test_barrier_as_comment(self) -> None:
+        """barrier_as_comment=True emits a comment instead of a statement."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0)
+        circ.barrier(0)
+        qasm = _export(circ, barrier_as_comment=True)
+        assert "// barrier q[0];" in qasm
+        assert "barrier q[0];" not in qasm.replace("// barrier q[0];", "")
+
+
+# =============================================================================
+# Configuration tests
+# =============================================================================
+
+
+class TestExportConfig:
+    """Tests for export configuration options."""
+
+    def test_custom_indent(self) -> None:
+        """Custom indent is applied to all gate statements."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1)
+        qasm = _export(circ, indent="    ")
+        lines = [ln for ln in qasm.split("\n") if ln.startswith("    ")]
+        assert len(lines) == 2  # h and cx
+
+    def test_default_config_is_strict(self) -> None:
+        """Default QASM2ExportConfig uses STRICT mode."""
+        config = QASM2ExportConfig()
+        assert config.mode == QASM2ExportMode.STRICT
+        assert config.include_qelib is True
+
+
+# =============================================================================
+# Integration tests
+# =============================================================================
+
+
+class TestIntegration:
+    """End-to-end integration tests for realistic circuits."""
+
+    def test_bell_state(self) -> None:
+        """A standard Bell state circuit exports correctly."""
+        circ = QuantumCircuit(name="bell")
+        circ.h(0)
+        circ.cx(0, 1)
+        circ.measure([0, 1], [0, 1])
+        qasm = _export(circ)
+        expected_lines = [
+            "OPENQASM 2.0;",
+            'include "qelib1.inc";',
+            "qreg q[2];",
+            "creg c[2];",
+            "",
+            "h q[0];",
+            "cx q[0],q[1];",
+        ]
+        for line in expected_lines:
+            assert line in qasm
+        assert "measure q[0] -> c[0];" in qasm
+        assert "measure q[1] -> c[1];" in qasm
+
+    def test_ghz_state(self) -> None:
+        """A 3-qubit GHZ state exports correctly."""
+        circ = QuantumCircuit(name="ghz")
+        circ.h(0)
+        circ.cx(0, 1)
+        circ.cx(1, 2)
+        circ.measure_all()
+        qasm = _export(circ)
+        assert "qreg q[3];" in qasm
+        assert "creg c[3];" in qasm
+        assert "h q[0];" in qasm
+        assert "cx q[0],q[1];" in qasm
+        assert "cx q[1],q[2];" in qasm
+
+    def test_vqe_circuit_bound(self) -> None:
+        """A parameterized VQE circuit bound to values exports correctly."""
+        theta = Parameter("θ")
+        phi = Parameter("φ")
+
+        circ = QuantumCircuit(name="vqe")
+        circ.rx(theta, 0)
+        circ.ry(phi, 1)
+        circ.cx(0, 1)
+        circ.measure_all()
+
+        bound = circ.bind_parameters({theta: 0.5, phi: 1.2})
+        qasm = _export(bound)
+        assert "rx(0.5) q[0];" in qasm
+        assert "ry(1.2) q[1];" in qasm
+        assert "cx q[0],q[1];" in qasm
+
+    def test_circuit_with_multiple_param_gates(self) -> None:
+        """Multiple parameterized gates each get their own params."""
+        circ = QuantumCircuit(name="test")
+        circ.rx(0.1, 0)
+        circ.rz(0.2, 0)
+        circ.crx(0.3, 0, 1)
+        circ.crz(0.4, 1, 0)
+        qasm = _export(circ)
+        assert "rx(0.1) q[0];" in qasm
+        assert "rz(0.2) q[0];" in qasm
+        assert "crx(0.3) q[0],q[1];" in qasm
+        assert "crz(0.4) q[1],q[0];" in qasm
+
+    def test_composed_circuit(self) -> None:
+        """A circuit built with compose() exports with remapped qubits."""
+        sub = QuantumCircuit(name="pair")
+        sub.h(0).cx(0, 1)
+
+        main = QuantumCircuit(name="composed")
+        main = main.compose(sub, qubits=[0, 1])
+        main = main.compose(sub, qubits=[2, 3])
+        main.measure_all()
+
+        qasm = _export(main)
+        assert "qreg q[4];" in qasm
+        assert "h q[0];" in qasm
+        assert "cx q[0],q[1];" in qasm
+        assert "h q[2];" in qasm
+        assert "cx q[2],q[3];" in qasm
+
+    def test_export_to_file(self) -> None:
+        """export_to_file writes valid QASM to disk."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.qasm"
+            exporter = QASM2Exporter()
+            exporter.export_to_file(circ, path)
+            content = path.read_text()
+            assert content.startswith("OPENQASM 2.0;")
+            assert "h q[0];" in content
+            assert content.endswith("\n")
+
+
+# =============================================================================
+# Export mode tests
+# =============================================================================
+
+
+class TestExportModes:
+    """Tests for different export modes."""
+
+    def test_strict_mode_is_default(self) -> None:
+        """Exporter defaults to STRICT mode."""
+        exporter = QASM2Exporter()
+        assert exporter._config.mode == QASM2ExportMode.STRICT
+
+    def test_strict_mode_rejects_unsupported_gate(self) -> None:
+        """STRICT mode raises for unknown gates."""
+        from quspect.gates.gate import Gate
+
+        custom = Gate(name="unknown_gate", num_qubits=1)
+        circ = QuantumCircuit(name="test")
+        circ.append(custom, (0,))
+        exporter = QASM2Exporter()
+        with pytest.raises(UnsupportedGateError):
+            exporter.export(circ)
+
+
+# =============================================================================
+# Decomposition tests
+# =============================================================================
+
+
+class TestDecomposition:
+    """Tests for gate decomposition rules."""
+
+    def test_swap_decomposition(self) -> None:
+        """SWAP gate decomposes into 3 CX gates."""
+        from quspect.gates.standard import CX, SWAP
+        from quspect.ir.compilation import decompose_gate
+
+        result = decompose_gate(SWAP, (0, 1))
+        assert len(result) == 3
+        assert all(g == CX for g, _ in result)
+        # CX(0,1); CX(1,0); CX(0,1)
+        assert result[0] == (CX, (0, 1))
+        assert result[1] == (CX, (1, 0))
+        assert result[2] == (CX, (0, 1))
+
+    def test_swap_decomposition_remaps_qubits(self) -> None:
+        """SWAP decomposition uses absolute qubit indices."""
+        from quspect.gates.standard import CX, SWAP
+        from quspect.ir.compilation import decompose_gate
+
+        result = decompose_gate(SWAP, (3, 7))
+        assert result == [
+            (CX, (3, 7)),
+            (CX, (7, 3)),
+            (CX, (3, 7)),
+        ]
+
+    def test_ccx_decomposition(self) -> None:
+        """Toffoli gate decomposes into the textbook 15-gate sequence."""
+        from quspect.gates.standard import CCX
+        from quspect.ir.compilation import decompose_gate
+
+        result = decompose_gate(CCX, (0, 1, 2))
+        assert [(gate.name, qubits) for gate, qubits in result] == [
+            ("h", (2,)),
+            ("cx", (1, 2)),
+            ("tdg", (2,)),
+            ("cx", (0, 2)),
+            ("t", (2,)),
+            ("cx", (1, 2)),
+            ("tdg", (2,)),
+            ("cx", (0, 2)),
+            ("t", (1,)),
+            ("t", (2,)),
+            ("cx", (0, 1)),
+            ("h", (2,)),
+            ("t", (0,)),
+            ("tdg", (1,)),
+            ("cx", (0, 1)),
+        ]
+
+    def test_ccx_decomposition_matches_full_unitary(self) -> None:
+        """Every column of the lowered CCX unitary matches native CCX."""
+        from quspect import Simulator
+        from quspect.gates.standard import CCX
+        from quspect.ir.compilation import decompose_gate
+
+        source_columns = []
+        lowered_columns = []
+        decomposition = decompose_gate(CCX, (0, 1, 2))
+        simulator = Simulator()
+
+        for basis_state in range(8):
+            source = QuantumCircuit()
+            lowered = QuantumCircuit()
+            for qubit in range(3):
+                if (basis_state >> qubit) & 1:
+                    source.x(qubit)
+                    lowered.x(qubit)
+            source.ccx(0, 1, 2)
+            for gate, qubits in decomposition:
+                lowered.append(gate, qubits)
+            source_columns.append(simulator.statevector(source))
+            lowered_columns.append(simulator.statevector(lowered))
+
+        np.testing.assert_allclose(
+            np.column_stack(lowered_columns),
+            np.column_stack(source_columns),
+            atol=1e-12,
+        )
+
+    def test_ccx_decomposition_preserves_qubits(self) -> None:
+        """All gates in CCX decomposition act on the given qubits only."""
+        from quspect.gates.standard import CCX
+        from quspect.ir.compilation import decompose_gate
+
+        result = decompose_gate(CCX, (5, 6, 7))
+        allowed = {5, 6, 7}
+        for _, qs in result:
+            assert set(qs).issubset(allowed)
+
+    def test_decompose_unknown_gate_raises(self) -> None:
+        """Decomposing an unknown gate raises ValueError."""
+        from quspect.gates.gate import Gate
+        from quspect.ir.compilation import decompose_gate
+
+        custom = Gate(name="no_rule_exists", num_qubits=2)
+        with pytest.raises(ValueError, match="No decomposition rule"):
+            decompose_gate(custom, (0, 1))
+
+    def test_get_rules_for_swap(self) -> None:
+        """get_rules_for returns SWAP decomposition rules."""
+        from quspect.ir.compilation import get_rules_for
+
+        rules = get_rules_for("swap", 2)
+        assert len(rules) >= 1
+        assert rules[0].gate_name == "swap"
+
+    def test_get_rules_for_unknown(self) -> None:
+        """get_rules_for returns empty list for unknown gates."""
+        from quspect.ir.compilation import get_rules_for
+
+        rules = get_rules_for("nonexistent", 2)
+        assert rules == []
+
+    def test_register_custom_decomposition(self) -> None:
+        """Custom decomposition rules can be registered."""
+        from quspect.gates.gate import Gate
+        from quspect.gates.standard import CX, H
+        from quspect.ir.compilation import (
+            GateDecompositionRule,
+            clear_extra_rules,
+            decompose_gate,
+            get_rules_for,
+            register_decomposition,
+        )
+
+        def _decompose_my_gate(
+            gate: Gate, qubits: tuple[int, ...]
+        ) -> list[tuple[Gate, tuple[int, ...]]]:
+            return [(H, (qubits[0],)), (CX, (qubits[0], qubits[1]))]
+
+        rule = GateDecompositionRule(
+            gate_name="my_gate",
+            num_qubits=2,
+            decompose=_decompose_my_gate,
+        )
+        try:
+            register_decomposition(rule)
+            rules = get_rules_for("my_gate", 2)
+            assert len(rules) == 1
+            assert rules[0].gate_name == "my_gate"
+
+            custom = Gate(name="my_gate", num_qubits=2)
+            result = decompose_gate(custom, (0, 1))
+            assert len(result) == 2
+            assert result[0] == (H, (0,))
+            assert result[1] == (CX, (0, 1))
+        finally:
+            clear_extra_rules()
+
+
+# =============================================================================
+# DECOMPOSE mode tests
+# =============================================================================
+
+
+class TestDecomposeMode:
+    """Tests for DECOMPOSE export mode."""
+
+    @staticmethod
+    def _setup_custom_decomposition() -> None:
+        """Register a decomposition for test gates used in these tests."""
+        from quspect.gates.standard import CX, H
+        from quspect.ir.compilation import (
+            GateDecompositionRule,
+            clear_extra_rules,
+            register_decomposition,
+        )
+
+        clear_extra_rules()
+
+        def _decompose_test_gate(
+            gate: Gate, qubits: tuple[int, ...]
+        ) -> list[tuple[Gate, tuple[int, ...]]]:
+            return [
+                (H, (qubits[0],)),
+                (CX, (qubits[0], qubits[1])),
+                (H, (qubits[1],)),
+            ]
+
+        register_decomposition(
+            GateDecompositionRule(
+                gate_name="test_gate",
+                num_qubits=2,
+                decompose=_decompose_test_gate,
+                description="Test gate → H + CX + H",
+            )
+        )
+
+    def test_custom_gate_decomposed(self) -> None:
+        """In DECOMPOSE mode, a gate with a rule is decomposed inline."""
+        from quspect.gates.gate import Gate
+        from quspect.ir.compilation import clear_extra_rules
+
+        self._setup_custom_decomposition()
+        try:
+            custom = Gate(name="test_gate", num_qubits=2)
+            circ = QuantumCircuit(name="test")
+            circ.append(custom, (0, 1))
+            circ.measure_all()
+
+            config = QASM2ExportConfig(mode=QASM2ExportMode.DECOMPOSE)
+            exporter = QASM2Exporter(config)
+            qasm = exporter.export(circ)
+
+            # "test_gate" should NOT appear in output (decomposed)
+            assert "test_gate" not in qasm
+            # Decomposition: H(0); CX(0,1); H(1)
+            assert "h q[0];" in qasm
+            assert "cx q[0],q[1];" in qasm
+            assert "h q[1];" in qasm
+        finally:
+            clear_extra_rules()
+
+    def test_supported_gates_unchanged(self) -> None:
+        """DECOMPOSE mode preserves gates already in the QASM registry."""
+        self._setup_custom_decomposition()
+        try:
+            circ = QuantumCircuit(name="test")
+            circ.h(0).cx(0, 1).x(2)
+
+            config = QASM2ExportConfig(mode=QASM2ExportMode.DECOMPOSE)
+            exporter = QASM2Exporter(config)
+            qasm = exporter.export(circ)
+
+            assert "h q[0];" in qasm
+            assert "cx q[0],q[1];" in qasm
+            assert "x q[2];" in qasm
+        finally:
+            from quspect.ir.compilation import clear_extra_rules
+
+            clear_extra_rules()
+
+    def test_unknown_gate_still_raises_in_decompose(self) -> None:
+        """A gate without a decomposition rule still raises."""
+        from quspect.gates.gate import Gate
+
+        custom = Gate(name="unknown_gate", num_qubits=1)
+        circ = QuantumCircuit(name="test")
+        circ.append(custom, (0,))
+
+        config = QASM2ExportConfig(mode=QASM2ExportMode.DECOMPOSE)
+        exporter = QASM2Exporter(config)
+        with pytest.raises(UnsupportedGateError):
+            exporter.export(circ)
+
+
+# =============================================================================
+# EXTENDED mode tests
+# =============================================================================
+
+
+class TestExtendedMode:
+    """Tests for EXTENDED export mode."""
+
+    @staticmethod
+    def _setup_custom_decomposition() -> None:
+        """Register a decomposition for test gates used in these tests."""
+        from quspect.gates.standard import CX, H
+        from quspect.ir.compilation import (
+            GateDecompositionRule,
+            clear_extra_rules,
+            register_decomposition,
+        )
+
+        clear_extra_rules()
+
+        def _decompose_test_gate(
+            gate: Gate, qubits: tuple[int, ...]
+        ) -> list[tuple[Gate, tuple[int, ...]]]:
+            return [
+                (H, (qubits[0],)),
+                (CX, (qubits[0], qubits[1])),
+                (H, (qubits[1],)),
+            ]
+
+        register_decomposition(
+            GateDecompositionRule(
+                gate_name="test_gate",
+                num_qubits=2,
+                decompose=_decompose_test_gate,
+                description="Test gate → H + CX + H",
+            )
+        )
+
+    def test_gate_declaration_emitted(self) -> None:
+        """In EXTENDED mode, a custom gate gets a gate declaration block."""
+        from quspect.gates.gate import Gate
+        from quspect.ir.compilation import clear_extra_rules
+
+        self._setup_custom_decomposition()
+        try:
+            custom = Gate(name="test_gate", num_qubits=2)
+            circ = QuantumCircuit(name="test")
+            circ.append(custom, (0, 1))
+
+            config = QASM2ExportConfig(mode=QASM2ExportMode.EXTENDED)
+            exporter = QASM2Exporter(config)
+            qasm = exporter.export(circ)
+
+            # Gate declaration block
+            assert "gate test_gate a,b {" in qasm
+            assert "h a;" in qasm
+            assert "cx a,b;" in qasm
+            assert "h b;" in qasm
+            # The circuit body uses the gate name
+            assert "test_gate q[0],q[1];" in qasm
+        finally:
+            clear_extra_rules()
+
+    def test_gate_declaration_before_registers(self) -> None:
+        """Gate declarations appear after header but before registers."""
+        from quspect.gates.gate import Gate
+        from quspect.ir.compilation import clear_extra_rules
+
+        self._setup_custom_decomposition()
+        try:
+            custom = Gate(name="test_gate", num_qubits=2)
+            circ = QuantumCircuit(name="test")
+            circ.append(custom, (0, 1))
+
+            config = QASM2ExportConfig(mode=QASM2ExportMode.EXTENDED)
+            exporter = QASM2Exporter(config)
+            qasm = exporter.export(circ)
+
+            lines = qasm.split("\n")
+            openqasm_idx = next(i for i, ln in enumerate(lines) if "OPENQASM" in ln)
+            decl_idx = next(i for i, ln in enumerate(lines) if "gate " in ln)
+            qreg_idx = next(i for i, ln in enumerate(lines) if "qreg" in ln)
+
+            assert openqasm_idx < decl_idx < qreg_idx
+        finally:
+            clear_extra_rules()
+
+    def test_extended_without_unsupported_gates(self) -> None:
+        """EXTENDED mode on a circuit with only supported gates is fine."""
+        circ = QuantumCircuit(name="test")
+        circ.h(0).cx(0, 1)
+
+        config = QASM2ExportConfig(mode=QASM2ExportMode.EXTENDED)
+        exporter = QASM2Exporter(config)
+        qasm = exporter.export(circ)
+
+        # No gate declarations
+        assert "gate " not in qasm
+        assert "h q[0];" in qasm
+        assert "cx q[0],q[1];" in qasm
+
+
+# =============================================================================
+# Regression tests: precision, recursive DECOMPOSE, EXTENDED declarations
+# =============================================================================
+
+
+@pytest.fixture
+def clean_rules() -> Iterator[None]:
+    """Reset the global decomposition-rule registry around a test."""
+    clear_extra_rules()
+    yield
+    clear_extra_rules()
+
+
+def _register(name: str, num_qubits: int, rule) -> None:  # type: ignore[no-untyped-def]
+    register_decomposition(GateDecompositionRule(name, num_qubits, rule))
+
+
+def _gates(
+    circ: QuantumCircuit,
+) -> list[tuple[str, tuple[float, ...], tuple[int, ...]]]:
+    return [(i.gate.name, i.gate.params, i.qubits) for i in circ if i.gate is not None]
+
+
+class TestFloatRoundTrip:
+    """B27: exported angles re-import bit-exactly."""
+
+    def test_random_angles_roundtrip_exactly(self) -> None:
+        rng = np.random.default_rng(7)
+        values = [float(v) for v in rng.uniform(-10, 10, 50)]
+        values += [math.pi / 3, 1e-300, -2.5e17, 0.1 + 0.2, 5e-324]
+        circ = QuantumCircuit()
+        for v in values:
+            circ.rz(v, 0)
+        back = qasm2_loads(QASM2Exporter().export(circ))
+        assert [i.gate.params[0] for i in back if i.gate is not None] == values
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_non_finite_angle_rejected(self, value: float) -> None:
+        with pytest.raises(ValueError, match="non-finite"):
+            _format_float(value)
+
+
+class TestRecursiveDecompose:
+    """B28: DECOMPOSE lowers nested custom rules to a fixed point."""
+
+    def test_nested_rules_fully_lowered(self, clean_rules: None) -> None:
+        _register("bell", 2, lambda g, qs: [(H, (qs[0],)), (CX, qs)])
+        _register("mid", 2, lambda g, qs: [(Gate(name="bell", num_qubits=2), qs)])
+        _register("top", 2, lambda g, qs: [(Gate(name="mid", num_qubits=2), qs[::-1])])
+        circ = QuantumCircuit()
+        circ.append(Gate(name="top", num_qubits=2), (0, 1))
+        text = _export(circ, mode=QASM2ExportMode.DECOMPOSE)
+        assert "bell" not in text and "mid" not in text and "top" not in text
+        assert _gates(qasm2_loads(text)) == [("h", (), (1,)), ("cx", (), (1, 0))]
+
+    def test_cyclic_rules_raise(self, clean_rules: None) -> None:
+        _register("ping", 1, lambda g, qs: [(Gate(name="pong", num_qubits=1), qs)])
+        _register("pong", 1, lambda g, qs: [(Gate(name="ping", num_qubits=1), qs)])
+        circ = QuantumCircuit()
+        circ.append(Gate(name="ping", num_qubits=1), (0,))
+        for mode in (QASM2ExportMode.DECOMPOSE, QASM2ExportMode.EXTENDED):
+            with pytest.raises(UnsupportedGateError):
+                _export(circ, mode=mode)
+
+
+def _zz_rule(gate: Gate, qs: tuple[int, ...]) -> list[tuple[Gate, tuple[int, ...]]]:
+    a, b = qs
+    return [(CX, (a, b)), (RZ.with_params(gate.params[0] / 2 - 0.25), (b,)), (CX, qs)]
+
+
+class TestExtendedDeclarations:
+    """B29/B30: EXTENDED emits valid, parameterized and complete declarations."""
+
+    def test_affine_rule_declares_formal_parameters(self, clean_rules: None) -> None:
+        _register("myzz", 2, _zz_rule)
+        circ = QuantumCircuit()
+        circ.append(Gate(name="myzz", num_qubits=2, params=(0.3,)), (0, 1))
+        circ.append(Gate(name="myzz", num_qubits=2, params=(0.7,)), (1, 0))
+        text = _export(circ, mode=QASM2ExportMode.EXTENDED)
+        assert "gate myzz(p0) a,b {\n  cx a,b;\n  rz(0.5*p0-0.25) b;\n" in text
+        assert text.count("gate myzz") == 1
+        assert "myzz(0.3) q[0],q[1];" in text
+        assert "myzz(0.7) q[1],q[0];" in text
+        assert _gates(qasm2_loads(text)) == [
+            ("cx", (), (0, 1)),
+            ("rz", (0.3 / 2 - 0.25,), (1,)),
+            ("cx", (), (0, 1)),
+            ("cx", (), (1, 0)),
+            ("rz", (0.7 / 2 - 0.25,), (0,)),
+            ("cx", (), (1, 0)),
+        ]
+
+    def test_non_affine_rule_declares_one_gate_per_instance(
+        self, clean_rules: None
+    ) -> None:
+        _register("wob", 1, lambda g, qs: [(RX.with_params(math.cos(g.params[0])), qs)])
+        circ = QuantumCircuit()
+        for theta in (0.2, 0.4, 0.2):
+            circ.append(Gate(name="wob", num_qubits=1, params=(theta,)), (0,))
+        text = _export(circ, mode=QASM2ExportMode.EXTENDED)
+        assert "gate wob_0 a {" in text and "gate wob_1 a {" in text
+        assert text.splitlines()[-3:] == ["wob_0 q[0];", "wob_1 q[0];", "wob_0 q[0];"]
+        assert [p for _, p, _ in _gates(qasm2_loads(text))] == [
+            (math.cos(0.2),),
+            (math.cos(0.4),),
+            (math.cos(0.2),),
+        ]
+
+    def test_nested_custom_gates_are_declared_first(self, clean_rules: None) -> None:
+        _register("myzz", 2, _zz_rule)
+        _register(
+            "outer",
+            2,
+            lambda g, qs: [
+                (Gate(name="myzz", num_qubits=2, params=(2 * g.params[0],)), qs[::-1]),
+                (H, (qs[0],)),
+            ],
+        )
+        circ = QuantumCircuit()
+        circ.append(Gate(name="outer", num_qubits=2, params=(0.5,)), (0, 1))
+        text = _export(circ, mode=QASM2ExportMode.EXTENDED)
+        assert text.index("gate myzz(p0)") < text.index("gate outer(p0)")
+        assert "  myzz(2*p0) b,a;" in text
+        assert _gates(qasm2_loads(text)) == [
+            ("cx", (), (1, 0)),
+            ("rz", (0.25,), (0,)),
+            ("cx", (), (1, 0)),
+            ("h", (), (0,)),
+        ]
+
+    def test_unexportable_body_gate_raises(self, clean_rules: None) -> None:
+        _register(
+            "wrap", 1, lambda g, qs: [(Gate(name="mystery", num_qubits=1), qs), (H, qs)]
+        )
+        circ = QuantumCircuit()
+        circ.append(Gate(name="wrap", num_qubits=1), (0,))
+        with pytest.raises(UnsupportedGateError) as info:
+            _export(circ, mode=QASM2ExportMode.EXTENDED)
+        assert info.value.gate_name == "mystery"
+        assert "wrap" in str(info.value)
+
+    def test_name_clashing_with_qelib1_is_renamed(self, clean_rules: None) -> None:
+        _register("ch", 1, lambda g, qs: [(H, qs)])
+        circ = QuantumCircuit()
+        circ.append(Gate(name="ch", num_qubits=1), (0,))
+        text = _export(circ, mode=QASM2ExportMode.EXTENDED)
+        assert "gate ch_1 a {" in text and text.endswith("ch_1 q[0];")
+
+    def test_symbolic_instance_raises(self, clean_rules: None) -> None:
+        _register("myzz", 2, _zz_rule)
+        circ = QuantumCircuit()
+        circ.append(Gate(name="myzz", num_qubits=2, params=(Parameter("t"),)), (0, 1))
+        with pytest.raises(ParameterizedGateError):
+            _export(circ, mode=QASM2ExportMode.EXTENDED)

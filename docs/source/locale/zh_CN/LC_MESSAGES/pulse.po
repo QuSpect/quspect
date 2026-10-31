@@ -1,0 +1,485 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect 0.3\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-28 23:38-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/pulse.rst:2
+msgid "Pulse envelopes"
+msgstr "脉冲包络"
+
+#: ../../source/pulse.rst:4
+msgid ""
+":mod:`quspect.pulse` builds and decodes time-domain control envelopes for"
+" superconducting-qubit experiments: DRAG-shaped drive pulses, flat-top "
+"readout and flux pulses, arbitrary sampled waveforms, and whole pulse "
+"schedules made from them."
+msgstr ""
+":mod:`quspect.pulse` 用于构建和解码超导量子比特实验中的时域控制包络：DRAG "
+"驱动脉冲、平顶读取与磁通脉冲、任意采样波形，以及由它们组成的完整脉冲序列。"
+
+#: ../../source/pulse.rst:9
+msgid ""
+"The module is a C++ reimplementation of the extension module of "
+"`envelopes-qc <https://pypi.org/project/envelopes-qc/>`_ 0.1.5.  It keeps"
+" the same classes, function signatures, docstrings and behaviour, and "
+"decoded waveforms are **bit-identical** to the original: every "
+"``float32`` sample, the serialization bytes, ``repr`` strings and error "
+"messages match.  Unlike the original, it is built from source on every "
+"supported platform, including Linux on aarch64."
+msgstr ""
+"该模块是 `envelopes-qc <https://pypi.org/project/envelopes-qc/>`_ 0.1.5 扩展模块的"
+" C++ 重新实现。它保留了相同的类、函数签名、文档字符串和行为，解码出的波形与原实现\\ **逐位一致**\\ ：每个 ``float32`` "
+"采样点、序列化字节、``repr`` 字符串和错误消息都相同。与原实现不同，它在所有受支持的平台上都从源码构建，包括 aarch64 架构的 "
+"Linux。"
+
+#: ../../source/pulse.rst:17
+msgid ""
+"The classes and functions are re-exported from the native extension "
+"``quspect._pulse``.  Importing :mod:`quspect.pulse` raises "
+":class:`ImportError` when the extension has not been built (see "
+":doc:`installation`)."
+msgstr ""
+"这些类和函数由原生扩展 ``quspect._pulse`` 重新导出。若扩展尚未构建，导入 :mod:`quspect.pulse` 会抛出 "
+":class:`ImportError`\\ （参见 :doc:`installation`）。"
+
+#: ../../source/pulse.rst:22
+msgid "Quick example"
+msgstr "快速示例"
+
+#: ../../source/pulse.rst:40
+msgid ""
+"Times are in the unit of the cache resolution (usually ns); frequencies "
+"are in the reciprocal unit (GHz for ns)."
+msgstr "时间的单位与缓存分辨率相同（通常为 ns）；频率使用其倒数单位（时间单位为 ns 时即 GHz）。"
+
+#: ../../source/pulse.rst:44
+msgid "Envelope types"
+msgstr "包络类型"
+
+#: ../../source/pulse.rst:50
+msgid "Class"
+msgstr "类"
+
+#: ../../source/pulse.rst:51
+msgid "Constructor"
+msgstr "构造参数"
+
+#: ../../source/pulse.rst:52
+msgid "Shape"
+msgstr "形状"
+
+#: ../../source/pulse.rst:53
+msgid "``Gaussian``"
+msgstr "``Gaussian``"
+
+#: ../../source/pulse.rst:54
+msgid "``(t0, w, amp)``"
+msgstr "``(t0, w, amp)``"
+
+#: ../../source/pulse.rst:55
+msgid ""
+"Gaussian centred at ``t0`` with full width at half maximum ``w``, "
+"truncated to ``t0 ± 3w``."
+msgstr "以 ``t0`` 为中心、半高全宽为 ``w`` 的高斯函数，截断在 ``t0 ± 3w``。"
+
+#: ../../source/pulse.rst:57
+msgid "``GaussianDRAG``"
+msgstr "``GaussianDRAG``"
+
+#: ../../source/pulse.rst:58 ../../source/pulse.rst:62
+msgid "``(t0, w, amp, coef, df, phase)``"
+msgstr "``(t0, w, amp, coef, df, phase)``"
+
+#: ../../source/pulse.rst:59
+msgid ""
+"Gaussian plus ``i·coef`` times its derivative (DRAG), modulated by "
+"``exp(i(-2π·df·t + phase))``.  Complex."
+msgstr "高斯函数加上 ``i·coef`` 乘以其导数（DRAG），再乘以调制因子 ``exp(i(-2π·df·t + phase))``。复数包络。"
+
+#: ../../source/pulse.rst:61
+msgid "``CosineDRAG``"
+msgstr "``CosineDRAG``"
+
+#: ../../source/pulse.rst:63
+msgid ""
+"Raised cosine of full width ``w`` with DRAG correction and modulation. "
+"Complex."
+msgstr "全宽为 ``w`` 的升余弦，带 DRAG 修正和调制。复数包络。"
+
+#: ../../source/pulse.rst:65
+msgid "``Triangle``"
+msgstr "``Triangle``"
+
+#: ../../source/pulse.rst:66
+msgid "``(t0, tlen, amp, fall)``"
+msgstr "``(t0, tlen, amp, fall)``"
+
+#: ../../source/pulse.rst:67
+msgid "Linear ramp over ``[t0, t0 + tlen)``, falling or rising."
+msgstr "在 ``[t0, t0 + tlen)`` 上的线性斜坡，可下降或上升。"
+
+#: ../../source/pulse.rst:68
+msgid "``Rect``"
+msgstr "``Rect``"
+
+#: ../../source/pulse.rst:69
+msgid "``(t0, tlen, amp)``"
+msgstr "``(t0, tlen, amp)``"
+
+#: ../../source/pulse.rst:70
+msgid "Rectangle over ``[t0, t0 + tlen)``."
+msgstr "在 ``[t0, t0 + tlen)`` 上的矩形。"
+
+#: ../../source/pulse.rst:71
+msgid "``Flattop``"
+msgstr "``Flattop``"
+
+#: ../../source/pulse.rst:72
+msgid "``(t0, tlen, w_left, w_right, amp)``"
+msgstr "``(t0, tlen, w_left, w_right, amp)``"
+
+#: ../../source/pulse.rst:73
+msgid "Rectangle whose edges are convolved with Gaussian kernels."
+msgstr "两侧边沿分别与高斯核卷积的矩形。"
+
+#: ../../source/pulse.rst:74
+msgid "``RippleRect``"
+msgstr "``RippleRect``"
+
+#: ../../source/pulse.rst:75
+msgid "``(t0, tlen, amp, w, ripple0, ..., ripple3)``"
+msgstr "``(t0, tlen, amp, w, ripple0, ..., ripple3)``"
+
+#: ../../source/pulse.rst:76
+msgid "Gaussian-smoothed rectangle with four sinusoidal ripple terms."
+msgstr "经高斯平滑并叠加四个正弦纹波项的矩形。"
+
+#: ../../source/pulse.rst:77
+msgid "``PowerSineCosine``"
+msgstr "``PowerSineCosine``"
+
+#: ../../source/pulse.rst:78
+msgid "``(t0, tlen, amp, m, n, k, phase)``"
+msgstr "``(t0, tlen, amp, m, n, k, phase)``"
+
+#: ../../source/pulse.rst:79
+msgid "``sin(kπt/T + phase)^m · cos(kπt/T + phase)^n``."
+msgstr "``sin(kπt/T + phase)^m · cos(kπt/T + phase)^n``."
+
+#: ../../source/pulse.rst:80
+msgid "``GaussianXPower``"
+msgstr "``GaussianXPower``"
+
+#: ../../source/pulse.rst:81
+msgid "``(t0, w, amp, m)``"
+msgstr "``(t0, w, amp, m)``"
+
+#: ../../source/pulse.rst:82
+msgid "Gaussian multiplied by ``x^m``."
+msgstr "高斯函数乘以 ``x^m``。"
+
+#: ../../source/pulse.rst:83
+msgid "``Custom``"
+msgstr "``Custom``"
+
+#: ../../source/pulse.rst:84
+msgid "``(start, dt, data)``"
+msgstr "``(start, dt, data)``"
+
+#: ../../source/pulse.rst:85
+msgid ""
+"Arbitrary real or complex samples spaced by ``dt``, linearly interpolated"
+" onto the decoding grid."
+msgstr "以 ``dt`` 为间隔的任意实数或复数采样点，线性插值到解码网格上。"
+
+#: ../../source/pulse.rst:88
+msgid ""
+"``amp`` is stored as ``float32``.  Every envelope exposes ``start()``, "
+"``end()``, ``is_complex()`` and ``copy()``."
+msgstr ""
+"``amp`` 以 ``float32`` 存储。每个包络都提供 ``start()``、``end()``、``is_complex()`` 和"
+" ``copy()``。"
+
+#: ../../source/pulse.rst:92
+msgid "Composing envelopes"
+msgstr "组合包络"
+
+#: ../../source/pulse.rst:94
+msgid "Envelopes form expression trees:"
+msgstr "包络组成表达式树："
+
+#: ../../source/pulse.rst:96
+msgid ""
+"``a + b`` builds an ``EnvSum``; adding ``0`` returns the envelope itself,"
+" so the built-in :func:`sum` works.  ``s += env`` appends to an existing "
+"``EnvSum`` in place."
+msgstr ""
+"``a + b`` 构建一个 ``EnvSum``；加 ``0`` 返回包络本身，因此可以使用内置的 :func:`sum`。``s += "
+"env`` 原地追加到已有的 ``EnvSum``。"
+
+#: ../../source/pulse.rst:99
+msgid ""
+"``env * c`` scales by a real (``RealEnvProd``) or complex "
+"(``COMPLEXEnvProd``) constant stored in single precision."
+msgstr "``env * c`` 乘以以单精度存储的实数常数（``RealEnvProd``）或复数常数（``COMPLEXEnvProd``）。"
+
+#: ../../source/pulse.rst:101
+msgid ""
+"``env >> dt`` shifts in time (``EnvShift``).  Shifts and scales are "
+"pushed through sums, so ``(a + b) >> dt`` is ``(a >> dt) + (b >> dt)``."
+msgstr ""
+"``env >> dt`` 在时间上平移（``EnvShift``）。平移和缩放会下推到求和的各项，因此 ``(a + b) >> dt`` 等于"
+" ``(a >> dt) + (b >> dt)``。"
+
+#: ../../source/pulse.rst:103
+msgid ""
+"``mix(env, df, phase, dynamical)`` applies sideband mixing.  With "
+"``dynamical=True`` the carrier phase is zero at ``t = 0``; with "
+"``dynamical=False`` it is zero at the shifted start of each copy."
+msgstr ""
+"``mix(env, df, phase, dynamical)`` 进行边带混频。``dynamical=True`` 时载波相位在 ``t ="
+" 0`` 处为零；``dynamical=False`` 时在每个副本平移后的起点处为零。"
+
+#: ../../source/pulse.rst:106
+msgid ""
+"``align(env, dt, amp=None)`` places copies of ``env`` at the offsets "
+"``dt``, optionally scaled by real (``float32``) or complex "
+"(``complex64``) amplitudes.  It is much faster than summing shifted "
+"copies in Python."
+msgstr ""
+"``align(env, dt, amp=None)`` 将 ``env`` 的副本放置在偏移 ``dt`` "
+"处，并可选地乘以实数（``float32``）或复数（``complex64``）幅度。它比在 Python 中对平移后的副本求和快得多。"
+
+#: ../../source/pulse.rst:109
+msgid ""
+"``split(env, starts, ends)`` distributes the terms of a sum into blocks. "
+"Each term must lie completely inside a block; empty blocks get a zero-"
+"length ``Rect``."
+msgstr ""
+"``split(env, starts, ends)`` 将求和的各项分配到各个分块中。每一项必须完全位于某个分块内；空分块会得到一个长度为零的 "
+"``Rect``。"
+
+#: ../../source/pulse.rst:126
+msgid "Decoding"
+msgstr "解码"
+
+#: ../../source/pulse.rst:128
+msgid ""
+"``decode_envelope(env, wc)`` samples an envelope and returns "
+"``(start_time, wave)``, where ``wave`` is a ``float32`` array for real "
+"envelopes and ``complex64`` for complex ones.  Samples lie on the "
+"absolute grid ``n · resolution`` of the "
+":class:`~quspect.pulse.WaveCache`, and the array is a fresh buffer that "
+"may be modified in place."
+msgstr ""
+"``decode_envelope(env, wc)`` 对包络采样并返回 ``(start_time, wave)``，其中实数包络的 "
+"``wave`` 为 ``float32`` 数组，复数包络为 ``complex64`` 数组。采样点位于 "
+":class:`~quspect.pulse.WaveCache` 的绝对网格 ``n · resolution`` "
+"上，返回的数组是新分配的缓冲区，可以原地修改。"
+
+#: ../../source/pulse.rst:134
+msgid ""
+"``decode_envelope(env, wc, start, end)`` crops or zero-pads the result to"
+" the window ``[start, end)``.  The returned start time is ``start`` "
+"rounded to ``1e-5``, **not** snapped to the sample grid; the first sample"
+" is the grid point nearest to it.  A ``start`` after the envelope's last "
+"sample or an ``end`` before its first sample raises "
+":class:`RuntimeError`."
+msgstr ""
+"``decode_envelope(env, wc, start, end)`` 将结果裁剪或补零到窗口 ``[start, "
+"end)``。返回的起始时间是按 ``1e-5`` 取整后的 ``start``，\\ **而不是**\\ "
+"对齐到采样网格；第一个采样点是离它最近的网格点。若 ``start`` 晚于包络的最后一个采样点，或 ``end`` 早于第一个采样点，会抛出 "
+":class:`RuntimeError`。"
+
+#: ../../source/pulse.rst:140
+msgid ""
+"A :class:`~quspect.pulse.WaveCache` stores the base waveform of each "
+"envelope shape per sub-grid offset, so decoding many copies of the same "
+"pulse computes the shape only once.  Reuse one cache across decodes with "
+"the same resolution."
+msgstr ""
+":class:`~quspect.pulse.WaveCache` "
+"按网格内偏移存储每种包络形状的基础波形，因此解码同一脉冲的多个副本时形状只计算一次。分辨率相同的多次解码请复用同一个缓存。"
+
+#: ../../source/pulse.rst:146
+msgid "Serialization"
+msgstr "序列化"
+
+#: ../../source/pulse.rst:148
+msgid ""
+"``serialization(env)`` returns a compact binary encoding of the "
+"expression tree and ``deserialization(data)`` restores it; shared sub-"
+"trees are stored once.  The format is byte-compatible with envelopes-qc "
+"0.1.5.  All envelope classes support :mod:`pickle` through the same "
+"encoding."
+msgstr ""
+"``serialization(env)`` 返回表达式树的紧凑二进制编码，``deserialization(data)`` "
+"将其还原；共享的子树只存储一次。该格式与 envelopes-qc 0.1.5 字节兼容。所有包络类都通过同一编码支持 "
+":mod:`pickle`。"
+
+#: ../../source/pulse.rst:154
+msgid "Differences from envelopes-qc"
+msgstr "与 envelopes-qc 的差异"
+
+#: ../../source/pulse.rst:156
+msgid ""
+"Import from :mod:`quspect.pulse` instead of ``envelopes.evc``.  The class"
+" names and call signatures are unchanged."
+msgstr "从 :mod:`quspect.pulse` 导入，而不是 ``envelopes.evc``。类名和调用签名保持不变。"
+
+#: ../../source/pulse.rst:158
+msgid ""
+"The pure-Python reference implementation ``envelopes.evp`` is not "
+"included."
+msgstr "不包含纯 Python 参考实现 ``envelopes.evp``。"
+
+#: ../../source/pulse.rst:160
+msgid ""
+"Inputs that crash or hang envelopes-qc 0.1.5 raise Python exceptions "
+"instead, or work as expected:"
+msgstr "会让 envelopes-qc 0.1.5 崩溃或卡死的输入，在这里会抛出 Python 异常，或按预期工作："
+
+#: ../../source/pulse.rst:163
+msgid ""
+"``start()``, ``end()`` or decoding of an empty ``EnvSum`` (for example "
+"``align(env, [])``) raises :class:`RuntimeError`;"
+msgstr ""
+"对空 ``EnvSum``（例如 ``align(env, [])``）调用 ``start()``、``end()`` 或解码会抛出 "
+":class:`RuntimeError`；"
+
+#: ../../source/pulse.rst:165
+msgid ""
+"``mix()`` and ``copy()`` of a real-scaled complex envelope, such as "
+"``mix(GaussianDRAG(...) * 2, ...)``, return the expected result;"
+msgstr ""
+"对乘以实数常数的复数包络调用 ``mix()`` 和 ``copy()``，例如 ``mix(GaussianDRAG(...) * 2, "
+"...)``，会返回预期结果；"
+
+#: ../../source/pulse.rst:167
+msgid "``s += s`` on an ``EnvSum`` appends its own terms;"
+msgstr "对 ``EnvSum`` 执行 ``s += s`` 会追加它自身的各项；"
+
+#: ../../source/pulse.rst:168
+msgid "passing ``None`` as an envelope raises :class:`TypeError`;"
+msgstr "将 ``None`` 作为包络传入会抛出 :class:`TypeError`；"
+
+#: ../../source/pulse.rst:169
+msgid "truncated or corrupted serialized data raises :class:`RuntimeError`."
+msgstr "截断或损坏的序列化数据会抛出 :class:`RuntimeError`。"
+
+#: ../../source/pulse.rst:171
+msgid ""
+"Compatibility is checked by ``tools/pulse_compat``, which runs the same "
+"cases against envelopes-qc and :mod:`quspect.pulse` and compares the "
+"results byte for byte, and by golden values in ``tests/pulse``."
+msgstr ""
+"兼容性由 ``tools/pulse_compat`` 检查：它对 envelopes-qc 和 :mod:`quspect.pulse` "
+"运行同一批用例并逐字节比较结果；``tests/pulse`` 中的黄金值也会参与校验。"
+
+#: ../../source/pulse.rst:175
+msgid ""
+"Output is bit-identical to envelopes-qc on macOS arm64.  On other "
+"platforms everything is identical as well, except the samples of "
+"envelopes built on the real error function "
+"(:class:`~quspect.pulse.Flattop` and :class:`~quspect.pulse.RippleRect`):"
+" ``erf`` comes from the platform C library, whose last bit differs "
+"between implementations, so these samples may differ from envelopes-qc on"
+" macOS by about one ``float32`` ulp.  Their serialization bytes are "
+"identical on every platform."
+msgstr ""
+"在 macOS arm64 上，输出与 envelopes-qc 逐位一致。在其他平台上同样一致，"
+"唯一的例外是基于实数误差函数构造的包络（:class:`~quspect.pulse.Flattop` "
+"和 :class:`~quspect.pulse.RippleRect`）的采样值：``erf`` 来自平台 C 库，"
+"不同实现在最后一位上存在差异，因此这些采样值与 macOS 上 envelopes-qc "
+"的结果可能相差约一个 ``float32`` ulp。它们的序列化字节在所有平台上都相同。"
+
+#: ../../source/pulse.rst:184
+msgid "Using quspect.pulse in place of envelopes-qc"
+msgstr "用 quspect.pulse 替代 envelopes-qc"
+
+#: ../../source/pulse.rst:186
+msgid ""
+"Code written against envelopes-qc imports ``from envelopes import evc``."
+"  The pulse-sequence layer of the ``lqcloud`` SDK is an example. "
+":func:`quspect.pulse.use_as_envelopes` temporarily registers a stand-in "
+"``envelopes`` package whose ``evc`` is :mod:`quspect.pulse`'s native "
+"module, so such code runs on this implementation without envelopes-qc "
+"installed:"
+msgstr ""
+"基于 envelopes-qc 编写的代码会执行 ``from envelopes import evc``\\ ，``lqcloud`` SDK"
+" 的脉冲序列层就是一个例子。:func:`quspect.pulse.use_as_envelopes` 会临时注册一个替身 "
+"``envelopes`` 包，其 ``evc`` 指向 :mod:`quspect.pulse` 的原生模块，因此这类代码无需安装 "
+"envelopes-qc 即可运行在本实现上："
+
+#: ../../source/pulse.rst:203
+msgid ""
+"For a whole application, call :func:`quspect.pulse.install_as_envelopes` "
+"once at start-up instead.  In tests, wrap the context manager in a "
+"fixture; ``tests/pulse/conftest.py`` provides ``envelopes_shim``."
+msgstr ""
+"若要让整个应用都使用本实现，请改为在启动时调用一次 :func:`quspect.pulse.install_as_envelopes`\\ "
+"。在测试中，可以把上下文管理器包装成 fixture；``tests/pulse/conftest.py`` 提供了 "
+"``envelopes_shim``\\ 。"
+
+#: ../../source/pulse.rst:207
+msgid ""
+"This is safe because decoded waveforms and serialization bytes are bit-"
+"identical to envelopes-qc 0.1.5.  Envelopes built here and serialized by "
+"``lqcloud`` are read correctly by services that deserialize them with "
+"envelopes-qc."
+msgstr ""
+"这样做是安全的：解码出的波形和序列化字节都与 envelopes-qc 0.1.5 逐位一致。在这里构建、由 ``lqcloud`` "
+"序列化的包络，可以被使用 envelopes-qc 反序列化的服务正确读取。"
+
+#: ../../source/pulse.rst:212
+msgid "Keep in mind:"
+msgstr "注意事项："
+
+#: ../../source/pulse.rst:214
+msgid ""
+"The stand-in must be active **before** the consumer imports its envelope "
+"modules, because they bind ``evc`` at import time.  Cached modules named "
+"in ``purge`` (``lqcloud`` by default) are dropped on entry so they are "
+"re-imported against the stand-in.  When the block exits, everything in "
+":data:`sys.modules` is restored."
+msgstr ""
+"替身必须在使用方导入其包络模块\\ **之前**\\ 生效，因为这些模块会在导入时绑定 ``evc``\\ 。进入时会清除 ``purge`` "
+"中列出的已缓存模块（默认为 ``lqcloud``\\ ），使它们针对替身重新导入。退出代码块时，:data:`sys.modules` "
+"中的所有相关条目都会恢复原状。"
+
+#: ../../source/pulse.rst:219
+msgid ""
+"Objects from the two implementations are different C++ types and cannot "
+"be mixed.  Pass only :mod:`quspect.pulse` envelopes to code imported "
+"under the stand-in."
+msgstr "两种实现的对象属于不同的 C++ 类型，不能混用。对在替身下导入的代码，只能传入 :mod:`quspect.pulse` 的包络。"
+
+#: ../../source/pulse.rst:222
+msgid "``envelopes.evp`` (the pure-Python implementation) is not provided."
+msgstr "不提供 ``envelopes.evp``\\ （纯 Python 实现）。"
+
+#: ../../source/pulse.rst:223
+msgid ""
+"``lqcloud`` declares envelopes-qc as a dependency, and envelopes-qc has "
+"no linux/aarch64 wheel.  On that platform install it with ``pip install "
+"--no-deps lqcloud`` plus its other dependencies."
+msgstr ""
+"``lqcloud`` 把 envelopes-qc 声明为依赖，而 envelopes-qc 没有 linux/aarch64 的 "
+"wheel。在该平台上请使用 ``pip install --no-deps lqcloud`` 安装，并另行安装其他依赖。"
+

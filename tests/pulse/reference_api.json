@@ -1,0 +1,253 @@
+{
+ "__doc__": "Envelops impelemented in C++.",
+ "AbstractEnvelope": {
+  "__mro__": [
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "start": "start(self: quspect._pulse.AbstractEnvelope) -> float\n",
+  "end": "end(self: quspect._pulse.AbstractEnvelope) -> float\n",
+  "is_complex": "is_complex(self: quspect._pulse.AbstractEnvelope) -> bool\n",
+  "copy": "copy(self: quspect._pulse.AbstractEnvelope) -> quspect._pulse.AbstractEnvelope\n",
+  "__copy__": "__copy__(self: quspect._pulse.AbstractEnvelope) -> quspect._pulse.AbstractEnvelope\n",
+  "__add__": "__add__(*args, **kwargs)\nOverloaded function.\n\n1. __add__(self: quspect._pulse.AbstractEnvelope, arg0: typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n\n2. __add__(self: quspect._pulse.AbstractEnvelope, arg0: quspect._pulse.AbstractEnvelope) -> quspect._pulse.AbstractEnvelope\n",
+  "__radd__": "__radd__(*args, **kwargs)\nOverloaded function.\n\n1. __radd__(self: quspect._pulse.AbstractEnvelope, arg0: typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n\n2. __radd__(self: quspect._pulse.AbstractEnvelope, arg0: quspect._pulse.AbstractEnvelope) -> quspect._pulse.AbstractEnvelope\n",
+  "__iadd__": "__iadd__(self: quspect._pulse.AbstractEnvelope, arg0: quspect._pulse.AbstractEnvelope) -> quspect._pulse.AbstractEnvelope\n",
+  "__mul__": "__mul__(*args, **kwargs)\nOverloaded function.\n\n1. __mul__(self: quspect._pulse.AbstractEnvelope, arg0: typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n\n2. __mul__(self: quspect._pulse.AbstractEnvelope, arg0: complex | typing.SupportsComplex | typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n",
+  "__rmul__": "__rmul__(*args, **kwargs)\nOverloaded function.\n\n1. __rmul__(self: quspect._pulse.AbstractEnvelope, arg0: typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n\n2. __rmul__(self: quspect._pulse.AbstractEnvelope, arg0: complex | typing.SupportsComplex | typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n",
+  "__rshift__": "__rshift__(self: quspect._pulse.AbstractEnvelope, arg0: typing.SupportsFloat | typing.SupportsIndex) -> quspect._pulse.AbstractEnvelope\n",
+  "__repr__": "__repr__(self: quspect._pulse.AbstractEnvelope) -> str\n"
+ },
+ "COMPLEXEnvProd": {
+  "__mro__": [
+   "COMPLEXEnvProd",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.COMPLEXEnvProd, arg0: bytes) -> None\n"
+ },
+ "CosineDRAG": {
+  "__mro__": [
+   "CosineDRAG",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Cosine envelope shaped with DRAG.",
+  "__init__": "__init__(self: quspect._pulse.CosineDRAG, t0: typing.SupportsFloat | typing.SupportsIndex, w: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, coef: typing.SupportsFloat | typing.SupportsIndex, df: typing.SupportsFloat | typing.SupportsIndex, phase: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the center of Cosine, w is the width of Cosine, and amp is the amplitude.\nMathmatical formula: [Cosine(t0, w, amp) + i * coef * CosineDeriv(t0, w, amp)] * exp(i * (-2* pi * df * t + phase))\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.CosineDRAG, arg0: bytes) -> None\n"
+ },
+ "Custom": {
+  "__mro__": [
+   "Custom",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Custom envelope from arbitrary waveform data.",
+  "__init__": "__init__(self: quspect._pulse.Custom, start: typing.SupportsFloat | typing.SupportsIndex, dt: typing.SupportsFloat | typing.SupportsIndex, data: numpy.ndarray) -> None\n\nCustom envelope from arbitrary waveform.\nParameters:\nstart is the start time, dt is the sample interval of the input data, and data is a 1-D numeric array (float32/float64/complex64/complex128 and other integer or boolean dtypes are accepted via promotion).\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.Custom, arg0: bytes) -> None\n"
+ },
+ "EnvMix": {
+  "__mro__": [
+   "EnvMix",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.EnvMix, arg0: bytes) -> None\n"
+ },
+ "EnvShift": {
+  "__mro__": [
+   "EnvShift",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.EnvShift, arg0: bytes) -> None\n"
+ },
+ "EnvSum": {
+  "__mro__": [
+   "EnvSum",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.EnvSum, arg0: bytes) -> None\n"
+ },
+ "Envelope": {
+  "__mro__": [
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature."
+ },
+ "Flattop": {
+  "__mro__": [
+   "Flattop",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Rectangular envelope convolved with Gaussian kernel.",
+  "__init__": "__init__(self: quspect._pulse.Flattop, t0: typing.SupportsFloat | typing.SupportsIndex, tlen: typing.SupportsFloat | typing.SupportsIndex, w_left: typing.SupportsFloat | typing.SupportsIndex, w_right: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the start of Rect, tlen is the duriation, and amp is the amplitude.\nw_left(w_right) is the width of Gaussian kernel to convolve the left(right) edge of Rect.\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.Flattop, arg0: bytes) -> None\n"
+ },
+ "Gaussian": {
+  "__mro__": [
+   "Gaussian",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Gaussian envelope.",
+  "__init__": "__init__(self: quspect._pulse.Gaussian, t0: typing.SupportsFloat | typing.SupportsIndex, w: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the center of Gaussian, w is the width at half maximum, and amp is the amplitude.\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.Gaussian, arg0: bytes) -> None\n"
+ },
+ "GaussianDRAG": {
+  "__mro__": [
+   "GaussianDRAG",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Gaussian envelope shaped with DRAG.",
+  "__init__": "__init__(self: quspect._pulse.GaussianDRAG, t0: typing.SupportsFloat | typing.SupportsIndex, w: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, coef: typing.SupportsFloat | typing.SupportsIndex, df: typing.SupportsFloat | typing.SupportsIndex, phase: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the center of Gaussian, w is the width at half maximum, and amp is the amplitude.\nMathmatical formula: [Gaussin(t0, w, amp) + i * coef * GaussinDeriv(t0, w, amp)] * exp(i * (-2* pi * df * t + phase))\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.GaussianDRAG, arg0: bytes) -> None\n"
+ },
+ "GaussianXPower": {
+  "__mro__": [
+   "GaussianXPower",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Gaussian envelope multiplied by x^m.",
+  "__init__": "__init__(self: quspect._pulse.GaussianXPower, t0: typing.SupportsFloat | typing.SupportsIndex, w: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, m: typing.SupportsInt | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the center, w is the width at half maximum, amp is the amplitude.\nMathmatical formula: Gaussian(t0, w) * x^m\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.GaussianXPower, arg0: bytes) -> None\n"
+ },
+ "MixExp": {
+  "__mro__": [
+   "MixExp",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.MixExp, arg0: bytes) -> None\n"
+ },
+ "PowerSineCosine": {
+  "__mro__": [
+   "PowerSineCosine",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Envelope with sin and cos power functions.",
+  "__init__": "__init__(self: quspect._pulse.PowerSineCosine, t0: typing.SupportsFloat | typing.SupportsIndex, tlen: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, m: typing.SupportsInt | typing.SupportsIndex, n: typing.SupportsInt | typing.SupportsIndex, k: typing.SupportsFloat | typing.SupportsIndex, phase: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the start, tlen is the duration, amp is the amplitude.\nMathmatical formula: (sin(k*pi*t/T+phase)^m)*(cos(k*pi*t/T+phase)^n)\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.PowerSineCosine, arg0: bytes) -> None\n"
+ },
+ "RealEnvProd": {
+  "__mro__": [
+   "RealEnvProd",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": null,
+  "__init__": "Initialize self.  See help(type(self)) for accurate signature.",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.RealEnvProd, arg0: bytes) -> None\n"
+ },
+ "Rect": {
+  "__mro__": [
+   "Rect",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Rectangle envelope.",
+  "__init__": "__init__(self: quspect._pulse.Rect, t0: typing.SupportsFloat | typing.SupportsIndex, tlen: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the start of Rectangle, tlen is the duriation, and amp is the amplitude.\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.Rect, arg0: bytes) -> None\n"
+ },
+ "RippleRect": {
+  "__mro__": [
+   "RippleRect",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Rectangular envelope with ripples convolved with Gaussian kernel.",
+  "__init__": "__init__(self: quspect._pulse.RippleRect, t0: typing.SupportsFloat | typing.SupportsIndex, tlen: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, w: typing.SupportsFloat | typing.SupportsIndex, ripple0: typing.SupportsFloat | typing.SupportsIndex, ripple1: typing.SupportsFloat | typing.SupportsIndex, ripple2: typing.SupportsFloat | typing.SupportsIndex, ripple3: typing.SupportsFloat | typing.SupportsIndex) -> None\n\nParameters:\nt0 is the start of Rect, tlen is the duriation, and amp is the amplitude.\nripple0, ripple1, ripple2, ripple3 describe the ripples of the Rect.\nw is the width of Gaussian kernel to convolve the Rect.\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.RippleRect, arg0: bytes) -> None\n"
+ },
+ "Triangle": {
+  "__mro__": [
+   "Triangle",
+   "Envelope",
+   "AbstractEnvelope",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Triangle envelope.",
+  "__init__": "__init__(self: quspect._pulse.Triangle, t0: typing.SupportsFloat | typing.SupportsIndex, tlen: typing.SupportsFloat | typing.SupportsIndex, amp: typing.SupportsFloat | typing.SupportsIndex, fall: bool) -> None\n\nParameters:\nt0 is the start of Triangle, tlen is the duriation, amp is the amplitude and fall indicates whether the Triangle is falling or rising.\n",
+  "__getstate__": "__getstate__(self: quspect._pulse.AbstractEnvelope, /) -> bytes\n",
+  "__setstate__": "__setstate__(self: quspect._pulse.Triangle, arg0: bytes) -> None\n"
+ },
+ "WaveCache": {
+  "__mro__": [
+   "WaveCache",
+   "pybind11_object",
+   "object"
+  ],
+  "doc": "Cache for waveforms. The same envelope might yield both real and complex wave data which will be cached separately.",
+  "__init__": "__init__(self: quspect._pulse.WaveCache, resolution: typing.SupportsFloat | typing.SupportsIndex) -> None\n",
+  "resolution": "resolution(self: quspect._pulse.WaveCache) -> float\n\nGet the resolution of the cache.\n",
+  "__repr__": "__repr__(self: quspect._pulse.WaveCache) -> str\n"
+ },
+ "align": "align(*args, **kwargs)\nOverloaded function.\n\n1. align(env: quspect._pulse.AbstractEnvelope, dt: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> quspect._pulse.AbstractEnvelope\n\nFAST aligning the envelope to the given time shifts.\n\n2. align(env: quspect._pulse.AbstractEnvelope, dt: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], amp: typing.Annotated[numpy.typing.ArrayLike, numpy.float32]) -> quspect._pulse.AbstractEnvelope\n\nFAST aligning the envelope to the given time shifts and real amplitudes.\n\n3. align(env: quspect._pulse.AbstractEnvelope, dt: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], amp: typing.Annotated[numpy.typing.ArrayLike, numpy.complex64]) -> quspect._pulse.AbstractEnvelope\n\nFAST aligning the envelope to the given time shifts and complex amplitudes.\n",
+ "decode_envelope": "decode_envelope(*args, **kwargs)\nOverloaded function.\n\n1. decode_envelope(env: quspect._pulse.AbstractEnvelope, wc: quspect._pulse.WaveCache) -> tuple[float, numpy.ndarray]\n\nDecodes the envelope and returns (start_time, wave) where wave is a numpy array (zero-copy view of the internal buffer).\nStart and end are extracted from env.start() and env.end().\n\n2. decode_envelope(env: quspect._pulse.AbstractEnvelope, wc: quspect._pulse.WaveCache, start: typing.SupportsFloat | typing.SupportsIndex, end: typing.SupportsFloat | typing.SupportsIndex) -> tuple[float, numpy.ndarray]\n\nDecodes the envelope and returns (start_time, wave) where wave is a numpy array (zero-copy view of the internal buffer).\n",
+ "deserialization": "deserialization(serialized: bytes) -> quspect._pulse.AbstractEnvelope\n\nSerializes the envelope to support pickle.loads.\n",
+ "mix": "mix(env: quspect._pulse.AbstractEnvelope, df: typing.SupportsFloat | typing.SupportsIndex, phase: typing.SupportsFloat | typing.SupportsIndex, dynamical: bool) -> quspect._pulse.AbstractEnvelope\n\nFAST mixing the envelope by the given df and phase.\ndynamical=True means phase keeps 0 at t=0 (i.e. env * exp(i * (-2* pi * df * t + phase)).\ndynamical=False means phase keeps 0 at t=dt(env>>dt) (i.e. env * exp(i * (-2* pi * df * (t - dt) + phase)).\n",
+ "serialization": "serialization(env: quspect._pulse.AbstractEnvelope) -> bytes\n\nSerializes the envelope to support pickle.dumps.\n",
+ "split": "split(env: quspect._pulse.AbstractEnvelope, starts: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], ends: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> list[quspect._pulse.AbstractEnvelope]\n\nSplit env according to starts and ends.\nThe provided starts and ends must be pre-sorted and have the same length.\n"
+}

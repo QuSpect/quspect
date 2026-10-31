@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Max-Cut"
+  short_description: "Model and solve weighted graph cuts with QuSpect."
+  default_prompt: "Use $quspect-max-cut to model, solve, decode, and validate a weighted Max-Cut problem with QuSpect."

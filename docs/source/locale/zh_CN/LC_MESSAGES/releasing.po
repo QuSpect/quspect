@@ -1,0 +1,298 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-28 21:20-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/releasing.rst:2
+msgid "Releasing"
+msgstr "发布流程"
+
+#: ../../source/releasing.rst:4
+msgid ""
+"This page is for maintainers.  Releases are fully automated by GitHub "
+"Actions: pushing a version tag builds, tests and publishes the wheels and"
+" the source distribution to PyPI."
+msgstr "本页面向维护者。发布完全由 GitHub Actions 自动完成：推送版本 tag 后会自动构建、测试 wheel 和源码包，并发布到 PyPI。"
+
+#: ../../source/releasing.rst:9
+msgid "How the release pipeline works"
+msgstr "发布流水线的工作方式"
+
+#: ../../source/releasing.rst:11
+msgid ""
+"``.github/workflows/wheels.yml`` builds wheels with cibuildwheel for "
+"CPython 3.10 -- 3.15 on Linux x86_64 and Linux aarch64 "
+"(``manylinux_2_28``), Windows AMD64 and macOS arm64 (deployment target "
+"14.0), plus the sdist. Every wheel is installed into a clean environment "
+"and tested with ``tools/wheel_smoke.py`` and the ``tests/native`` / "
+"``tests/optimization`` suites, with and without "
+"``QUSPECT_DISABLE_AVX2=1``.  Every (platform, Python version) pair is "
+"built in its own parallel job; the version list is read from the "
+"``build`` key of ``[tool.cibuildwheel]`` in ``pyproject.toml``.  A "
+"separate job runs the newest Python's Linux x86_64 wheel under the Intel "
+"Software Development Emulator on an emulated CPU without AVX to prove the"
+" AVX2 module is never loaded there."
+msgstr ""
+"``.github/workflows/wheels.yml`` 使用 cibuildwheel 为 Linux x86_64 和 Linux "
+"aarch64（``manylinux_2_28``）、Windows AMD64 和 macOS arm64（部署目标 14.0）构建 "
+"CPython 3.10 -- 3.15 的 wheel，并构建 sdist。每个 wheel 都会安装到干净的环境中，分别在设置与不设置 "
+"``QUSPECT_DISABLE_AVX2=1`` 的情况下运行 ``tools/wheel_smoke.py`` 以及 "
+"``tests/native`` / ``tests/optimization`` 测试。每个（平台, Python 版本）组合都在各自独立的并行"
+" job 中构建；版本列表读取自 ``pyproject.toml`` 中 ``[tool.cibuildwheel]`` 的 ``build``"
+" 键。另有一个 job 在 Intel Software Development Emulator 模拟的无 AVX CPU 上运行最新 "
+"Python 的 Linux x86_64 wheel，证明这种 CPU 上永远不会加载 AVX2 模块。"
+
+#: ../../source/releasing.rst:22
+msgid ""
+"Linux aarch64 wheels are built natively on GitHub's ``ubuntu-24.04-arm`` "
+"runners, not under QEMU emulation: the workflow sets ``CIBW_ARCHS_LINUX``"
+" from the runner architecture, so each Linux runner builds only its own "
+"architecture.  The workflow fails if a Linux wheel's platform tags do not"
+" include ``manylinux_2_28_<arch>`` or contain any tag for another "
+"architecture or a newer glibc (auditwheel may add an older-glibc alias "
+"such as ``manylinux_2_27_x86_64``, which is accepted), if the extension "
+"modules are not built for that architecture, if ``_core_scalar`` is "
+"missing, if ``_core_avx2`` is missing on x86_64 or present on aarch64, or"
+" if libgomp is not bundled in ``quspect.libs/``."
+msgstr ""
+"Linux aarch64 wheel 在 GitHub 原生的 ``ubuntu-24.04-arm`` runner 上直接构建，而不是在 QEMU "
+"模拟下构建：工作流根据 runner 架构设置 ``CIBW_ARCHS_LINUX``，因此每个 Linux runner "
+"只构建本机架构。若 Linux wheel 的平台标签不包含 ``manylinux_2_28_<arch>``，或含有其他架构、更新 "
+"glibc 的标签（auditwheel 可能附加更旧 glibc 的别名，例如 ``manylinux_2_27_x86_64``，这是允许的），"
+"或扩展模块不是为该架构构建的，或缺少 ``_core_scalar``，或 ``_core_avx2`` 在 x86_64 上缺失、在 "
+"aarch64 上存在，或 libgomp 没有打包进 ``quspect.libs/``，工作流即失败。"
+
+#: ../../source/releasing.rst:32
+msgid ""
+"macOS wheels are built on ``macos-15`` runners but still target macOS 14."
+" ``tools/build_libomp_macos.sh`` builds libomp from pinned LLVM sources "
+"with deployment target 14.0 (a Homebrew bottle requires the runner's "
+"macOS version, and delocate would raise the wheel tag to "
+"``macosx_15_0``), and the workflow fails if any macOS wheel's platform "
+"tag is not ``macosx_14_0_arm64`` or a bundled binary requires a newer "
+"macOS."
+msgstr ""
+"macOS wheel 在 ``macos-15`` runner 上构建，但最低系统版本仍为 macOS "
+"14。``tools/build_libomp_macos.sh`` 从固定版本的 LLVM 源码以部署目标 14.0 构建 "
+"libomp（Homebrew 的 bottle 要求与 runner 相同的 macOS 版本，delocate 会因此把 wheel "
+"标签提升为 ``macosx_15_0``）；若任何 macOS wheel 的平台标签不是 ``macosx_14_0_arm64``，或打包进"
+" wheel 的二进制要求更新的 macOS，工作流即失败。"
+
+#: ../../source/releasing.rst:38
+msgid ""
+"On every pull request to ``main`` the workflow builds only the oldest and"
+" newest supported Python (3.10 and 3.15) on all four platforms (8 "
+"wheels). Releases and manual runs (*Run workflow* in the Actions tab, "
+"with the ``full`` input left checked) build all 24 wheels: 6 Python "
+"versions x 4 platforms."
+msgstr ""
+"每个指向 ``main`` 的 pull request 只在全部四个平台上构建最旧和最新的受支持 Python（3.10 和 3.15），共 8"
+" 个 wheel。发布以及手动运行（在 Actions 标签页中点击 *Run workflow*，保持 ``full`` "
+"输入为勾选状态）会构建全部 24 个 wheel：6 个 Python 版本 x 4 个平台。"
+
+#: ../../source/releasing.rst:43
+msgid ""
+"``.github/workflows/release.yml`` runs on tags matching ``v*``.  It calls"
+" ``wheels.yml`` with ``full: true``, checks that exactly 24 wheels and "
+"one sdist were built and that the tag version matches the version of "
+"every built artifact, publishes to PyPI with Trusted Publishing, and "
+"creates a GitHub Release with the artifacts attached."
+msgstr ""
+"``.github/workflows/release.yml`` 在匹配 ``v*`` 的 tag 上运行。它以 ``full: true`` "
+"调用 ``wheels.yml``，检查恰好构建出 24 个 wheel 和 1 个 sdist，且 tag 版本与每个构建产物的版本一致，通过 "
+"Trusted Publishing 发布到 PyPI，并创建附带全部产物的 GitHub Release。"
+
+#: ../../source/releasing.rst:49
+msgid ""
+"The package version is derived from the git tag by setuptools-scm; there "
+"is no version number to edit in the source tree."
+msgstr "包版本号由 setuptools-scm 从 git tag 推导，源码树中没有需要手动修改的版本号。"
+
+#: ../../source/releasing.rst:53
+msgid "One-time setup"
+msgstr "一次性配置"
+
+#: ../../source/releasing.rst:55
+msgid ""
+"On PyPI, add a *Trusted Publisher* for the project ``quspect`` (for the "
+"first release, use \"Add a new pending publisher\" under your account's "
+"publishing settings):"
+msgstr ""
+"在 PyPI 上为项目 ``quspect`` 添加 *Trusted Publisher* （首次发布时，请在账号的 publishing "
+"设置中使用 \"Add a new pending publisher\"）："
+
+#: ../../source/releasing.rst:59
+msgid "Owner: ``QuSpect``"
+msgstr "Owner：``QuSpect``"
+
+#: ../../source/releasing.rst:60
+msgid "Repository name: ``quspect``"
+msgstr "Repository name：``quspect``"
+
+#: ../../source/releasing.rst:61
+msgid "Workflow name: ``release.yml``"
+msgstr "Workflow name：``release.yml``"
+
+#: ../../source/releasing.rst:62
+msgid "Environment name: ``pypi``"
+msgstr "Environment name：``pypi``"
+
+#: ../../source/releasing.rst:64
+msgid ""
+"In the GitHub repository settings, create an environment named ``pypi``. "
+"Optionally restrict it to tags matching ``v*`` and add required "
+"reviewers."
+msgstr ""
+"在 GitHub 仓库设置中创建名为 ``pypi`` 的 environment。可选：将其限制为匹配 ``v*`` 的 "
+"tag，并添加必需的审核人。"
+
+#: ../../source/releasing.rst:67
+msgid "No API token or repository secret is needed."
+msgstr "不需要任何 API token 或仓库 secret。"
+
+#: ../../source/releasing.rst:70
+msgid "Cutting a release"
+msgstr "执行发布"
+
+#: ../../source/releasing.rst:72
+msgid "Make sure ``main`` is green and contains everything for the release."
+msgstr "确认 ``main`` 的 CI 全部通过，且已包含本次发布的全部内容。"
+
+#: ../../source/releasing.rst:73
+msgid "Tag the commit and push the tag:"
+msgstr "给该提交打 tag 并推送："
+
+#: ../../source/releasing.rst:82
+msgid ""
+"Watch the *Release* workflow in the Actions tab.  When it finishes, the "
+"new version is on https://pypi.org/project/quspect/ and a GitHub Release "
+"named after the tag exists."
+msgstr ""
+"在 Actions 页面关注 *Release* 工作流。完成后，新版本会出现在 "
+"https://pypi.org/project/quspect/ 上，并生成以该 tag 命名的 GitHub Release。"
+
+#: ../../source/releasing.rst:86
+msgid ""
+"Tags must follow PEP 440 after the leading ``v`` (for example ``v0.2.0`` "
+"or ``v0.2.0rc1``); pre-release tags create a GitHub pre-release.  A PyPI "
+"version can never be re-uploaded, so if a release fails after publishing,"
+" fix the problem and release a new version."
+msgstr ""
+"tag 去掉开头的 ``v`` 后必须符合 PEP 440（例如 ``v0.2.0`` 或 ``v0.2.0rc1``）；预发布 tag 会创建 "
+"GitHub pre-release。PyPI 上的同一版本永远不能重新上传，因此如果发布到 PyPI 之后流程失败，请修复问题并发布一个新版本。"
+
+#: ../../source/releasing.rst:92
+msgid "Publishing the documentation"
+msgstr "文档发布"
+
+#: ../../source/releasing.rst:94
+msgid ""
+"The documentation is hosted on Read the Docs at "
+"https://quspect.readthedocs.io/en/latest/ (Chinese: "
+"https://quspect.readthedocs.io/zh-cn/latest/)."
+msgstr ""
+"文档托管于 Read the "
+"Docs：https://quspect.readthedocs.io/en/latest/（中文：https://quspect.readthedocs.io"
+"/zh-cn/latest/）。"
+
+#: ../../source/releasing.rst:98
+msgid ""
+"Read the Docs rebuilds the ``latest`` version on every push to ``main`` "
+"and, once tag versions are activated in the project's *Versions* "
+"settings, a versioned copy for every ``v*`` tag (``stable`` follows the "
+"newest release tag).  Nothing in the release workflow needs to trigger "
+"it."
+msgstr ""
+"每次推送到 ``main``，Read the Docs 都会重新构建 ``latest`` 版本；在项目的 *Versions* 设置中启用 "
+"tag 版本后，还会为每个 ``v*`` tag 构建一份带版本号的文档（``stable`` 指向最新的发布 "
+"tag）。发布工作流无需额外触发文档构建。"
+
+#: ../../source/releasing.rst:102
+msgid ""
+"The build is configured by ``.readthedocs.yaml`` in the repository root."
+"  It installs only ``docs/requirements.txt`` (Sphinx, the theme, NumPy "
+"and SciPy) and does **not** compile the C++ extension: "
+"``docs/source/conf.py`` puts the repository root on ``sys.path`` and "
+"every autodoc'd module imports without the native engine.  Add new "
+"documentation dependencies to ``docs/requirements.txt``."
+msgstr ""
+"构建由仓库根目录下的 ``.readthedocs.yaml`` 配置。它只安装 "
+"``docs/requirements.txt``（Sphinx、主题、NumPy 和 SciPy），**不会**编译 C++ "
+"扩展：``docs/source/conf.py`` 将仓库根目录加入 ``sys.path``，所有 autodoc "
+"模块无需原生引擎即可导入。新增的文档依赖请添加到 ``docs/requirements.txt``。"
+
+#: ../../source/releasing.rst:108
+msgid ""
+"The documented version is derived from ``git describe`` in the same way "
+"as setuptools-scm, so a tag build shows ``X.Y.Z`` and ``main`` shows the "
+"next development version."
+msgstr ""
+"文档中的版本号与 setuptools-scm 一样由 ``git describe`` 推导：tag 构建显示 "
+"``X.Y.Z``，``main`` 显示下一个开发版本号。"
+
+#: ../../source/releasing.rst:111
+msgid ""
+"The Chinese documentation is a second Read the Docs project with language"
+" ``zh_CN``, linked to the main project under *Admin -> Translations*.  It"
+" uses the same configuration file; Read the Docs passes ``-D "
+"language=zh_CN`` and Sphinx compiles ``docs/source/locale`` PO files on "
+"the fly, so no ``.mo`` files are committed."
+msgstr ""
+"中文文档是 Read the Docs 上另一个语言为 ``zh_CN`` 的项目，在主项目的 *Admin -> Translations* "
+"中关联为其翻译。它使用同一个配置文件；Read the Docs 会传入 ``-D language=zh_CN``，Sphinx "
+"在构建时自动编译 ``docs/source/locale`` 中的 PO 文件，因此仓库中不提交 ``.mo`` 文件。"
+
+#: ../../source/releasing.rst:117
+msgid "One-time setup on readthedocs.org:"
+msgstr "在 readthedocs.org 上的一次性配置："
+
+#: ../../source/releasing.rst:119
+msgid ""
+"Import ``QuSpect/quspect`` (grant Read the Docs access to the ``QuSpect``"
+" GitHub organization if it is not listed).  Keep the project slug "
+"``quspect`` and the language *English*."
+msgstr ""
+"导入 ``QuSpect/quspect``（如果列表中没有，请先授权 Read the Docs 访问 ``QuSpect`` GitHub "
+"组织）。项目 slug 保持为 ``quspect``，语言为 *English*。"
+
+#: ../../source/releasing.rst:122
+msgid ""
+"Import the same repository a second time as a separate project (for "
+"example slug ``quspect-zh-cn``) with language *Simplified Chinese*, then "
+"add it as a translation of ``quspect`` in the main project's *Admin -> "
+"Translations*."
+msgstr ""
+"将同一仓库再导入一次，作为独立项目（例如 slug ``quspect-zh-cn``），语言选择 *Simplified "
+"Chinese*，然后在主项目的 *Admin -> Translations* 中将其添加为 ``quspect`` 的翻译。"
+
+#: ../../source/releasing.rst:126
+msgid ""
+"Optionally enable *Build pull requests for this project* in both projects"
+" to get preview builds on pull requests."
+msgstr "可选：在两个项目中都启用 *Build pull requests for this project*，为 pull request 生成预览构建。"
+
+#: ../../source/releasing.rst:129
+msgid ""
+"To preview locally, run ``python -m pip install -r "
+"docs/requirements.txt`` and then ``sphinx-build -b html docs/source "
+"docs/build/html`` (add ``-D language=zh_CN`` for the Chinese version)."
+msgstr ""
+"本地预览：先运行 ``python -m pip install -r docs/requirements.txt``，再运行 ``sphinx-"
+"build -b html docs/source docs/build/html``（中文版加上 ``-D language=zh_CN``）。"
+

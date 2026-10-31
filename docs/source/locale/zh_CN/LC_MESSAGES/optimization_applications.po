@@ -1,0 +1,282 @@
+# Simplified Chinese translations for QuSpect documentation.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-31 01:06+0800\n"
+"PO-Revision-Date: 2026-07-31 01:06+0800\n"
+"Last-Translator: QuSpect Documentation Team\n"
+"Language-Team: Simplified Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: ../../source/optimization_applications.rst:2
+msgid "Optimization application patterns"
+msgstr "优化应用模式"
+
+#: ../../source/optimization_applications.rst:4
+msgid ""
+"Quadratic optimization applications often look unrelated at the business "
+"level while sharing the same small set of binary modeling patterns.  "
+"Keeping those patterns above ``BinaryQuadraticModel`` lets business code "
+"change without changing the solver boundary."
+msgstr ""
+"二次优化应用在业务层面往往看似毫不相关，却共享少数几种二元建模模式。将"
+"这些模式保持在 ``BinaryQuadraticModel`` 之上，可以在不改变求解器边界的"
+"情况下修改业务代码。"
+
+#: ../../source/optimization_applications.rst:10
+msgid "Reusable model families"
+msgstr "可复用的模型族"
+
+#: ../../source/optimization_applications.rst:12
+msgid ""
+"The representative public examples surveyed for this integration reduce to "
+"the following families:"
+msgstr "针对本次集成调研的代表性公开示例可归纳为以下模型族："
+
+#: ../../source/optimization_applications.rst:19
+msgid "Family"
+msgstr "模型族"
+
+#: ../../source/optimization_applications.rst:20
+msgid "Typical applications"
+msgstr "典型应用"
+
+#: ../../source/optimization_applications.rst:21
+msgid "Binary variables"
+msgstr "二元变量"
+
+#: ../../source/optimization_applications.rst:22
+msgid "Objective and constraints"
+msgstr "目标与约束"
+
+#: ../../source/optimization_applications.rst:23
+msgid "Graph partitioning"
+msgstr "图划分"
+
+#: ../../source/optimization_applications.rst:24
+msgid "Maximum cut"
+msgstr "最大割"
+
+#: ../../source/optimization_applications.rst:25
+msgid "One spin or bit per vertex"
+msgstr "每个顶点对应一个自旋或比特"
+
+#: ../../source/optimization_applications.rst:26
+msgid "Pairwise edge energy, usually without explicit constraints"
+msgstr "成对边能量，通常不含显式约束"
+
+#: ../../source/optimization_applications.rst:27
+msgid "Permutation and sequencing"
+msgstr "排列与排序"
+
+#: ../../source/optimization_applications.rst:28
+msgid "Route planning and sequence-read assembly"
+msgstr "路径规划与测序读段组装"
+
+#: ../../source/optimization_applications.rst:29
+msgid "``x[item, position]``"
+msgstr "``x[item, position]``"
+
+#: ../../source/optimization_applications.rst:30
+msgid ""
+"Adjacent-pair cost plus exactly-one constraints on every row and column"
+msgstr "相邻项成本，以及每行、每列的恰选一个约束"
+
+#: ../../source/optimization_applications.rst:31
+msgid "Assignment and load balancing"
+msgstr "任务分配与负载均衡"
+
+#: ../../source/optimization_applications.rst:32
+msgid "Distributing render or compute jobs across machines"
+msgstr "将渲染或计算任务分配到不同机器"
+
+#: ../../source/optimization_applications.rst:33
+msgid "``x[task, machine]``"
+msgstr "``x[task, machine]``"
+
+#: ../../source/optimization_applications.rst:34
+msgid "Load variance or makespan proxy, with one machine per task"
+msgstr "负载方差或完工时间代理目标，每项任务分配一台机器"
+
+#: ../../source/optimization_applications.rst:35
+msgid "Cardinality selection and coverage"
+msgstr "固定数量选择与覆盖"
+
+#: ../../source/optimization_applications.rst:36
+msgid "Selecting a fixed number of service locations"
+msgstr "选择固定数量的服务点"
+
+#: ../../source/optimization_applications.rst:37
+msgid "Site-selection and demand-coverage bits"
+msgstr "服务点选择和需求覆盖比特"
+
+#: ../../source/optimization_applications.rst:38
+msgid ""
+"Covered demand, a fixed selection count, and coverage implications"
+msgstr "已覆盖需求、固定选择数量和覆盖蕴含约束"
+
+#: ../../source/optimization_applications.rst:39
+msgid "Capacitated location and network allocation"
+msgstr "容量受限的选址与网络分配"
+
+#: ../../source/optimization_applications.rst:40
+msgid "Cloud-edge resource placement"
+msgstr "云边资源布局"
+
+#: ../../source/optimization_applications.rst:41
+msgid "Open-site, assignment, overflow, and slack bits"
+msgstr "站点开启、任务分配、溢出和松弛比特"
+
+#: ../../source/optimization_applications.rst:42
+msgid ""
+"Fixed, compute, and transport costs with assignment and capacity rules"
+msgstr "固定成本、计算成本和传输成本，以及分配和容量规则"
+
+#: ../../source/optimization_applications.rst:44
+msgid ""
+"Sequence-read assembly does not require a new optimization primitive: it "
+"reuses a directed route-planning model with overlap scores as edge weights. "
+"Likewise, the surveyed scheduling model is an assignment and load-balancing "
+"model; a full job-shop model would additionally require operation order and "
+"machine-time decisions."
+msgstr ""
+"测序读段组装不需要新的优化原语：它复用有向路径规划模型，并以重叠分数作为"
+"边权。同样，所调研的调度模型本质上是任务分配与负载均衡模型；完整的作业"
+"车间模型还需要表达工序顺序和机器时间决策。"
+
+#: ../../source/optimization_applications.rst:50
+msgid ""
+"The current ``QuadraticProgram`` directly supports graph-pair objectives, "
+"permutation and assignment one-hot constraints, quadratic load objectives, "
+"fixed-cardinality selection, and nonnegative conflict expressions.  General "
+"inequalities, bounded-integer expansion, automatic slack construction, and "
+"capacity helpers remain future upper-layer features.  Capacitated network "
+"models should wait for those features instead of embedding one-off bit "
+"encodings in business examples."
+msgstr ""
+"当前的 ``QuadraticProgram`` 直接支持图上的成对目标、排列和分配问题的 "
+"one-hot 约束、二次负载目标、固定数量选择和非负冲突表达式。一般不等式、"
+"有界整数展开、自动构造松弛变量和容量辅助函数仍属于未来的上层功能。容量"
+"受限的网络模型应等待这些功能就绪，而不应在业务示例中嵌入一次性的比特"
+"编码。"
+
+#: ../../source/optimization_applications.rst:59
+msgid "New example: portfolio selection"
+msgstr "新增示例：投资组合选择"
+
+#: ../../source/optimization_applications.rst:61
+msgid ""
+"A cardinality-constrained mean-variance portfolio uses a bit ``x_i`` to "
+"indicate whether asset ``i`` is selected:"
+msgstr ""
+"带固定数量约束的均值—方差投资组合使用比特 ``x_i`` 表示是否选择资产 "
+"``i``："
+
+#: ../../source/optimization_applications.rst:64
+msgid ""
+"\\max_x\\quad \\mu^T x - \\lambda x^T\\Sigma x\n"
+"\\qquad\n"
+"\\text{subject to}\\quad \\sum_i x_i = K."
+msgstr ""
+"\\max_x\\quad \\mu^T x - \\lambda x^T\\Sigma x\n"
+"\\qquad\n"
+"\\text{subject to}\\quad \\sum_i x_i = K."
+
+#: ../../source/optimization_applications.rst:70
+msgid ""
+"Expected return supplies the linear reward, while the covariance matrix "
+"creates dense floating-point quadratic couplings.  The exactly-``K`` "
+"constraint becomes a squared linear penalty during compilation.  This "
+"example exercises maximization, dense coefficients, business-objective "
+"recovery, and feasibility checking."
+msgstr ""
+"预期收益构成线性奖励，协方差矩阵则产生稠密的浮点二次耦合。恰选 ``K`` 项"
+"的约束在编译期间转换为线性表达式平方惩罚。该示例覆盖最大化、稠密系数、"
+"业务目标恢复和可行性检查。"
+
+#: ../../source/optimization_applications.rst:76
+msgid "Run the complete local pipeline with:"
+msgstr "使用以下命令运行完整的本地执行链："
+
+#: ../../source/optimization_applications.rst:82
+msgid ""
+"The runnable source is available as :download:`portfolio_selection.py "
+"<../../examples/portfolio_selection.py>`."
+msgstr ""
+"可运行的源文件为 :download:`portfolio_selection.py "
+"<../../examples/portfolio_selection.py>`。"
+
+#: ../../source/optimization_applications.rst:86
+msgid "New example: wireless channel assignment"
+msgstr "新增示例：无线信道分配"
+
+#: ../../source/optimization_applications.rst:88
+msgid ""
+"Let ``x[a, c]`` indicate that access point ``a`` uses channel ``c``.  Every "
+"access point must use exactly one channel:"
+msgstr ""
+"令 ``x[a, c]`` 表示接入点 ``a`` 是否使用信道 ``c``。每个接入点必须恰好"
+"使用一个信道："
+
+#: ../../source/optimization_applications.rst:91
+msgid "\\sum_c x_{a,c} = 1."
+msgstr "\\sum_c x_{a,c} = 1."
+
+#: ../../source/optimization_applications.rst:95
+msgid ""
+"If access points ``a`` and ``b`` interfere, they cannot use the same channel:"
+msgstr "如果接入点 ``a`` 和 ``b`` 相互干扰，则二者不能使用同一信道："
+
+#: ../../source/optimization_applications.rst:97
+msgid "x_{a,c}x_{b,c} = 0."
+msgstr "x_{a,c}x_{b,c} = 0."
+
+#: ../../source/optimization_applications.rst:101
+msgid ""
+"The product is nonnegative over binary assignments, so it maps directly to "
+"``add_nonnegative_quadratic_zero``.  A linear objective represents channel "
+"preferences or operating costs.  This example exercises two-dimensional "
+"variable order, multiple named constraints, conflict modeling, and "
+"structured business decoding."
+msgstr ""
+"该乘积在二元赋值下非负，因此可直接映射到 "
+"``add_nonnegative_quadratic_zero``。线性目标用于表示信道偏好或运行成本。"
+"该示例覆盖二维变量顺序、多个具名约束、冲突建模和结构化业务解码。"
+
+#: ../../source/optimization_applications.rst:107
+msgid "Run it with:"
+msgstr "使用以下命令运行："
+
+#: ../../source/optimization_applications.rst:113
+msgid ""
+"The runnable source is available as :download:`wireless_channel_assignment."
+"py <../../examples/wireless_channel_assignment.py>`."
+msgstr ""
+"可运行的源文件为 :download:`wireless_channel_assignment.py "
+"<../../examples/wireless_channel_assignment.py>`。"
+
+#: ../../source/optimization_applications.rst:117
+msgid "Placement in the architecture"
+msgstr "在架构中的位置"
+
+#: ../../source/optimization_applications.rst:119
+msgid ""
+"These models live in ``examples/`` rather than ``quspect.optimization``.  "
+"Asset names, covariance estimates, interference graphs, and result "
+"presentation are application policy; the core package should contain only "
+"reusable expressions, intermediate representations, lowering, codecs, and "
+"solver adapters.  Once several applications converge on stable input and "
+"output contracts, a separate applications package can be introduced without "
+"changing the hardware-level matrix boundary."
+msgstr ""
+"这些模型位于 ``examples/``，而不是 ``quspect.optimization``。资产名称、"
+"协方差估计、干扰图和结果展示都属于应用策略；核心包应只包含可复用的表达"
+"式、中间表示、降级转换、编解码器和求解器适配器。当多个应用形成稳定的"
+"输入输出契约后，可以引入独立的应用包，而无需改变硬件层矩阵边界。"

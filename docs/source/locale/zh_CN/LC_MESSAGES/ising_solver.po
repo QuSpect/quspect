@@ -1,0 +1,208 @@
+# Chinese translations for QuSpect package
+# QuSpect 软件包的简体中文翻译.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# Automatically generated, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-31 00:29+0800\n"
+"PO-Revision-Date: 2026-07-31 00:29+0800\n"
+"Last-Translator: Automatically generated\n"
+"Language-Team: none\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+
+#: ../../source/ising_solver.rst:2
+msgid "Native dense-Ising solver"
+msgstr "本地稠密 Ising 求解器"
+
+#: ../../source/ising_solver.rst:4
+msgid ""
+"QuSpect includes a local C++ reference backend for the exact matrix consumed "
+"by :class:`~quspect.optimization.hardware.HardwareIsingProgram`.  It "
+"minimizes"
+msgstr ""
+"QuSpect 为 :class:`~quspect.optimization.hardware.HardwareIsingProgram` "
+"所接收的确切矩阵提供了一个本地 C++ 参考后端。它对下式进行最小化"
+
+#: ../../source/ising_solver.rst:7
+msgid "E(s) = -s^\\mathsf{T} M s,\\qquad s_i\\in\\{-1,+1\\},"
+msgstr "E(s) = -s^\\mathsf{T} M s,\\qquad s_i\\in\\{-1,+1\\},"
+
+#: ../../source/ising_solver.rst:11
+msgid ""
+"where ``M`` is finite, symmetric, dense, and has a zero diagonal.  This "
+"keeps the local and future remote-hardware boundaries identical."
+msgstr ""
+"其中 ``M`` 的元素有限、矩阵对称且稠密，并且对角线为零。这样可以使本地"
+"硬件边界与未来的远程硬件边界保持一致。"
+
+#: ../../source/ising_solver.rst:15
+msgid "Algorithm selection"
+msgstr "算法选择"
+
+#: ../../source/ising_solver.rst:17
+msgid ""
+"The first implementation uses Metropolis simulated annealing with "
+"independent multi-start reads.  This is the most suitable baseline for an "
+"arbitrary dense floating-point matrix:"
+msgstr ""
+"首个实现采用 Metropolis 模拟退火，并进行多次相互独立的随机重启。对于"
+"任意稠密浮点矩阵，这是最合适的基准实现："
+
+#: ../../source/ising_solver.rst:21
+msgid ""
+"The Metropolis acceptance rule comes from `Metropolis et al. (1953) <https://"
+"doi.org/10.1063/1.1699114>`_, and its optimization interpretation follows "
+"`Kirkpatrick, Gelatt, and Vecchi (1983) <https://doi.org/10.1126/"
+"science.220.4598.671>`_."
+msgstr ""
+"Metropolis 接受准则源自 `Metropolis 等人（1953） <https://"
+"doi.org/10.1063/1.1699114>`_，其优化含义遵循 "
+"`Kirkpatrick、Gelatt 和 Vecchi（1983） <https://doi.org/10.1126/"
+"science.220.4598.671>`_。"
+
+#: ../../source/ising_solver.rst:25
+msgid ""
+"`Isakov et al. <https://arxiv.org/abs/1401.1084>`_ demonstrate much faster "
+"multi-spin-coded variants for sparse, bounded-degree models with discrete "
+"couplings.  Those assumptions do not hold for the dense, arbitrary-double "
+"hardware IR, so QuSpect uses the generic local-field method instead."
+msgstr ""
+"`Isakov 等人 <https://arxiv.org/abs/1401.1084>`_ 针对具有离散耦合的稀疏"
+"有界度模型，展示了速度快得多的多自旋编码变体。稠密且使用任意双精度值的"
+"硬件 IR 并不满足这些假设，因此 QuSpect 改用通用的局部场方法。"
+
+#: ../../source/ising_solver.rst:29
+msgid ""
+"The `D-Wave samplers reference implementation <https://github.com/"
+"dwavesystems/dwave-samplers>`_ likewise defines a sweep as one update per "
+"spin over a decreasing-temperature schedule.  It provides a useful "
+"independent API and algorithm reference."
+msgstr ""
+"`D-Wave 采样器参考实现 <https://github.com/"
+"dwavesystems/dwave-samplers>`_ 同样将一次扫描定义为：在逐步降温的调度"
+"过程中，每个自旋更新一次。它为 API 和算法提供了有用的独立参考。"
+
+#: ../../source/ising_solver.rst:33
+msgid ""
+"Fujitsu's Digital Annealer uses parallel-trial updates and a dynamic escape "
+"mechanism on specialized fully connected CMOS hardware; see `Aramon et al. "
+"(2019) <https://doi.org/10.3389/fphy.2019.00048>`_.  Evaluating all trials "
+"in parallel is attractive for a later SIMD/GPU backend, but it does not map "
+"to a portable CPU baseline without that hardware parallelism."
+msgstr ""
+"富士通 Digital Annealer 在专用的全连接 CMOS 硬件上采用并行试探更新和"
+"动态逃逸机制；参见 `Aramon 等人（2019） <https://doi.org/10.3389/"
+"fphy.2019.00048>`_。对所有试探进行并行求值很适合未来的 SIMD/GPU 后端，"
+"但在缺少此类硬件并行能力时，无法直接映射为可移植的 CPU 基准实现。"
+
+#: ../../source/ising_solver.rst:38
+msgid ""
+"Parallel tempering can cross barriers more effectively by exchanging "
+"replicas at different temperatures, as introduced by `Hukushima and Nemoto "
+"<https://arxiv.org/abs/cond-mat/9512035>`_.  It is a future solver option "
+"because it adds a temperature-ladder and exchange-policy surface beyond the "
+"minimal hardware-compatible API."
+msgstr ""
+"并行回火通过交换处于不同温度的副本，可以更有效地跨越势垒；该方法由 "
+"`Hukushima 和 Nemoto <https://arxiv.org/abs/cond-mat/9512035>`_ 提出。"
+"它可作为未来的求解器选项，因为除了最小的硬件兼容 API 以外，它还会引入"
+"温度阶梯和交换策略接口。"
+
+#: ../../source/ising_solver.rst:45
+msgid "Incremental update"
+msgstr "增量更新"
+
+#: ../../source/ising_solver.rst:47
+msgid "For a symmetric zero-diagonal matrix, define the cached local field"
+msgstr "对于对角线为零的对称矩阵，将缓存的局部场定义为"
+
+#: ../../source/ising_solver.rst:49
+msgid "f_i = \\sum_j M_{ij}s_j."
+msgstr "f_i = \\sum_j M_{ij}s_j."
+
+#: ../../source/ising_solver.rst:53
+msgid "Flipping spin ``i`` changes the energy by"
+msgstr "翻转自旋 ``i`` 会使能量发生如下变化"
+
+#: ../../source/ising_solver.rst:55
+msgid "\\Delta E_i = 4s_i f_i."
+msgstr "\\Delta E_i = 4s_i f_i."
+
+#: ../../source/ising_solver.rst:59
+msgid ""
+"Rejected proposals therefore cost constant time.  After an accepted flip "
+"from the old value ``s_i``, every field is updated as"
+msgstr ""
+"因此，被拒绝的候选翻转只需要常数时间。接受从旧值 ``s_i`` 开始的翻转后，"
+"每个局部场按下式更新"
+
+#: ../../source/ising_solver.rst:62
+msgid "f_j \\leftarrow f_j - 2M_{ji}s_i,"
+msgstr "f_j \\leftarrow f_j - 2M_{ji}s_i,"
+
+#: ../../source/ising_solver.rst:66
+msgid ""
+"which costs :math:`O(N)`.  Initial energy and fields cost :math:`O(N^2)`. A "
+"sweep attempts ``N`` flips and costs between :math:`O(N)` and :math:`O(N^2)` "
+"depending on the acceptance rate.  Independent reads are parallelized with "
+"OpenMP when available."
+msgstr ""
+"其开销为 :math:`O(N)`。初始化能量和局部场的开销为 :math:`O(N^2)`。一次"
+"扫描会尝试 ``N`` 次翻转，其开销随接受率而变化，介于 :math:`O(N)` 与 "
+":math:`O(N^2)` 之间。OpenMP 可用时，相互独立的求解会被并行执行。"
+
+#: ../../source/ising_solver.rst:71
+msgid ""
+"Each read derives its own RNG seed solely from ``(base_seed, read_index)`` "
+"and writes to a fixed result slot.  Thread scheduling therefore cannot "
+"change the result.  All reads, including duplicates, are retained and stably "
+"sorted by ascending energy."
+msgstr ""
+"每次求解都仅根据 ``(base_seed, read_index)`` 推导其自身的 RNG 种子，并"
+"写入固定的结果槽位。因此，线程调度不会改变结果。所有求解结果（包括重复"
+"结果）都会被保留，并按能量升序进行稳定排序。"
+
+#: ../../source/ising_solver.rst:77
+msgid "Exact oracle"
+msgstr "精确预言机"
+
+#: ../../source/ising_solver.rst:79
+msgid ""
+"The native test oracle enumerates small models in binary-reflected Gray-code "
+"order.  Consecutive configurations differ by one spin, so it reuses the same "
+"local-field update rather than recomputing every quadratic energy.  Its time "
+"complexity is :math:`O(N2^N)` and memory complexity is :math:`O(N^2)`; "
+"``max_spins`` defaults to 24 to prevent accidental exponential runs."
+msgstr ""
+"原生测试预言机按照二进制反射格雷码顺序枚举小规模模型。相邻配置仅有一个"
+"自旋不同，因此它复用相同的局部场更新，而不重新计算每一个二次能量。其时间"
+"复杂度为 :math:`O(N2^N)`，空间复杂度为 :math:`O(N^2)`；``max_spins`` "
+"默认为 24，以防止意外执行指数级计算。"
+
+#: ../../source/ising_solver.rst:86
+msgid "Python API"
+msgstr "Python API"
+
+#: ../../source/ising_solver.rst:105
+msgid ""
+"``result.hardware_samples`` preserves the exact matrix-column order. "
+"``result.logical_samples`` applies gauge normalization and removes auxiliary "
+"spins through the hardware program's decode metadata. "
+"``result.objective_values`` restores the logical Ising objective supplied to "
+"hardware lowering.  It therefore includes compiled penalties when the input "
+"came from a constrained ``QuadraticProgram``; evaluate the retained "
+"``CompilationResult`` to obtain the original business objective."
+msgstr ""
+"``result.hardware_samples`` 保持确切的矩阵列顺序。"
+"``result.logical_samples`` 通过硬件程序的解码元数据应用规范归一化，并"
+"移除辅助自旋。``result.objective_values`` 恢复提供给硬件降级层的逻辑 "
+"Ising 目标。因此，当输入来自受约束的 ``QuadraticProgram`` 时，其中包含"
+"已编译的惩罚项；应对保留的 ``CompilationResult`` 求值，以获得原始业务"
+"目标。"

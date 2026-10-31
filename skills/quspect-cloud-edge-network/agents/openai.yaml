@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect Cloud-Edge Network"
+  short_description: "Design capacitated cloud-edge optimization safely."
+  default_prompt: "Use $quspect-cloud-edge-network to assess and design a capacitated cloud-edge allocation model without inventing unsupported QuSpect APIs."

@@ -1,0 +1,84 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-27 18:47-0700\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/index.rst:26
+msgid "Contents:"
+msgstr "目录："
+
+#: ../../source/index.rst:2
+msgid "QuSpect Documentation"
+msgstr "QuSpect 文档"
+
+#: ../../source/index.rst:4
+msgid ""
+"QuSpect is a quantum computing SDK for research and education. It "
+"provides an intuitive Python API for constructing quantum circuits, "
+"building DAG-based intermediate representations, and preparing for "
+"simulation and hardware execution."
+msgstr ""
+"QuSpect 是一个面向科研与教学的量子计算 SDK。它提供直观的 Python API，用于构建量子线路、构建基于 DAG "
+"的中间表示，并为模拟和硬件执行做好准备。"
+
+#: ../../source/index.rst:8
+msgid ""
+"Sample quantum circuit — 4-qubit circuit with Hadamard, CNOT, Toffoli, "
+"SWAP, barriers, and measurements"
+msgstr "示例量子线路——包含 Hadamard、CNOT、Toffoli、SWAP、屏障和测量的 4 量子比特线路"
+
+#: ../../source/index.rst:13
+msgid ""
+"A 4-qubit quantum circuit showcasing single-qubit gates (H, X, T), two-"
+"qubit gates (CNOT), three-qubit gate (CCX/Toffoli), SWAP, barrier, and "
+"measurement, rendered as a scalable SVG diagram."
+msgstr ""
+"一个 4 "
+"量子比特量子线路，展示了单量子比特门（H、X、T）、双量子比特门（CNOT）、三量子比特门（CCX/Toffoli）、SWAP、屏障和测量，并以可缩放的"
+" SVG 图呈现。"
+
+#: ../../source/index.rst:17
+msgid ""
+"Sample sampling result — Bell state measurement distribution with "
+"statistical summary"
+msgstr "示例采样结果——Bell 态测量分布及统计摘要"
+
+#: ../../source/index.rst:22
+msgid ""
+"Measurement sampling result from a Bell state circuit (1024 shots), "
+"displaying outcome distribution as a gradient bar chart with built-in "
+"statistical annotations (entropy, variance, top-gap, effective rank)."
+msgstr "Bell 态线路的测量采样结果（1024 次采样），以渐变条形图展示结果分布，并内置统计标注（熵、方差、top-gap、有效秩）。"
+
+#: ../../source/index.rst:39
+msgid "Indices and tables"
+msgstr "索引和表格"
+
+#: ../../source/index.rst:41
+msgid ":ref:`genindex`"
+msgstr ":ref:`genindex`"
+
+#: ../../source/index.rst:42
+msgid ":ref:`modindex`"
+msgstr ":ref:`modindex`"
+
+#: ../../source/index.rst:43
+msgid ":ref:`search`"
+msgstr ":ref:`search`"
+

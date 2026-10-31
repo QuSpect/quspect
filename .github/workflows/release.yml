@@ -1,0 +1,123 @@
+name: Release
+
+# 推送 vX.Y.Z 形式的 tag 时：构建并测试全部 wheel + sdist（复用 wheels.yml），
+# 校验版本号与 tag 一致，通过 Trusted Publishing（OIDC）发布到 PyPI，
+# 最后创建带有全部发布物的 GitHub Release。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    uses: ./.github/workflows/wheels.yml
+    # 发布时构建全部 Python 版本（PR 只构建最旧与最新两个版本）。
+    with:
+      full: true
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # PyPI Trusted Publisher 配置：owner QuSpect / repo quspect /
+    # workflow release.yml / environment pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/quspect/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # tag 去掉前缀 v 后（按 PEP 440 规范化）必须与 sdist 及每个 wheel 的版本号一致，
+      # 并且 wheel 数量必须等于 wheels.yml 构建矩阵的作业数：
+      # pyproject.toml [tool.cibuildwheel] build 中的 Python 版本数（cp310–cp315 共 6 个）
+      # x 4 个平台（Linux x86_64 / Linux aarch64 / Windows AMD64 / macOS arm64）= 24 个；
+      # 该数字由 wheels.yml 的 plan 作业通过 wheel-count 输出给出。
+      - name: Verify version and artifact set
+        env:
+          TAG_VERSION: ${{ github.ref_name }}
+          EXPECTED_WHEELS: ${{ needs.build.outputs.wheel-count }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          python -m pip install packaging
+          python - <<'EOF'
+          import os
+          import sys
+          from pathlib import Path
+
+          from packaging.utils import parse_sdist_filename, parse_wheel_filename
+          from packaging.version import Version
+
+          expected_wheels = int(os.environ["EXPECTED_WHEELS"])
+          if expected_wheels <= 0:
+              sys.exit(f"invalid expected wheel count {expected_wheels}")
+          tag = os.environ["TAG_VERSION"]
+          if not tag.startswith("v"):
+              sys.exit(f"tag {tag!r} does not start with 'v'")
+          expected = Version(tag[1:])
+          dist = Path("dist")
+          sdists = sorted(dist.glob("*.tar.gz"))
+          wheels = sorted(dist.glob("*.whl"))
+          if len(sdists) != 1:
+              sys.exit(f"expected exactly one sdist, found {[p.name for p in sdists]}")
+          if len(wheels) != expected_wheels:
+              sys.exit(
+                  f"expected {expected_wheels} wheels, found {len(wheels)}: "
+                  f"{[p.name for p in wheels]}"
+              )
+          versions = {p.name: parse_sdist_filename(p.name)[1] for p in sdists}
+          versions.update({p.name: parse_wheel_filename(p.name)[1] for p in wheels})
+          bad = {name: str(v) for name, v in versions.items() if v != expected}
+          if bad:
+              sys.exit(f"version mismatch with tag {tag} (expected {expected}): {bad}")
+          print(f"all {len(versions)} artifacts have version {expected}")
+          EOF
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibw-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          # 含 a/b/rc/dev 的版本（如 v1.0.0rc1）标记为 pre-release
+          if [[ "$TAG" =~ (a|b|rc|dev)[0-9]*$ ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "QuSpect ${TAG#v}" \
+            --generate-notes \
+            --verify-tag \
+            "${prerelease[@]}"

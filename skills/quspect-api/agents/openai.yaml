@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuSpect API"
+  short_description: "QuSpect APIs, routing, and variational workflows."
+  default_prompt: "Use $quspect-api to implement or debug a QuSpect circuit, physical-qubit routing workflow, backend, or variational algorithm."

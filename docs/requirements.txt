@@ -1,0 +1,8 @@
+# Dependencies for building the documentation (used by Read the Docs, see
+# .readthedocs.yaml).  The docs import the quspect source tree directly, so
+# the package itself (and its C++ extension) is not installed; only its pure
+# Python runtime dependencies are listed here.
+sphinx>=8,<10
+sphinx-rtd-theme>=3,<4
+numpy>=1.24
+scipy>=1.10

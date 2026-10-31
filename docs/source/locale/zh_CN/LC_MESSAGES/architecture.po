@@ -1,0 +1,169 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-16 04:45+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/architecture.rst:2
+msgid "Architecture"
+msgstr "架构"
+
+#: ../../source/architecture.rst:4
+msgid "This page describes the high-level architecture of QuSpect."
+msgstr "本页介绍 QuSpect 的高层架构。"
+
+#: ../../source/architecture.rst:7
+msgid "Layered Architecture"
+msgstr "分层架构"
+
+#: ../../source/architecture.rst:23
+msgid "Core Concepts"
+msgstr "核心概念"
+
+#: ../../source/architecture.rst:26
+msgid "Gate System"
+msgstr "门系统"
+
+#: ../../source/architecture.rst:28
+msgid ""
+"Per architecture decision 7.1, gate definitions are separated from matrix"
+" computation (:ref:`方案 C <architecture-decision-7-1>`):"
+msgstr "根据架构决策 7.1，门定义与矩阵计算相互分离（:ref:`方案 C <architecture-decision-7-1>`）："
+
+#: ../../source/architecture.rst:31
+msgid ""
+":class:`~quspect.gates.gate.Gate` — Lightweight metadata container (name,"
+" num_qubits, label). Hashable, serializable, no numpy dependency."
+msgstr ""
+":class:`~quspect.gates.gate.Gate` — "
+"轻量级元数据容器（name、num_qubits、label）。可哈希、可序列化，不依赖 numpy。"
+
+#: ../../source/architecture.rst:33
+msgid ""
+":func:`~quspect.gates._matrix_utils.get_gate_matrix` — Central dispatch "
+"for matrix computation. Handles both standard and parameterized gates."
+msgstr ""
+":func:`~quspect.gates._matrix_utils.get_gate_matrix` — "
+"矩阵计算的中心分发函数，同时处理标准门和参数化门。"
+
+#: ../../source/architecture.rst:37
+msgid "Circuit System"
+msgstr "线路系统"
+
+#: ../../source/architecture.rst:39
+msgid ""
+":class:`~quspect.circuit.circuit.QuantumCircuit` uses dynamic qubit/clbit"
+" count inference (architecture decision 7.0). No need to pre-declare "
+"circuit size — it grows automatically as qubits are referenced."
+msgstr ""
+":class:`~quspect.circuit.circuit.QuantumCircuit` 动态推断量子比特/经典比特的数量（架构决策 "
+"7.0）。无需预先声明线路规模——线路会随着量子比特被引用而自动增长。"
+
+#: ../../source/architecture.rst:43
+msgid ""
+"Measurements are represented as "
+":class:`~quspect.circuit.instruction.InstructionType` rather than as Gate"
+" subclasses (architecture decision 7.3), since measurement is a "
+"projective operation, not a unitary transformation."
+msgstr ""
+"测量以 :class:`~quspect.circuit.instruction.InstructionType` 表示，而不是作为 Gate "
+"的子类（架构决策 7.3），因为测量是投影操作，而不是幺正变换。"
+
+#: ../../source/architecture.rst:48
+msgid "DAG System"
+msgstr "DAG 系统"
+
+#: ../../source/architecture.rst:50
+msgid ""
+"The Directed Acyclic Graph (DAG) is QuSpect's primary intermediate "
+"representation. The compiler converts sequential circuit instructions "
+"into a dependency graph that explicitly models qubit/clbit data flow."
+msgstr "有向无环图（DAG）是 QuSpect 的主要中间表示。编译器将顺序排列的线路指令转换为依赖图，显式建模量子比特/经典比特的数据流。"
+
+#: ../../source/architecture.rst:54
+msgid "Time complexity: O(n + m) where n = num_qubits, m = instructions"
+msgstr "时间复杂度：O(n + m)，其中 n = num_qubits，m = 指令数"
+
+#: ../../source/architecture.rst:55
+msgid "Supports topological ordering and layer partitioning for scheduling"
+msgstr "支持拓扑排序和分层划分，用于调度"
+
+#: ../../source/architecture.rst:58
+msgid "Architecture Decisions"
+msgstr "架构决策"
+
+#: ../../source/architecture.rst:63
+msgid "7.0: Dynamic Qubit Count"
+msgstr "7.0：动态量子比特数量"
+
+#: ../../source/architecture.rst:65
+msgid ""
+"**Decision**: ``QuantumCircuit()`` does not accept a qubit count "
+"parameter. ``num_qubits`` and ``num_clbits`` are inferred from actual "
+"usage (``max(index) + 1``)."
+msgstr ""
+"**决策**：``QuantumCircuit()`` 不接受量子比特数量参数。``num_qubits`` 和 ``num_clbits`` "
+"根据实际使用情况推断（``max(index) + 1``）。"
+
+#: ../../source/architecture.rst:72
+msgid "7.1: Gate — Definition vs. Matrix Separation"
+msgstr "7.1：Gate——定义与矩阵分离"
+
+#: ../../source/architecture.rst:74
+msgid ""
+"**Decision**: 方案 C. Gate is a pure metadata container. Matrix computation"
+" is handled by standalone functions in ``_matrix_utils.py``. This keeps "
+"gate definitions lightweight, hashable, and free from numpy serialization"
+" issues."
+msgstr ""
+"**决策**：方案 C。Gate 是纯元数据容器。矩阵计算由 ``_matrix_utils.py`` "
+"中的独立函数处理。这使门定义保持轻量、可哈希，且不受 numpy 序列化问题影响。"
+
+#: ../../source/architecture.rst:80
+msgid "7.2: Instruction Storage"
+msgstr "7.2：指令存储"
+
+#: ../../source/architecture.rst:82
+msgid ""
+"**Decision**: 方案 A. Simple ``list[CircuitInstruction]`` for Phase 1. "
+"Indexed access can be added later if performance requires."
+msgstr ""
+"**决策**：方案 A。第一阶段（Phase 1）使用简单的 "
+"``list[CircuitInstruction]``。如果性能需要，之后可以增加索引访问。"
+
+#: ../../source/architecture.rst:86
+msgid "7.3: Measurement Representation"
+msgstr "7.3：测量表示"
+
+#: ../../source/architecture.rst:88
+msgid ""
+"**Decision**: 方案 B. Measurement is an ``InstructionType``, not a Gate "
+"subclass. This correctly models the fact that measurement is a projective"
+" (non-unitary) operation."
+msgstr "**决策**：方案 B。测量是一种 ``InstructionType``，而不是 Gate 子类。这正确地反映了测量是投影（非幺正）操作这一事实。"
+
+#: ../../source/architecture.rst:93
+msgid "7.4: Parameter Storage"
+msgstr "7.4：参数存储"
+
+#: ../../source/architecture.rst:95
+msgid ""
+"**Decision**: 方案 B. ``params: tuple[float | Parameter, ...]`` — supports "
+"both concrete numeric values and symbolic parameters."
+msgstr "**决策**：方案 B。``params: tuple[float | Parameter, ...]``——同时支持具体数值和符号参数。"
+

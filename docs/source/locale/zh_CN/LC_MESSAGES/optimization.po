@@ -1,0 +1,262 @@
+# Chinese translations for QuSpect package
+# QuSpect 软件包的简体中文翻译.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# Automatically generated, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-31 00:29+0800\n"
+"PO-Revision-Date: 2026-07-31 00:29+0800\n"
+"Last-Translator: Automatically generated\n"
+"Language-Team: none\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_CN\n"
+
+#: ../../source/optimization.rst:2
+msgid "Quadratic Optimization"
+msgstr "二次优化"
+
+#: ../../source/optimization.rst:4
+msgid ""
+"QuSpect separates problem modeling, mathematical intermediate "
+"representations, hardware lowering, and execution:"
+msgstr ""
+"QuSpect 将问题建模、数学中间表示、硬件降级转换和执行划分为彼此独立的"
+"层次："
+
+#: ../../source/optimization.rst:23
+msgid ""
+"This boundary keeps a provider's matrix convention out of user-facing "
+"models. It also allows the same quadratic objective to be executed by a "
+"classical optimizer, lowered to a QAOA Hamiltonian, or encoded for an Ising-"
+"machine backend."
+msgstr ""
+"这一边界使供应商的矩阵约定不会渗入面向用户的模型。它还使同一个二次目标"
+"既可由经典优化器执行，也可降级为 QAOA 哈密顿量，或为 Ising 机后端进行"
+"编码。"
+
+#: ../../source/optimization.rst:29
+msgid "Symbolic modeling"
+msgstr "符号化建模"
+
+#: ../../source/optimization.rst:31
+msgid ""
+"``QuadraticProgram`` is the user-facing layer.  It creates stable binary "
+"variables, accepts objectives of degree at most two, and compiles supported "
+"constraints into penalties:"
+msgstr ""
+"``QuadraticProgram`` 是面向用户的一层。它创建顺序稳定的二元变量，接受次数"
+"不超过二次的目标，并将所支持的约束编译为惩罚项："
+
+#: ../../source/optimization.rst:35
+msgid ""
+"a linear equality residual :math:`r(x)=0` becomes :math:`\\lambda r(x)^2`;"
+msgstr "线性等式残差 :math:`r(x)=0` 转换为 :math:`\\lambda r(x)^2`；"
+
+#: ../../source/optimization.rst:37
+msgid ""
+"an expression explicitly declared nonnegative and constrained to zero "
+"becomes the direct penalty :math:`\\lambda q(x)`."
+msgstr ""
+"显式声明为非负且被约束为零的表达式，转换为直接惩罚项 "
+":math:`\\lambda q(x)`。"
+
+#: ../../source/optimization.rst:40
+msgid ""
+"For maximization, the compiler subtracts these penalties so that violations "
+"are still disfavored.  ``CompilationResult`` retains the original objective "
+"and constraints separately from the penalized BQM for business-level "
+"evaluation and feasibility checks."
+msgstr ""
+"对于最大化问题，编译器会减去这些惩罚项，从而仍对违反约束的情况施加不利"
+"影响。``CompilationResult`` 将原始目标和约束与加入惩罚项的 BQM 分开"
+"保留，用于业务层面的求值和可行性检查。"
+
+#: ../../source/optimization.rst:45
+msgid ""
+"Penalties are soft constraints.  The caller must choose coefficients large "
+"enough that no objective improvement can make a violating assignment "
+"preferable.  Always check ``compiled.is_feasible(bits)`` after solving and "
+"use ``compiled.evaluate_objective(bits)`` for the unpenalized business value."
+msgstr ""
+"惩罚项属于软约束。调用方必须选择足够大的系数，使违反约束的赋值无法通过"
+"改善目标值而变得更优。求解后应始终检查 ``compiled.is_feasible(bits)``，"
+"并使用 ``compiled.evaluate_objective(bits)`` 获取不含惩罚项的业务目标值。"
+
+#: ../../source/optimization.rst:63
+msgid "Binary quadratic models"
+msgstr "二元二次模型"
+
+#: ../../source/optimization.rst:65
+msgid "``BinaryQuadraticModel`` stores an objective in the canonical form"
+msgstr "``BinaryQuadraticModel`` 以如下规范形式存储目标函数"
+
+#: ../../source/optimization.rst:67
+msgid "E(v) = c + a^T v + \\frac{1}{2} v^T B v,"
+msgstr "E(v) = c + a^T v + \\frac{1}{2} v^T B v,"
+
+#: ../../source/optimization.rst:71
+msgid ""
+"where ``B`` is symmetric with a zero diagonal.  Variables can use either the "
+"binary domain :math:`\\{0, 1\\}` or the spin domain :math:`\\{-1, +1\\}`. "
+"Variable names and vector order are explicit, and all coefficient arrays are "
+"copied and made read-only."
+msgstr ""
+"其中 ``B`` 是对角线为零的对称矩阵。变量既可使用二元定义域 "
+":math:`\\{0, 1\\}`，也可使用自旋定义域 :math:`\\{-1, +1\\}`。变量名和"
+"向量顺序均被显式指定，所有系数数组都会被复制并设为只读。"
+
+#: ../../source/optimization.rst:76
+msgid "QUBO matrices use the convention"
+msgstr "QUBO 矩阵采用如下约定"
+
+#: ../../source/optimization.rst:78
+msgid "E(x) = x^T Qx + c."
+msgstr "E(x) = x^T Qx + c."
+
+#: ../../source/optimization.rst:82
+msgid ""
+"QuSpect accepts upper-triangular, lower-triangular, symmetric, or mixed QUBO "
+"matrices and normalizes opposing entries into one pair coefficient.  The "
+"canonical exported QUBO matrix is upper triangular."
+msgstr ""
+"QuSpect 接受上三角、下三角、对称或混合形式的 QUBO 矩阵，并将两个相对位置"
+"的元素归一化为一个成对系数。导出的规范 QUBO 矩阵为上三角矩阵。"
+
+#: ../../source/optimization.rst:87
+msgid "Ising conversion"
+msgstr "Ising 转换"
+
+#: ../../source/optimization.rst:89
+msgid "Binary and spin variables are related by"
+msgstr "二元变量与自旋变量的关系为"
+
+#: ../../source/optimization.rst:91
+msgid "s = 2x - 1,\\qquad x = \\frac{s + 1}{2}."
+msgstr "s = 2x - 1,\\qquad x = \\frac{s + 1}{2}."
+
+#: ../../source/optimization.rst:95
+msgid ""
+"``binary_to_ising`` and ``ising_to_binary`` retain the complete constant "
+"offset and preserve the objective value for every assignment.  The logical "
+"``IsingProblem`` convention is"
+msgstr ""
+"``binary_to_ising`` 和 ``ising_to_binary`` 会保留完整的常数偏移量，并使"
+"每个变量赋值的目标值保持不变。逻辑 ``IsingProblem`` 采用如下约定"
+
+#: ../../source/optimization.rst:99
+msgid "E(s) = c + h^T s + \\frac{1}{2} s^T Js."
+msgstr "E(s) = c + h^T s + \\frac{1}{2} s^T Js."
+
+#: ../../source/optimization.rst:104
+msgid "Hardware matrix lowering"
+msgstr "硬件矩阵降级转换"
+
+#: ../../source/optimization.rst:106
+msgid ""
+"``HardwareIsingProgram`` represents the exact dense matrix at the Ising-"
+"machine boundary.  Its hardware energy convention is"
+msgstr ""
+"``HardwareIsingProgram`` 表示 Ising 机边界处的确切稠密矩阵。其硬件能量"
+"约定为"
+
+#: ../../source/optimization.rst:109
+msgid "E_\\mathrm{hw}(t) = -t^T Mt."
+msgstr "E_\\mathrm{hw}(t) = -t^T Mt."
+
+#: ../../source/optimization.rst:113
+msgid ""
+"The matrix is finite, symmetric, and has a zero diagonal.  A logical linear "
+"field is converted into a coupling to an auxiliary gauge spin.  Local decode "
+"metadata fixes that gauge to ``+1``, removes auxiliary spins, and restores "
+"the original objective using an explicit scale and offset."
+msgstr ""
+"该矩阵的元素有限、矩阵对称且对角线为零。逻辑线性场会被转换为与辅助规范"
+"自旋的耦合。局部解码元数据将该规范自旋固定为 ``+1``，移除辅助自旋，并"
+"使用显式的缩放因子和偏移量恢复原始目标。"
+
+#: ../../source/optimization.rst:118
+msgid ""
+"Because the provider evaluates the full symmetric matrix, each off-diagonal "
+"entry appears twice in :math:`t^T Mt`.  Lowering therefore writes :math:`-"
+"\\frac{1}{2}J_{ij}` for a logical pair coefficient :math:`J_{ij}` and :math:"
+"`-\\frac{1}{2}h_i` for a field coupled to the gauge spin.  This factor is "
+"part of the transport contract, not an optimizer-specific convention."
+msgstr ""
+"由于供应商会计算完整的对称矩阵，因此每个非对角元素在 :math:`t^T Mt` 中"
+"出现两次。所以，降级转换针对逻辑成对系数 :math:`J_{ij}` 写入 "
+":math:`-\\frac{1}{2}J_{ij}`，针对与规范自旋耦合的场写入 "
+":math:`-\\frac{1}{2}h_i`。这一因子属于传输契约的一部分，而不是特定于"
+"优化器的约定。"
+
+#: ../../source/optimization.rst:124
+msgid ""
+"The provider-neutral lowering and CSV codec are local transformations only; "
+"they do not perform authentication, networking, task creation, or result "
+"polling:"
+msgstr ""
+"供应商无关的降级转换和 CSV 编解码器仅执行本地转换；它们不执行身份认证、"
+"网络通信、任务创建或结果轮询："
+
+#: ../../source/optimization.rst:149
+msgid "For every valid logical assignment, compilation guarantees"
+msgstr "对于每个有效的逻辑赋值，编译过程保证"
+
+#: ../../source/optimization.rst:151
+msgid ""
+"E_\\mathrm{logical}\n"
+"=\n"
+"\\mathrm{objective\\_scale}\\,E_\\mathrm{hw}\n"
+"+ \\mathrm{objective\\_offset}."
+msgstr ""
+"E_\\mathrm{logical}\n"
+"=\n"
+"\\mathrm{objective\\_scale}\\,E_\\mathrm{hw}\n"
+"+ \\mathrm{objective\\_offset}."
+
+#: ../../source/optimization.rst:158
+msgid ""
+"This equality is the primary compatibility invariant for future local and "
+"remote optimization backends."
+msgstr ""
+"这一等式是未来本地和远程优化后端所遵循的首要兼容性不变量。"
+
+#: ../../source/optimization.rst:162
+msgid "Local execution"
+msgstr "本地执行"
+
+#: ../../source/optimization.rst:164
+msgid ""
+"``NativeIsingSolver`` consumes ``HardwareIsingProgram`` directly, so the "
+"local C++ simulator and a future remote adapter share the same validated "
+"matrix boundary.  See :doc:`ising_solver` for its algorithm, complexity, and "
+"determinism guarantees."
+msgstr ""
+"``NativeIsingSolver`` 直接接收 ``HardwareIsingProgram``，因此本地 C++ "
+"模拟器和未来的远程适配器将共享同一个经过验证的矩阵边界。有关其算法、"
+"复杂度和确定性保证，请参阅 :doc:`ising_solver`。"
+
+#: ../../source/optimization.rst:169
+msgid "The complete local path is:"
+msgstr "完整的本地执行路径如下："
+
+#: ../../source/optimization.rst:188
+msgid ""
+"Replacing ``NativeIsingSolver`` with a future remote backend will not change "
+"``hardware.matrix``, its variable order, or the local decode metadata."
+msgstr ""
+"未来以远程后端替换 ``NativeIsingSolver`` 时，无需更改 "
+"``hardware.matrix``、其变量顺序或本地解码元数据。"
+
+#: ../../source/optimization.rst:197
+msgid ""
+"See :doc:`optimization_applications` for reusable model families and "
+"complete portfolio-selection and wireless-channel-assignment examples."
+msgstr ""
+"有关可复用的模型族以及完整的投资组合选择和无线信道分配示例，请参阅 "
+":doc:`optimization_applications`。"
