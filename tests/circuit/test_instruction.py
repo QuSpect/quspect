@@ -196,3 +196,94 @@ class TestDistinctQubitValidation:
         matrix = instr.matrix()
         assert matrix is not None
         assert matrix.shape == (2, 2)
+
+
+# --- batched gate-instruction construction ---------------------------------
+
+
+def _reference_gate_instructions(items, label=""):  # type: ignore[no-untyped-def]
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+    return [
+        CircuitInstruction(
+            type=InstructionType.GATE, gate=g, qubits=qs, clbits=(), label=label
+        )
+        for g, qs in items
+    ]
+
+
+def _fields(ins):  # type: ignore[no-untyped-def]
+    try:
+        h = hash(ins)
+    except TypeError:  # list qubits: unhashable either way
+        h = None
+    return (type(ins), repr(ins), h, dict(vars(ins)), list(vars(ins)))
+
+
+def test_gate_instructions_match_the_constructor() -> None:
+    import math
+
+    from quspect.circuit.instruction import _gate_instructions
+    from quspect.gates.gate import Gate
+    from quspect.gates.parameterized import RZ
+    from quspect.gates.standard import CCX, CX, H
+
+    class MyGate(Gate):
+        pass
+
+    custom = MyGate(name="h", num_qubits=1)
+    items = [
+        (H, (0,)),
+        (CX, (3, 1)),
+        (RZ.with_params(-0.0), (7,)),
+        (RZ.with_params(math.nan), (2,)),
+        (CCX, (0, 1, 2)),
+        (custom, (4,)),
+        (H, (2**70,)),
+        [H, (5,)],
+    ]
+    for label in ("", "tag"):
+        got = _gate_instructions(items, label)
+        ref = _reference_gate_instructions(items, label)
+        assert [_fields(i) for i in got if i.gate is not items[3][0]] == [
+            _fields(i) for i in ref if i.gate is not items[3][0]
+        ]
+        assert [repr(i) for i in got] == [repr(i) for i in ref]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [("H", (0,))],
+        [(None, (0,))],
+        [(lambda: None, (0,))],
+    ],
+)
+def test_gate_instructions_reject_like_the_constructor(items: list) -> None:  # type: ignore[type-arg]
+    from quspect.circuit.instruction import _gate_instructions
+
+    with pytest.raises(Exception) as got:
+        _gate_instructions(items)
+    with pytest.raises(Exception) as ref:
+        _reference_gate_instructions(items)
+    assert type(got.value) is type(ref.value)
+
+
+@pytest.mark.parametrize(
+    "qubits", [(0, 0), (-1,), (True,), (0, 1, 1), (1.0,), [0], (0, 1)]
+)
+def test_gate_instructions_validate_like_the_constructor(qubits: object) -> None:
+    from quspect.circuit.instruction import _gate_instructions
+    from quspect.gates.standard import CX, H
+
+    gate = CX if isinstance(qubits, tuple) and len(qubits) == 2 else H
+    try:
+        ref = _reference_gate_instructions([(gate, qubits)])
+    except Exception as exc:  # noqa: BLE001
+        with pytest.raises(
+            type(exc), match=str(exc).replace("(", r"\(").replace(")", r"\)")
+        ):
+            _gate_instructions([(gate, qubits)])
+        return
+    got = _gate_instructions([(gate, qubits)])
+    assert [_fields(i) for i in got] == [_fields(i) for i in ref]

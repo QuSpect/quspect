@@ -611,7 +611,7 @@ def decompose_circuit(
         A new :class:`QuantumCircuit` with unsupported gates replaced.
     """
     from quspect.circuit.circuit import QuantumCircuit
-    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.circuit.instruction import InstructionType, _gate_instructions
     from quspect.ir.qasm2 import get_supported_gates
 
     if supported_gates is None:
@@ -643,15 +643,9 @@ def decompose_circuit(
             new_circuit._instructions.append(instr)
             continue
 
-        for sub_gate, sub_qubits in substitutions:
-            new_instr = CircuitInstruction(
-                type=InstructionType.GATE,
-                gate=sub_gate,
-                qubits=sub_qubits,
-                clbits=(),
-                label=instr.label if instr.label else "",
-            )
-            new_circuit._instructions.append(new_instr)
+        new_circuit._instructions.extend(
+            _gate_instructions(substitutions, instr.label if instr.label else "")
+        )
 
     return new_circuit
 

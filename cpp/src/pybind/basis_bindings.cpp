@@ -393,6 +393,39 @@ void BindBasis(py::module_& m) {
         py::arg("instrs"), py::arg("synth"), py::arg("native"), py::arg("matrix_of"), py::arg("synthesize"),
         py::arg("instr_cls"), py::arg("type_gate"), py::arg("type_barrier"), py::arg("gate_cls"), py::arg("ent"),
         "Native body of _basis.translate_to_target: (True, instructions) or (False, None) to use Python.");
+
+    m.def(
+        "_gate_instructions",
+        [](const py::object& instr_cls, const py::object& type_gate, const py::object& gate_cls,
+           const py::sequence& items, const py::object& label) {
+            const runs::InstructionFactory factory(instr_cls, type_gate, gate_cls);
+            py::object fast = py::reinterpret_steal<py::object>(PySequence_Fast(items.ptr(), "items"));
+            if (!fast) {
+                throw py::error_already_set();
+            }
+            const Py_ssize_t count = PySequence_Fast_GET_SIZE(fast.ptr());
+            PyObject** data = PySequence_Fast_ITEMS(fast.ptr());
+            py::list out(count);
+            for (Py_ssize_t i = 0; i < count; ++i) {
+                py::object pair = py::reinterpret_borrow<py::object>(data[i]);
+                if (!PyTuple_CheckExact(pair.ptr())) {
+                    pair = py::reinterpret_steal<py::object>(PySequence_Tuple(pair.ptr()));
+                    if (!pair) {
+                        throw py::error_already_set();
+                    }
+                }
+                if (PyTuple_GET_SIZE(pair.ptr()) != 2) {
+                    throw py::value_error("expected (gate, qubits) pairs");
+                }
+                py::object ins =
+                    factory.Gate(PyTuple_GET_ITEM(pair.ptr(), 0), PyTuple_GET_ITEM(pair.ptr(), 1), label.ptr());
+                PyList_SET_ITEM(out.ptr(), i, ins.release().ptr());
+            }
+            return out;
+        },
+        py::arg("instr_cls"), py::arg("type_gate"), py::arg("gate_cls"), py::arg("items"), py::arg("label"),
+        "[CircuitInstruction(type=GATE, gate=g, qubits=qs, clbits=(), label=label) for g, qs in items], "
+        "plain cases built field by field.");
 }
 
 }  // namespace quspect::native::pybind

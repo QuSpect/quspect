@@ -2110,18 +2110,16 @@ def ops_to_instructions(
         >>> ins[0].qubits
         (3, 5)
     """
-    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.circuit.instruction import _gate_instructions
     from quspect.gates.parameterized import RZ
 
     fixed = _standard_gates()
-    out: list[CircuitInstruction] = []
-    for name, local, params in ops:
-        gate = RZ.with_params(*params) if name == "rz" else fixed[name]
-        out.append(
-            CircuitInstruction(
-                type=InstructionType.GATE,
-                gate=gate,
-                qubits=tuple(qubits[q] for q in local),
+    return _gate_instructions(
+        [
+            (
+                RZ.with_params(*params) if name == "rz" else fixed[name],
+                tuple(qubits[q] for q in local),
             )
-        )
-    return out
+            for name, local, params in ops
+        ]
+    )

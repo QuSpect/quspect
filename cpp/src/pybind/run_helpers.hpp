@@ -226,7 +226,23 @@ class InstructionFactory {
             kw[n.qubits] = qubits;
             return instr_cls_(**kw);
         }
-        return Fields(type_gate_.ptr(), qubits.ptr(), gate);
+        return Fields(type_gate_.ptr(), qubits.ptr(), gate, Names().empty.ptr());
+    }
+
+    // CircuitInstruction(type=GATE, gate=gate, qubits=qubits, clbits=(), label=label)：普通 Gate、
+    // gate.num_qubits == len(qubits) ≤ 2、比特为互不相同的非负 int 时直接写字段，否则调用构造函数。
+    py::object Gate(PyObject* gate, PyObject* qubits, PyObject* label) const {
+        if (Simple(gate, qubits) && PyUnicode_CheckExact(label)) {
+            return Fields(type_gate_.ptr(), qubits, gate, label);
+        }
+        RunNames& n = Names();
+        py::dict kw;
+        kw[n.type] = type_gate_;
+        kw[n.gate] = py::handle(gate);
+        kw[n.qubits] = py::handle(qubits);
+        kw[n.clbits] = py::tuple();
+        kw[n.label] = py::handle(label);
+        return instr_cls_(**kw);
     }
 
     // 两比特门：CircuitInstruction(type=GATE, gate=gate, qubits=(a, b))（构造函数）。
@@ -240,7 +256,42 @@ class InstructionFactory {
     }
 
  private:
-    py::object Fields(PyObject* type, PyObject* qubits, PyObject* gate) const {
+    bool Simple(PyObject* gate, PyObject* qubits) const {
+        if (Py_TYPE(gate) != reinterpret_cast<PyTypeObject*>(gate_cls_.ptr()) || !PyTuple_CheckExact(qubits)) {
+            return false;
+        }
+        const Py_ssize_t n = PyTuple_GET_SIZE(qubits);
+        if (n < 1 || n > 2) {
+            return false;
+        }
+        long long q[2] = {0, 0};
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            PyObject* item = PyTuple_GET_ITEM(qubits, i);
+            if (!PyLong_CheckExact(item)) {
+                return false;
+            }
+            int overflow = 0;
+            q[i] = PyLong_AsLongLongAndOverflow(item, &overflow);
+            if (overflow != 0 || q[i] < 0) {
+                return false;
+            }
+        }
+        if (n == 2 && q[0] == q[1]) {
+            return false;
+        }
+        py::object nq = Attr(gate, Names().num_qubits);
+        if (!PyLong_CheckExact(nq.ptr())) {
+            return false;
+        }
+        const long v = PyLong_AsLong(nq.ptr());
+        if (v == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            return false;
+        }
+        return v == n;
+    }
+
+    py::object Fields(PyObject* type, PyObject* qubits, PyObject* gate, PyObject* label) const {
         RunNames& n = Names();
         auto* cls = reinterpret_cast<PyTypeObject*>(instr_cls_.ptr());
         py::object empty = py::reinterpret_steal<py::object>(PyTuple_New(0));
@@ -262,7 +313,7 @@ class InstructionFactory {
         set(n.clbits, empty.ptr());
         set(n.gate, gate);
         set(n.channel, Py_None);
-        set(n.label, n.empty.ptr());
+        set(n.label, label);
         return obj;
     }
 

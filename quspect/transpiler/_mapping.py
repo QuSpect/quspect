@@ -2434,18 +2434,25 @@ def _build_output_circuit(
         if physical >= 0:
             p2l[physical] = logical
 
+    from quspect.circuit.instruction import _gate_instructions
+    from quspect.gates.standard import SWAP
+
     out = QuantumCircuit(name=original.name)
+    # 连续的门（out.append / out.swap 的指令）成批构造
+    pending: list[tuple[Gate, tuple[int, ...]]] = []
 
     for pg in physical_gates:
         if pg.name == "swap":
-            out.swap(p2l[pg.q1], p2l[pg.q2])
+            pending.append((SWAP, (p2l[pg.q1], p2l[pg.q2])))
         elif pg.name == "measure":
             if pg.clbit is None:
                 raise ValueError("Routed measurement is missing its classical bit.")
+            out._instructions.extend(_gate_instructions(pending))
+            pending.clear()
             out.measure([p2l[pg.q1]], [pg.clbit])
         elif pg.gate is not None:
             operands = (pg.q1, pg.q2) if pg.is_two_qubit else (pg.q1,)
-            out.append(pg.gate, tuple(p2l[p] for p in operands))
+            pending.append((pg.gate, tuple(p2l[p] for p in operands)))
         else:
             if pg.index >= 0:
                 orig_instr = original[pg.index]
@@ -2455,6 +2462,7 @@ def _build_output_circuit(
                         p2l[physical]
                         for physical in physical_operands[: len(orig_instr.qubits)]
                     )
-                    out.append(orig_instr.gate, routed_operands)
+                    pending.append((orig_instr.gate, routed_operands))
+    out._instructions.extend(_gate_instructions(pending))
 
     return out

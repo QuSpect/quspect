@@ -6,9 +6,10 @@ a gate application, a measurement, a barrier, or a noise channel.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -230,3 +231,46 @@ def _validate_distinct_qubits(qubits: tuple[int, ...], what: str) -> None:
         return
     if len(set(qubits)) != n:
         raise ValueError(f"{what} requires distinct qubits, got duplicate {qubits}.")
+
+
+_GATE_BUILDER: Any = None
+
+
+def _gate_instructions(
+    items: Sequence[tuple[Gate, tuple[int, ...]]], label: str = ""
+) -> list[CircuitInstruction]:
+    """Gate instructions ``(gate, qubits)`` with an optional ``label``.
+
+    The same as ``[CircuitInstruction(type=GATE, gate=g, qubits=qs,
+    label=label) for g, qs in items]``.
+
+    With the C++ extension the plain cases (a :class:`Gate` on one or two
+    distinct non-negative ``int`` qubits) are built field by field, exactly
+    as the dataclass ``__init__`` would set them (its validation cannot fail
+    for them); every other item goes through the constructor.
+    """
+    global _GATE_BUILDER
+    if _GATE_BUILDER is None:
+        from quspect._native_loader import load_core
+
+        try:
+            core = load_core()
+        except ImportError:  # pragma: no cover - broken build
+            core = None
+        builder = None if core is None else getattr(core, "_gate_instructions", None)
+        if builder is None:
+            _GATE_BUILDER = False
+        else:
+
+            def native_builder(
+                items: Sequence[tuple[Gate, tuple[int, ...]]], label: str
+            ) -> list[CircuitInstruction]:
+                return builder(CircuitInstruction, _GATE, Gate, items, label)  # type: ignore[no-any-return]
+
+            _GATE_BUILDER = native_builder
+    if _GATE_BUILDER is False:
+        return [
+            CircuitInstruction(type=_GATE, gate=g, qubits=qs, clbits=(), label=label)
+            for g, qs in items
+        ]
+    return _GATE_BUILDER(items, label)  # type: ignore[no-any-return]
