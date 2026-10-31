@@ -621,4 +621,120 @@ void DagStore::scan_wire(WireId member, std::vector<NodeId>& out) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 状态导出 / 导入
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::vector<std::pair<NodeId, std::int64_t>> PositionsOf(const IdMap<std::int64_t>& map) {
+    std::vector<std::pair<NodeId, std::int64_t>> out;
+    map.for_each([&](std::int64_t k, std::int64_t v) { out.emplace_back(k, v); });
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::shared_ptr<IdMap<std::int64_t>> PositionMap(const std::vector<std::pair<NodeId, std::int64_t>>& entries) {
+    auto map = std::make_shared<IdMap<std::int64_t>>();
+    for (const auto& [k, v] : entries) {
+        (*map)[k] = v;
+    }
+    return map;
+}
+
+}  // namespace
+
+DagState DagStore::export_state() const {
+    DagState st;
+    for (const NodeSlot& s : slots_) {
+        if (s.alive) {
+            st.nodes.push_back(DagState::Node{s.id, s.kind, std::vector<WireId>(s.wires.begin(), s.wires.end())});
+        }
+    }
+    for (std::size_t seq = 0; seq < edges_.size(); ++seq) {
+        if (edges_[seq].alive) {
+            st.edges.push_back(DagState::Edge{static_cast<EdgeSeq>(seq), edges_[seq].edge});
+        }
+    }
+    st.next_seq = next_seq_;
+    wire_input_.for_each([&](std::int64_t w, NodeId n) { st.wire_input.emplace_back(w, n); });
+    ambiguous_wires_.for_each([&](std::int64_t w, std::uint8_t) { st.ambiguous_wires.push_back(w); });
+    wire_count_.for_each([&](std::int64_t w, std::int64_t c) { st.wire_count.emplace_back(w, c); });
+    std::sort(st.wire_input.begin(), st.wire_input.end());
+    std::sort(st.ambiguous_wires.begin(), st.ambiguous_wires.end());
+    std::sort(st.wire_count.begin(), st.wire_count.end());
+    st.num_qubits = num_qubits_;
+    st.num_clbits = num_clbits_;
+    st.version = version_;
+    st.has_positions = static_cast<bool>(pos_);
+    if (pos_) {
+        st.positions = PositionsOf(*pos_);
+    }
+    st.next_pos = next_pos_;
+    st.journal_open = journal_open_;
+    for (const JournalEntry& e : journal_) {
+        DagState::JournalEntry je{static_cast<std::uint8_t>(e.kind), e.key, e.edge, e.old_pos,
+                                  static_cast<bool>(e.positions), {}};
+        if (e.positions) {
+            je.positions = PositionsOf(*e.positions);
+        }
+        st.journal.push_back(std::move(je));
+    }
+    st.txn_depth = txn_depth_;
+    return st;
+}
+
+void DagStore::import_state(const DagState& st) {
+    DagStore fresh;
+    for (const DagState::Node& n : st.nodes) {
+        if (fresh.slot_of_.contains(n.id)) {
+            throw std::invalid_argument("duplicate node id in DAG state");
+        }
+        NodeSlot s;
+        s.id = n.id;
+        s.kind = n.kind;
+        s.alive = true;
+        s.wires.assign(n.wires.begin(), n.wires.end());
+        fresh.slot_of_[n.id] = static_cast<std::int32_t>(fresh.slots_.size());
+        fresh.slots_.push_back(std::move(s));
+        ++fresh.num_alive_;
+    }
+    for (const DagState::Edge& e : st.edges) {
+        if (e.seq < 0 || e.seq >= st.next_seq
+            || (static_cast<std::size_t>(e.seq) < fresh.edges_.size() && fresh.edges_[e.seq].alive)) {
+            throw std::invalid_argument("invalid edge sequence number in DAG state");
+        }
+        fresh.next_seq_ = std::max(fresh.next_seq_, e.seq);
+        fresh.link(e.seq, e.edge);  // 按序号递增加入：邻接表自然有序
+    }
+    fresh.next_seq_ = st.next_seq;
+    for (const auto& [w, n] : st.wire_input) {
+        fresh.wire_input_[w] = n;
+    }
+    for (WireId w : st.ambiguous_wires) {
+        fresh.ambiguous_wires_[w] = 1;
+    }
+    for (const auto& [w, c] : st.wire_count) {
+        fresh.wire_count_[w] = c;
+    }
+    fresh.num_qubits_ = st.num_qubits;
+    fresh.num_clbits_ = st.num_clbits;
+    fresh.version_ = st.version;
+    fresh.topo_valid_ = false;
+    if (st.has_positions) {
+        fresh.pos_ = PositionMap(st.positions);
+    }
+    fresh.next_pos_ = st.next_pos;
+    fresh.journal_open_ = st.journal_open;
+    for (const DagState::JournalEntry& je : st.journal) {
+        if (je.kind > 3) {
+            throw std::invalid_argument("invalid journal entry in DAG state");
+        }
+        fresh.journal_.push_back(JournalEntry{static_cast<JournalKind>(je.kind), je.key, je.edge, je.old_pos,
+                                              je.has_positions ? PositionMap(je.positions) : nullptr});
+    }
+    fresh.txn_depth_ = st.txn_depth;
+    *this = std::move(fresh);
+}
+
 }  // namespace quspect::native::ir

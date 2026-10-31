@@ -6,6 +6,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "quspect_native/ir/id_map.hpp"
@@ -91,6 +92,43 @@ public:
               "Cycle detected in DAG \xe2\x80\x94 this should not happen for circuits built from sequential "
               "instructions.") {
     }
+};
+
+// DagStore 的完整状态（用于拷贝 / 序列化）：节点按插入顺序、边按序号，外加线的簿记、
+// 版本号、增量拓扑编号与事务日志。拓扑序缓存不在其中（按需重算）。
+struct DagState {
+    struct Node {
+        NodeId id;
+        DagNodeKind kind;
+        std::vector<WireId> wires;
+    };
+    struct Edge {
+        EdgeSeq seq;
+        DagEdge edge;
+    };
+    struct JournalEntry {
+        std::uint8_t kind;  // 0 add, 1 remove, 2 pos, 3 位置编号失效
+        std::int64_t key;
+        DagEdge edge;
+        std::int64_t old_pos;
+        bool has_positions;
+        std::vector<std::pair<NodeId, std::int64_t>> positions;
+    };
+    std::vector<Node> nodes;
+    std::vector<Edge> edges;
+    EdgeSeq next_seq = 0;
+    std::vector<std::pair<WireId, NodeId>> wire_input;
+    std::vector<WireId> ambiguous_wires;
+    std::vector<std::pair<WireId, std::int64_t>> wire_count;
+    std::int64_t num_qubits = 0;
+    std::int64_t num_clbits = 0;
+    std::int64_t version = 0;
+    bool has_positions = false;
+    std::vector<std::pair<NodeId, std::int64_t>> positions;
+    std::int64_t next_pos = 0;
+    bool journal_open = false;
+    std::vector<JournalEntry> journal;
+    std::int64_t txn_depth = 0;
 };
 
 class DagStore {
@@ -181,6 +219,11 @@ public:
 
     // 节点 id 是否位于成员线 member 上（加入时记录）。
     bool on_member_wire(NodeId id, WireId member) const noexcept;
+
+    // ---- 状态导出 / 导入（拷贝、序列化） ----
+    DagState export_state() const;
+    // 用 state 替换当前全部内容。抛出 std::invalid_argument：state 不自洽。
+    void import_state(const DagState& state);
 
 private:
     struct NodeSlot {

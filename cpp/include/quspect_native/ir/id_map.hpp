@@ -81,6 +81,19 @@ public:
         return size_;
     }
 
+    // 对每个 (键, 值) 调用 fn（顺序：稠密部分按键递增，然后是哈希表部分，后者顺序不确定）。
+    template <typename F>
+    void for_each(F&& fn) const {
+        for (std::size_t k = 0; k < present_.size(); ++k) {
+            if (present_[k]) {
+                fn(static_cast<std::int64_t>(k), dense_[k]);
+            }
+        }
+        for (const auto& [key, value] : sparse_) {
+            fn(key, value);
+        }
+    }
+
     void clear() {
         dense_.clear();
         present_.clear();

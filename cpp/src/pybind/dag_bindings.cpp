@@ -461,6 +461,146 @@ public:
         return wires;
     }
 
+    // ---- 状态（拷贝 / pickle） ----
+
+    py::tuple get_state() const {
+        const ir::DagState st = store.export_state();
+        py::list nodes;
+        for (const auto& n : st.nodes) {
+            py::list wires;
+            for (WireId w : n.wires) {
+                wires.append(w);
+            }
+            nodes.append(py::make_tuple(n.id, static_cast<int>(n.kind), wires, objects_.find(n.id)->obj));
+        }
+        py::list edges;
+        for (const auto& e : st.edges) {
+            edges.append(py::make_tuple(e.seq, e.edge.source, e.edge.target, e.edge.wire));
+        }
+        auto pairs = [](const auto& v) {
+            py::list out;
+            for (const auto& [a, b] : v) {
+                out.append(py::make_tuple(a, b));
+            }
+            return out;
+        };
+        py::list ambiguous;
+        for (WireId w : st.ambiguous_wires) {
+            ambiguous.append(w);
+        }
+        py::list journal;
+        for (const auto& je : st.journal) {
+            journal.append(py::make_tuple(static_cast<int>(je.kind), je.key, je.edge.source, je.edge.target,
+                                          je.edge.wire, je.old_pos,
+                                          je.has_positions ? py::object(pairs(je.positions)) : py::none()));
+        }
+        py::list labels;
+        for (const auto& entry : other_ids_) {
+            labels.append(py::make_tuple(entry.second, *labels_.find(entry.second)));  // 登记时已保存标签对象
+        }
+        return py::make_tuple(1, nodes, edges, st.next_seq, pairs(st.wire_input), ambiguous, pairs(st.wire_count),
+                              st.num_qubits, st.num_clbits, st.version,
+                              st.has_positions ? py::object(pairs(st.positions)) : py::none(), st.next_pos,
+                              st.journal_open, journal, st.txn_depth, labels, next_other_);
+    }
+
+    void set_state(const py::tuple& t) {
+        if (t.size() != 17 || t[0].cast<int>() != 1) {
+            throw py::value_error("unsupported DAG state");
+        }
+        auto pair_vec = [](const py::handle& h) {
+            std::vector<std::pair<std::int64_t, std::int64_t>> out;
+            for (py::handle item : h) {
+                auto tup = py::reinterpret_borrow<py::tuple>(item);
+                out.emplace_back(tup[0].cast<std::int64_t>(), tup[1].cast<std::int64_t>());
+            }
+            return out;
+        };
+        ir::DagState st;
+        std::vector<std::pair<NodeId, py::object>> node_objs;
+        for (py::handle item : t[1]) {
+            auto tup = py::reinterpret_borrow<py::tuple>(item);
+            ir::DagState::Node n;
+            n.id = tup[0].cast<NodeId>();
+            const int kind = tup[1].cast<int>();
+            if (kind < 0 || kind > 2) {
+                throw py::value_error("invalid node kind in DAG state");
+            }
+            n.kind = static_cast<DagNodeKind>(kind);
+            for (py::handle w : tup[2]) {
+                n.wires.push_back(w.cast<WireId>());
+            }
+            node_objs.emplace_back(n.id, py::reinterpret_borrow<py::object>(tup[3]));
+            st.nodes.push_back(std::move(n));
+        }
+        for (py::handle item : t[2]) {
+            auto tup = py::reinterpret_borrow<py::tuple>(item);
+            st.edges.push_back(ir::DagState::Edge{
+                tup[0].cast<std::int64_t>(),
+                ir::DagEdge{tup[1].cast<NodeId>(), tup[2].cast<NodeId>(), tup[3].cast<WireId>()}});
+        }
+        st.next_seq = t[3].cast<std::int64_t>();
+        st.wire_input = pair_vec(t[4]);
+        for (py::handle w : t[5]) {
+            st.ambiguous_wires.push_back(w.cast<WireId>());
+        }
+        st.wire_count = pair_vec(t[6]);
+        st.num_qubits = t[7].cast<std::int64_t>();
+        st.num_clbits = t[8].cast<std::int64_t>();
+        st.version = t[9].cast<std::int64_t>();
+        st.has_positions = !t[10].is_none();
+        if (st.has_positions) {
+            st.positions = pair_vec(t[10]);
+        }
+        st.next_pos = t[11].cast<std::int64_t>();
+        st.journal_open = t[12].cast<bool>();
+        for (py::handle item : t[13]) {
+            auto tup = py::reinterpret_borrow<py::tuple>(item);
+            ir::DagState::JournalEntry je;
+            je.kind = static_cast<std::uint8_t>(tup[0].cast<int>());
+            je.key = tup[1].cast<std::int64_t>();
+            je.edge = ir::DagEdge{tup[2].cast<NodeId>(), tup[3].cast<NodeId>(), tup[4].cast<WireId>()};
+            je.old_pos = tup[5].cast<std::int64_t>();
+            je.has_positions = !tup[6].is_none();
+            if (je.has_positions) {
+                je.positions = pair_vec(tup[6]);
+            }
+            st.journal.push_back(std::move(je));
+        }
+        st.txn_depth = t[14].cast<std::int64_t>();
+        try {
+            store.import_state(st);
+        } catch (const std::invalid_argument& e) {
+            throw py::value_error(e.what());
+        }
+        // 节点对象与线标签表。
+        PyDict_Clear(nodes_.ptr());
+        objects_.clear();
+        for (std::size_t i = 0; i < node_objs.size(); ++i) {
+            py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(node_objs[i].first));
+            if (PyDict_SetItem(nodes_.ptr(), key.ptr(), node_objs[i].second.ptr()) != 0) {
+                throw py::error_already_set();
+            }
+            NodeEntry& e = objects_[node_objs[i].first];
+            e.obj = node_objs[i].second;
+            e.kind = st.nodes[i].kind;
+        }
+        other_ids_.clear();
+        labels_.clear();
+        for (py::handle item : t[15]) {
+            auto tup = py::reinterpret_borrow<py::tuple>(item);
+            const WireId id = tup[0].cast<WireId>();
+            other_ids_[tup[1].cast<std::string>()] = id;
+            labels_[id] = py::reinterpret_borrow<py::object>(tup[1]);
+        }
+        next_other_ = t[16].cast<WireId>();
+        topo_list_ = py::object();
+        topo_list_version_ = -1;
+        wire_cache_.clear();
+        other_wire_cache_.clear();
+        wire_cache_version_ = -1;
+    }
+
     // ---- 线路 -> DAG（CircuitCompiler.compile 的批量实现） ----
 
     void build_from_instructions(const py::sequence& instructions, std::int64_t num_qubits, std::int64_t num_clbits) {
@@ -983,6 +1123,8 @@ Returns:
             },
             "Return the list of classical bit indices present in this DAG.")
         .def("_wire_sequences", &PyDagCore::wire_sequences, py::arg("cache"))
+        .def("_core_getstate", &PyDagCore::get_state)
+        .def("_core_setstate", &PyDagCore::set_state, py::arg("state"))
         .def("_build_from_instructions", &PyDagCore::build_from_instructions, py::arg("instructions"),
              py::arg("num_qubits"), py::arg("num_clbits"));
 }

@@ -294,3 +294,47 @@ def test_cycle_and_dangling_edges() -> None:
         dag.add_edge(DAGEdge(1, 99, "q0"))
     assert _call(native2, "topological_order") == _call(ref2, "topological_order")
     assert _call(native2, "layers") == _call(ref2, "layers")
+
+
+@pytest.mark.parametrize("make", [DAGCircuit, _PyDAGCircuit])
+@pytest.mark.parametrize("seed", range(4))
+def test_copy_and_pickle_preserve_state(make: Any, seed: int) -> None:
+    import copy
+    import pickle
+
+    rng = random.Random(500 + seed)
+    circuit = _random_circuit(rng, 4, 30)
+    dag = make()
+    dag.set_qubit_count(circuit.num_qubits)
+    dag.set_clbit_count(circuit.num_clbits)
+    dag._build_from_instructions(
+        circuit.instructions, circuit.num_qubits, circuit.num_clbits
+    )
+    dag.add_edge(DAGEdge(0, dag.num_nodes() - 1, "anc"))
+    dag.ensure_topological_positions()
+    ops = [n.node_id for n in dag.operation_nodes()]
+    dag.remove_node_and_reconnect(ops[0])
+    sp = dag.begin_transaction()  # copies carry the open transaction
+    _swap_on_wire(dag, ops[1], f"q{dag.get_node(ops[1]).instruction.qubits[0]}")
+    dag.tag = "user attribute"
+
+    for clone in (
+        copy.deepcopy(dag),
+        pickle.loads(pickle.dumps(dag)),
+        copy.copy(dag),
+    ):
+        assert type(clone) is type(dag)
+        assert clone.tag == "user attribute"
+        _same(clone, dag)
+        assert clone.get_node(ops[1]) == dag.get_node(ops[1])
+        assert clone.has_node(ops[1]) and not clone.has_node(ops[0])
+    deep = copy.deepcopy(dag)
+    assert deep.get_node(ops[1]) is not dag.get_node(ops[1])
+    # the copy rolls back independently and identically
+    before = _snapshot(dag)
+    deep.rollback(sp)
+    deep.end_transaction()
+    assert _snapshot(dag) == before
+    dag.rollback(sp)
+    dag.end_transaction()
+    _same(deep, dag)

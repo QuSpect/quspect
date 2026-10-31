@@ -388,6 +388,14 @@ class _PyDagCore:
                 seq.append(key)
         return wires
 
+    def _core_getstate(self) -> dict[str, Any]:
+        """Return the complete storage state (for copying / pickling)."""
+        return {k: v for k, v in vars(self).items() if k in _PY_CORE_FIELDS}
+
+    def _core_setstate(self, state: dict[str, Any]) -> None:
+        """Replace the storage state with one from :meth:`_core_getstate`."""
+        vars(self).update(state)
+
     def _build_from_instructions(
         self, instructions: Sequence[Any], num_qubits: int, num_clbits: int
     ) -> None:
@@ -1040,6 +1048,9 @@ class _PyDagCore:
         return list(range(self._num_clbits))
 
 
+#: Attributes holding the pure-Python core's storage state.
+_PY_CORE_FIELDS: frozenset[str] = frozenset(vars(_PyDagCore()))
+
 _native: Any = load_core()
 if TYPE_CHECKING:
     _DagCoreBase = _PyDagCore
@@ -1059,10 +1070,44 @@ else:
     _MixinBase = object
 
 
+#: Instance attributes set by :meth:`_DAGCircuitAPI._bind_nodes`.
+_BOUND_FIELDS = frozenset({"_nodes", "get_node", "has_node"})
+
+
 class _DAGCircuitAPI(_MixinBase):
     """Node-level :class:`DAGCircuit` API shared by both storage cores."""
 
     _nodes: dict[int, DAGNode]
+
+    def _bind_nodes(self) -> None:
+        """Bind the node dict and the hot lookups straight to it.
+
+        ``get_node`` / ``has_node`` become the dict's own ``__getitem__`` /
+        ``__contains__`` (same results and ``KeyError`` as the methods they
+        shadow, without a Python frame).
+        """
+        self._nodes = self._nodes_dict()
+        self.get_node = self._nodes.__getitem__  # type: ignore[method-assign,assignment]
+        self.has_node = self._nodes.__contains__  # type: ignore[method-assign,assignment]
+
+    def __getstate__(self) -> tuple[Any, dict[str, Any]]:
+        extra = {
+            k: v
+            for k, v in vars(self).items()
+            if k not in _BOUND_FIELDS and k not in _PY_CORE_FIELDS
+        }
+        return self._core_getstate(), extra
+
+    def __setstate__(self, state: tuple[Any, dict[str, Any]]) -> None:
+        core, extra = state
+        self._core_setstate(core)
+        vars(self).update(extra)
+        self._bind_nodes()
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # ``copy.copy`` / ``copy.deepcopy`` / ``pickle`` all go through this:
+        # a fresh instance receives the (possibly deep-copied) storage state.
+        return (type(self), (), self.__getstate__())
 
     @property
     def nodes(self) -> list[DAGNode]:
@@ -1235,11 +1280,7 @@ class DAGCircuit(_DAGCircuitAPI, _DagCoreBase):
 
     def __init__(self) -> None:
         super().__init__()
-        self._nodes = self._nodes_dict()
-        # Hot lookups bound straight to the node dict (same results and
-        # KeyError as the methods they shadow, without a Python frame).
-        self.get_node = self._nodes.__getitem__  # type: ignore[method-assign,assignment]
-        self.has_node = self._nodes.__contains__  # type: ignore[method-assign,assignment]
+        self._bind_nodes()
 
 
 class _PyDAGCircuit(_DAGCircuitAPI, _PyDagCore):
@@ -1247,4 +1288,4 @@ class _PyDAGCircuit(_DAGCircuitAPI, _PyDagCore):
 
     def __init__(self) -> None:
         super().__init__()
-        self._nodes = self._nodes_dict()
+        self._bind_nodes()
