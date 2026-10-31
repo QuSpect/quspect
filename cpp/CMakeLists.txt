@@ -287,9 +287,16 @@ set(TRANSPILER_SRCS
   src/transpiler/sabre_routing.cpp
   src/transpiler/su4_routing.cpp
 )
+
+# Two-qubit KAK synthesis (numpy-exact small-matrix linear algebra)
+set(SYNTHESIS_SRCS
+  src/synthesis/numpy_compat.cpp
+  src/synthesis/kak_synthesis.cpp
+)
 # 路由计分必须与 Python 参考实现逐位一致：禁止把 a + b * c 合并成 FMA（arm64 上 clang 默认会合并）。
 # QASM 参数表达式求值同理（结果必须与 Python 的 float 运算逐位一致）。
-set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} src/ir/qasm2_parser.cpp)
+# 两比特合成必须与 numpy / CPython 的运算顺序逐位一致（FMA 一律显式写出）。
+set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} src/ir/qasm2_parser.cpp)
 if(NOT MSVC)
   set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
@@ -301,6 +308,7 @@ set(PYBIND_SRCS
   src/pybind/module.cpp
   src/pybind/dag_bindings.cpp
   src/pybind/ir_bindings.cpp
+  src/pybind/synthesis_bindings.cpp
 )
 
 # ============================================================
@@ -330,6 +338,7 @@ set(QSPECT_CORE_SRCS
   ${IR_SRCS}
   ${OPTIMIZATION_SRCS}
   ${TRANSPILER_SRCS}
+  ${SYNTHESIS_SRCS}
 )
 
 # ── 与 dispatch 无关的公共部分 ──
@@ -496,6 +505,7 @@ if(QSPECT_BUILD_TESTS)
     tests/test_dag_store.cpp
     tests/test_ir_circuit.cpp
     tests/test_qasm2_parser.cpp
+    tests/test_kak_synthesis.cpp
   )
 
   foreach(test_src ${TEST_SRCS})

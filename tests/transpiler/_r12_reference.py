@@ -28,6 +28,8 @@ from tests.transpiler._legacy_gauge_r12 import legacy_minimize_single_qubit_gate
 def clear_synthesis_caches() -> None:
     """Empty the exact-input synthesis caches (results depend on the code)."""
     two_qubit._SYNTH_2Q_CACHE.clear()
+    two_qubit._APPROX_2Q_CACHE.clear()
+    two_qubit._SWAP_FACE_CACHE.clear()
     two_qubit._NUM_CZ_CACHE.clear()
     one_qubit_synthesis._SYNTH_1Q_CACHE.clear()
     _consolidate._EULER_CACHE.clear()

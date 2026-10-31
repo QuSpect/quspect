@@ -1,0 +1,251 @@
+"""Native KAK synthesis backend: bit-identical to the Python reference.
+
+The native backend (:mod:`quspect.synthesis._native_kak`) replaces
+``_synthesize_two_qubit_ops``, ``_synthesize_swap_face_block``, the KAK
+count of :func:`num_cz_required` and the "no approximation" decision of
+:func:`synthesize_two_qubit_approx`.  Every result it returns must equal the
+Python reference exactly (gate names, qubits and the ``repr`` of every
+parameter); inputs it cannot reproduce are handed back (``None``).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import quspect.synthesis.two_qubit as tq
+from quspect.synthesis import _native_kak
+from quspect.synthesis.two_qubit import TwoQubitBasis
+
+NATIVE = tq._native_kak()
+
+pytestmark = pytest.mark.skipif(
+    NATIVE is None, reason="native KAK backend not enabled on this platform"
+)
+
+BASES = [TwoQubitBasis(e, x) for e in ("cz", "cx") for x in ("zxz", "zsx")]
+
+_SWAP = np.eye(4, dtype=complex)[[0, 2, 1, 3]]
+_CZ = np.diag([1, 1, 1, -1]).astype(complex)
+
+
+def _haar(rng: np.random.Generator, n: int) -> np.ndarray:
+    q, r = np.linalg.qr(rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n)))
+    return np.asarray(q * (np.diag(r) / np.abs(np.diag(r))))
+
+
+def _local(rng: np.random.Generator) -> np.ndarray:
+    return np.asarray(np.kron(_haar(rng, 2), _haar(rng, 2)))
+
+
+def _zz(theta: float) -> np.ndarray:
+    return np.diag(np.exp(-0.5j * theta * np.array([1, -1, -1, 1])))
+
+
+def _unitaries(seed: int) -> list[np.ndarray]:
+    """Random and structured (degenerate Weyl points, near faces) unitaries."""
+    rng = np.random.default_rng(seed)
+    cores = [
+        np.eye(4, dtype=complex),
+        _CZ,
+        _SWAP,
+        _SWAP @ _zz(0.3),
+        _SWAP @ _CZ,
+        tq.canonical_gate(0.3, 0.3, 0.3),
+        tq.canonical_gate(0.3, 0.3, -0.3),
+        tq.canonical_gate(0.4, 0.2, 0.0),
+        tq.canonical_gate(0.4, 0.0, 0.0),
+        tq.canonical_gate(np.pi / 4, 0.2, -0.1),
+        tq.canonical_gate(0.5, 0.25, 0.25),
+        tq.canonical_gate(0.5, 0.25, -0.25),
+        tq.canonical_gate(1e-10, 0.0, 0.0),
+        np.diag([1, 1, 1, np.exp(1e-6j)]),
+        np.diag([1, 1, 1, np.exp(0.7j)]),
+    ]
+    out = list(cores)
+    out += [_local(rng) @ c @ _local(rng) for c in cores]
+    out += [_haar(rng, 4) for _ in range(12)]
+    return [np.ascontiguousarray(u, dtype=complex) for u in out]
+
+
+def _same(a: object, b: object) -> bool:
+    return repr(a) == repr(b)
+
+
+@pytest.fixture
+def flags(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
+    def set_flags(swap_face: bool, mirrored: bool = True) -> None:
+        monkeypatch.setattr(tq, "_SWAP_FACE_TEMPLATE", swap_face)
+        monkeypatch.setattr(tq, "_MIRRORED_STABILIZERS", mirrored)
+
+    return set_flags
+
+
+@pytest.mark.parametrize("basis", BASES, ids=str)
+@pytest.mark.parametrize("swap_face", [False, True])
+def test_exact_synthesis_matches_python(
+    basis: TwoQubitBasis, swap_face: bool, flags
+) -> None:  # noqa: ANN001
+    flags(swap_face)
+    assert NATIVE is not None
+    fallbacks = 0
+    for u in _unitaries(11):
+        ref = tq._synthesize_two_qubit_ops(u, 1e-9, 1e-9, basis)
+        got = NATIVE.synthesize(u, 1e-9, 1e-9, basis)
+        if got is None:
+            fallbacks += 1
+            continue
+        assert _same(got[0], ref)
+        assert got[1] == tq._uses_swap_face_template(tq._kak4(u)[2], 1e-9)
+    assert fallbacks <= 2
+
+
+@pytest.mark.parametrize("mirrored", [False, True])
+def test_stabilizer_switch_and_exact_euler(mirrored: bool, flags) -> None:  # noqa: ANN001
+    flags(False, mirrored)
+    assert NATIVE is not None
+    for u in _unitaries(5)[:20]:
+        for atol, verify in ((1e-9, 1e-9), (1e-12, 1e-9), (1e-9, 0.0)):
+            try:
+                ref = tq._synthesize_two_qubit_ops(u, atol, verify, BASES[0])
+            except RuntimeError:
+                assert NATIVE.synthesize(u, atol, verify, BASES[0]) is None
+                continue
+            got = NATIVE.synthesize(u, atol, verify, BASES[0])
+            if got is not None:
+                assert _same(got[0], ref)
+
+
+@pytest.mark.parametrize("basis", BASES, ids=str)
+def test_swap_face_block_matches_python(basis: TwoQubitBasis) -> None:
+    assert NATIVE is not None
+    rng = np.random.default_rng(3)
+    for theta in (0.3, -0.7, 1e-3, np.pi / 2, 2.0):
+        for u in (
+            _SWAP @ _zz(theta),
+            _local(rng) @ _SWAP @ _zz(theta) @ _local(rng),
+            _CZ,
+        ):
+            u = np.ascontiguousarray(u)
+            ref = tq._synthesize_swap_face_block(u, basis, 1e-9)
+            got = NATIVE.swap_face(u, basis, 1e-9)
+            assert got is not None
+            assert _same(None if got is False else got, ref)
+
+
+def test_num_cz_and_approximation_match_python() -> None:
+    assert NATIVE is not None
+    for u in _unitaries(17):
+        kak = tq._kak4(u)
+        for atol in (1e-9, 1e-6):
+            assert NATIVE.num_cz(u, atol) == tq._count_from_coords(kak[2], atol)
+        for budget, max_ent in ((1e-12, 2), (1e-6, 0), (0.0, 2)):
+            ref = tq._approximate_two_qubit_ops(u, budget, 1e-9, BASES[0], max_ent)
+            got = NATIVE.approximate(u, budget, 1e-9, 1e-9, BASES[0], max_ent, True)
+            if ref is not None:
+                assert got is None  # 存在近似时交给 Python
+            elif got is not None:
+                assert got[0] is not None
+                assert _same(
+                    got[0], tq._synthesize_two_qubit_ops(u, 1e-9, 1e-9, BASES[0])
+                )
+
+
+def test_kak_factors_and_helpers_are_bitwise() -> None:
+    assert NATIVE is not None
+    synth = NATIVE._synth
+    rng = np.random.default_rng(23)
+    for u in _unitaries(29):
+        ref = tq._kak4(u)
+        got = synth.kak4(u)
+        assert got is not None
+        assert got[0].hex() == ref[0].hex()
+        assert got[1].tobytes() == ref[1].tobytes()
+        assert np.array(got[2]).tobytes() == ref[2].tobytes()
+        assert got[3].tobytes() == ref[3].tobytes()
+        for k in (ref[1], ref[3]):
+            fa, fc = tq._factor_local(k)
+            na, nc = synth.factor_local(k)
+            assert na.tobytes() == fa.tobytes()
+            assert nc.tobytes() == fc.tobytes()
+    paulis = (tq._X, tq._Y, tq._Z)
+    for _ in range(50):
+        a, b = _haar(rng, 2), _haar(rng, 2)
+        assert synth.kron2(a, b).tobytes() == tq._kron2(a, b).tobytes()
+        phi = float(rng.normal())
+        for p in paulis:
+            assert synth.axis_rot(p, phi).tobytes() == tq._axis_rot(p, phi).tobytes()
+            assert synth.axis_angle(a, p).hex() == tq._axis_angle(a, p).hex()
+        for code, name in ((0, "zxz"), (1, "zsx")):
+            for atol in (1e-9, 1e-12):
+                assert _same(
+                    synth.euler_ops(a, 1, code, atol),
+                    tq.euler_ops(a, 1, basis=name, atol=atol),
+                )
+
+
+def test_registered_entangler(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert NATIVE is not None
+    ecr = np.array(
+        [[0, 1, 0, 1j], [1, 0, -1j, 0], [0, 1j, 0, 1], [-1j, 0, 1, 0]]
+    ) / np.sqrt(2)
+    monkeypatch.setitem(tq._ENTANGLERS, "ecr", tq.Entangler.from_matrix("ecr", ecr))
+    basis = TwoQubitBasis("ecr", "zsx")
+    for u in _unitaries(31)[15:25]:
+        ref = tq._synthesize_two_qubit_ops(u, 1e-9, 1e-9, basis)
+        got = NATIVE.synthesize(u, 1e-9, 1e-9, basis)
+        assert got is not None
+        assert _same(got[0], ref)
+
+
+def test_inputs_handed_back_to_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert NATIVE is not None
+    u = _unitaries(2)[20]
+    assert NATIVE.synthesize(np.asfortranarray(u), 1e-9, 1e-9, BASES[0]) is None
+    assert NATIVE.synthesize(u.tolist(), 1e-9, 1e-9, BASES[0]) is None
+    bad = u.copy()
+    bad[0, 0] += 0.1
+    assert NATIVE.synthesize(bad, 1e-9, 1e-9, BASES[0]) is None
+    assert NATIVE.num_cz(bad, 1e-9) is None
+    with pytest.raises(ValueError, match="not unitary"):
+        tq.synthesize_two_qubit_ops(bad)
+    # 测试替换了 Python 实现时不走原生路径
+    monkeypatch.setattr(tq, "_try_synthesize", lambda *a, **k: ([], 0.0))
+    assert NATIVE.synthesize(u, 1e-9, 1e-9, BASES[0]) is None
+
+
+def test_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cached public entry points give the same results with either backend."""
+
+    def run() -> list[object]:
+        for cache in (
+            tq._SYNTH_2Q_CACHE,
+            tq._APPROX_2Q_CACHE,
+            tq._SWAP_FACE_CACHE,
+            tq._NUM_CZ_CACHE,
+        ):
+            cache.clear()
+        out: list[object] = []
+        for u in _unitaries(41)[::3]:
+            out.append(tq.synthesize_two_qubit_ops(u, basis=BASES[1]))
+            out.append(tq.synthesize_two_qubit_approx(u, 1e-12))
+            out.append(tq.synthesize_swap_face_block(u, BASES[2]))
+            out.append(tq.num_cz_required(u))
+            with tq.swap_face_templates():
+                out.append(tq.synthesize_two_qubit_ops(u, basis=BASES[3]))
+        return out
+
+    native = run()
+    monkeypatch.setattr(tq, "_native_kak", lambda: None)
+    python = run()
+    assert repr(native) == repr(python)
+
+
+def test_backend_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(_native_kak.BACKEND_ENV, "python")
+    assert _native_kak.load(tq) is None
+    monkeypatch.setenv(_native_kak.BACKEND_ENV, "bogus")
+    with pytest.raises(ValueError, match=_native_kak.BACKEND_ENV):
+        _native_kak.load(tq)
+    monkeypatch.setenv(_native_kak.BACKEND_ENV, "native")
+    assert _native_kak.load(tq) is not None
