@@ -392,6 +392,7 @@ class NativeKak:
         self._synth = synth
         self._tq = tq
         self._entanglers: dict[str, tuple[object, int]] = {}
+        self._one_qubit: dict[frozenset[str], tuple[object, int, tuple[Any, ...]]] = {}
 
     def _entangler(self, basis: TwoQubitBasis) -> int | None:
         if basis.euler not in _EULER:
@@ -509,12 +510,104 @@ class NativeKak:
         )
         return result  # type: ignore[no-any-return]
 
+    def one_qubit(self, m: np.ndarray, em: Any) -> tuple[bool, list[Any] | None]:
+        """``_synthesize_one_qubit(m, em.basis)`` as ``(True, gates)``.
+
+        ``em`` is the :class:`~quspect.gates.synthesis._Emitter` of the basis;
+        ``(False, None)`` hands the matrix back to the Python reference.
+        """
+        entry = self._one_qubit.get(em.basis)
+        if entry is None or entry[0] is not em:
+            entry = self._register_one_qubit(em)
+            self._one_qubit[em.basis] = entry
+        _, index, makers = entry
+        if index < 0 or m.dtype != _C128 or m.shape != (2, 2):
+            return False, None
+        status, gates = self._call(
+            self._synth.synthesize_one_qubit, np.ascontiguousarray(m), index
+        )
+        if status == 1:
+            return True, None
+        if status != 0:
+            return False, None
+        out = []
+        for kind, idx, p0, p1, p2 in gates:
+            if kind == 0:
+                out.append(makers[0][idx])
+            elif kind == 4:
+                out.append(makers[4](p0, p1, p2))
+            else:
+                out.append(makers[kind](p0))
+        return True, out
+
+    def _register_one_qubit(self, em: Any) -> tuple[object, int, tuple[Any, ...]]:
+        from quspect.gates import synthesis as gs
+        from quspect.gates._matrix_utils import gate_matrix
+        from quspect.gates.standard import SDG, SX, SXDG, TDG, H, S, T, X, Y, Z
+
+        fixed = [H, X, Y, Z, S, SDG, T, TDG, SX, SXDG]
+        index_of = {id(g): i for i, g in enumerate(fixed)}
+        try:
+            words = {k: [index_of[id(g)] for g in w] for k, w in em._clifford_t.items()}
+            named = [index_of[id(g)] for g, _, _ in em.named]
+            special = [g for g in (em.h, em.x, em.sx, em.sxdg) if g is not None]
+            if any(id(g) not in index_of for g in special):
+                raise KeyError
+        except KeyError:
+            return em, -1, ()
+        makers = (fixed, em._rz_maker, em.rx, em.ry, em.u3)
+        mats = [np.asarray(gate_matrix(g), dtype=complex) for g in fixed]
+        index = int(
+            self._synth.add_one_qubit_basis(
+                mats,
+                em._rz_maker is not None,
+                em.h is not None,
+                em.x is not None,
+                em.sx is not None,
+                em.sxdg is not None,
+                em.rx is not None,
+                em.ry is not None,
+                em.u3 is not None,
+                words,
+                named,
+            )
+        )
+        entry = (em, index, makers)
+        if not _check_one_qubit(self, em, entry, gs):
+            logger.debug("native one-qubit synthesis disabled for %s", sorted(em.basis))
+            return em, -1, ()
+        return entry
+
     def num_cz(self, u: object, atol: float) -> int | None:
         """``_count_from_coords(_kak4(u)[2], atol)``."""
         if not self._usable(u):
             return None
         count = int(self._call(self._synth.num_cz, u, atol))
         return None if count < 0 else count
+
+
+def _check_one_qubit(native: NativeKak, em: Any, entry: Any, gs: Any) -> bool:
+    """Compare the native single-qubit synthesis of ``em``'s basis with Python."""
+    rng = random.Random(4321)
+    mats = [np.asarray(gs._sequence_matrix([g]), dtype=complex) for g in entry[2][0]]
+    mats += [np.diag([1, np.exp(0.3j)]), np.array([[0, 1j], [np.exp(0.2j), 0]])]
+    for _ in range(6):
+        g = [complex(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0)) for _ in range(4)]
+        mats.append(np.linalg.qr(np.array(g).reshape(2, 2))[0])
+    mats.append(np.array([[1, 1j], [1j, 1]]) / math.sqrt(2.0) * np.exp(0.7j))
+    native._one_qubit[em.basis] = entry
+    try:
+        for m in mats:
+            m = np.ascontiguousarray(m, dtype=complex)
+            ok, got = native.one_qubit(m, em)
+            if ok and repr(got) != repr(gs._synthesize_one_qubit_reference(m, em)):
+                return False
+    except Exception:  # noqa: BLE001 - 任何异常都视为不一致
+        logger.debug("native one-qubit self-check raised", exc_info=True)
+        return False
+    finally:
+        native._one_qubit.pop(em.basis, None)
+    return True
 
 
 def _normals() -> list[float]:

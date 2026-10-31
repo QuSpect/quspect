@@ -249,3 +249,85 @@ def test_backend_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
         _native_kak.load(tq)
     monkeypatch.setenv(_native_kak.BACKEND_ENV, "native")
     assert _native_kak.load(tq) is not None
+
+
+# ---------------------------------------------------------------------------
+# Single-qubit synthesis (quspect.gates.synthesis)
+# ---------------------------------------------------------------------------
+
+ONE_QUBIT_BASES = [
+    frozenset({"cz", "rz", "sx", "x"}),
+    frozenset({"cz", "h", "rz", "x"}),
+    frozenset({"h", "rz"}),
+    frozenset({"u3", "cx"}),
+    frozenset({"rx", "rz"}),
+    frozenset({"ry", "rz"}),
+    frozenset({"h", "t", "tdg", "s", "sdg", "z", "x"}),
+    frozenset({"h", "s", "t"}),
+    frozenset({"sx", "sxdg", "rz", "x"}),
+    frozenset({"p", "h"}),
+    frozenset({"u1", "sx"}),
+]
+
+
+def _one_qubit_matrices(seed: int) -> list[np.ndarray]:
+    from quspect.gates._matrix_utils import gate_matrix
+    from quspect.gates.parameterized import RX, RZ, U3
+    from quspect.gates.standard import ALL_STANDARD
+
+    rng = np.random.default_rng(seed)
+    out = [_haar(rng, 2) for _ in range(40)]
+    out += [gate_matrix(g) for g in ALL_STANDARD if g.num_qubits == 1]
+    h = gate_matrix(next(g for g in ALL_STANDARD if g.name == "h"))
+    for k in range(-8, 9):
+        angle = k * np.pi / 4
+        out.append(gate_matrix(RZ.with_params(angle)))
+        out.append(h @ gate_matrix(RZ.with_params(angle)) @ h)
+        out.append(gate_matrix(RZ.with_params(angle + 1e-10)))
+        out.append(gate_matrix(RX.with_params(angle)))
+        out.append(gate_matrix(U3.with_params(np.pi / 2, 0.3 * k, -0.2 * k)))
+        out.append(gate_matrix(U3.with_params(np.pi, 0.3 * k, 0.1)))
+        out.append(gate_matrix(U3.with_params(1e-11, 0.3 * k, 0.1)))
+    return [np.ascontiguousarray(m, dtype=complex) for m in out]
+
+
+@pytest.mark.parametrize("basis", ONE_QUBIT_BASES, ids=lambda b: "-".join(sorted(b)))
+def test_one_qubit_synthesis_matches_python(basis: frozenset[str]) -> None:
+    from quspect.gates import synthesis as gs
+
+    assert NATIVE is not None
+    em = gs._EMITTERS.get(basis) or gs._EMITTERS.setdefault(basis, gs._Emitter(basis))
+    for m in _one_qubit_matrices(7):
+        done, got = NATIVE.one_qubit(m, em)
+        assert done
+        assert _same(got, gs._synthesize_one_qubit_reference(m, em))
+    # 不能复刻的输入交回 Python
+    bad = np.array([[np.nan, 0], [0, 1]], dtype=complex)
+    assert NATIVE.one_qubit(bad, em) == (False, None)
+
+
+def test_one_qubit_zyz_angles_are_bitwise() -> None:
+    from quspect.dag.passes.single_qubit_fusion import _decompose_u3
+
+    assert NATIVE is not None
+    for m in _one_qubit_matrices(13):
+        ref = _decompose_u3(m)
+        got = NATIVE._synth.zyz_angles(m)
+        assert [x.hex() for x in got] == [float(x).hex() for x in ref]
+
+
+def test_one_qubit_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    from quspect.gates import synthesis as gs
+
+    def run() -> list[object]:
+        gs._SYNTH_1Q_CACHE.clear()
+        return [
+            gs.synthesize_one_qubit(m, b)
+            for m in _one_qubit_matrices(19)[::4]
+            for b in ONE_QUBIT_BASES
+        ]
+
+    native = run()
+    monkeypatch.setattr(gs, "_native_backend", lambda: None)
+    python = run()
+    assert repr(native) == repr(python)

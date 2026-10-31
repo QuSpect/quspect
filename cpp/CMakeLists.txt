@@ -292,6 +292,7 @@ set(TRANSPILER_SRCS
 set(SYNTHESIS_SRCS
   src/synthesis/numpy_compat.cpp
   src/synthesis/kak_synthesis.cpp
+  src/synthesis/one_qubit_synthesis.cpp
 )
 # 路由计分必须与 Python 参考实现逐位一致：禁止把 a + b * c 合并成 FMA（arm64 上 clang 默认会合并）。
 # QASM 参数表达式求值同理（结果必须与 Python 的 float 运算逐位一致）。

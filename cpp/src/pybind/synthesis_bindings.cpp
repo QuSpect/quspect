@@ -4,6 +4,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -14,6 +15,7 @@
 
 #include "quspect_native/synthesis/kak_synthesis.hpp"
 #include "quspect_native/synthesis/numpy_compat.hpp"
+#include "quspect_native/synthesis/one_qubit_synthesis.hpp"
 
 namespace py = pybind11;
 
@@ -267,6 +269,78 @@ class PyKakSynthesizer {
         }
     }
 
+    // ---- 单比特合成 ----
+    int AddOneQubitBasis(const py::list& fixed, bool rz, bool h, bool x, bool sx, bool sxdg, bool rx, bool ry,
+                         bool u3, const py::dict& words, const std::vector<int>& named) {
+        if (!one_qubit_) {
+            if (fixed.size() != kNumFixedGates) {
+                throw std::invalid_argument("need the matrices of the 10 fixed gates");
+            }
+            std::array<M2, kNumFixedGates> mats;
+            for (std::size_t i = 0; i < mats.size(); ++i) {
+                mats[i] = ToMatrix<4>(fixed[i].cast<ComplexArray>());
+            }
+            one_qubit_ = std::make_unique<OneQubitSynthesizer>(impl_.linalg().modes(), mats);
+        }
+        OneQubitBasis b;
+        b.rz = rz;
+        b.h = h;
+        b.x = x;
+        b.sx = sx;
+        b.sxdg = sxdg;
+        b.rx = rx;
+        b.ry = ry;
+        b.u3 = u3;
+        for (const auto item : words) {
+            const int k = item.first.cast<int>();
+            if (k < -4 || k > 4) {
+                throw std::invalid_argument("Clifford+T word index out of range");
+            }
+            b.has_word[static_cast<std::size_t>(k + 4)] = true;
+            b.words[static_cast<std::size_t>(k + 4)] = item.second.cast<std::vector<int>>();
+        }
+        for (int g : named) {
+            if (g < 0 || g >= kNumFixedGates) {
+                throw std::invalid_argument("bad fixed gate index");
+            }
+        }
+        b.named = named;
+        one_qubit_bases_.push_back(std::move(b));
+        return static_cast<int>(one_qubit_bases_.size()) - 1;
+    }
+
+    // _synthesize_one_qubit：(0, [(kind, index, p0, p1, p2), ...])；(1, None) = Python 返回 None；
+    // (2, None) = 交给 Python。
+    py::tuple SynthesizeOneQubit(const ComplexArray& m, int basis) const {
+        last_fallback_.clear();
+        if (!one_qubit_ || basis < 0 || static_cast<std::size_t>(basis) >= one_qubit_bases_.size()) {
+            throw std::invalid_argument("unknown single-qubit basis");
+        }
+        try {
+            const auto gates = one_qubit_->Synthesize(ToMatrix<4>(m), one_qubit_bases_[static_cast<std::size_t>(basis)]);
+            if (!gates) {
+                return py::make_tuple(1, py::none());
+            }
+            py::list out(gates->size());
+            for (std::size_t i = 0; i < gates->size(); ++i) {
+                const Gate1& g = (*gates)[i];
+                out[i] = py::make_tuple(g.kind, g.index, g.p0, g.p1, g.p2);
+            }
+            return py::make_tuple(0, out);
+        } catch (const Fallback& e) {
+            last_fallback_ = e.what();
+            return py::make_tuple(2, py::none());
+        }
+    }
+
+    py::tuple ZyzAngles(const ComplexArray& m) const {
+        if (!one_qubit_) {
+            throw std::invalid_argument("no single-qubit basis registered");
+        }
+        const auto a = one_qubit_->ZyzAngles(ToMatrix<4>(m));
+        return py::make_tuple(a[0], a[1], a[2]);
+    }
+
     // ---- 对拍用 ----
     py::object Kak4(const ComplexArray& u) const {
         try {
@@ -359,6 +433,8 @@ class PyKakSynthesizer {
     OpConverter conv_;
     std::vector<py::str> names_;
     mutable std::string last_fallback_;
+    std::unique_ptr<OneQubitSynthesizer> one_qubit_;
+    std::vector<OneQubitBasis> one_qubit_bases_;
 };
 
 // 逐元素运算的各种运算顺序（探测 numpy / CPython 的实际语义用）：op 0 = 乘法（mode 0–2），1 = numpy
@@ -458,6 +534,11 @@ void BindSynthesis(py::module_& m) {
         .def("swap_face", &PyKakSynthesizer::SwapFace, py::arg("u"), py::arg("entangler"), py::arg("euler"),
              py::arg("verify_atol"), py::arg("mirrored"))
         .def("num_cz", &PyKakSynthesizer::NumCz, py::arg("u"), py::arg("atol"))
+        .def("add_one_qubit_basis", &PyKakSynthesizer::AddOneQubitBasis, py::arg("fixed"), py::arg("rz"), py::arg("h"),
+             py::arg("x"), py::arg("sx"), py::arg("sxdg"), py::arg("rx"), py::arg("ry"), py::arg("u3"), py::arg("words"),
+             py::arg("named"))
+        .def("synthesize_one_qubit", &PyKakSynthesizer::SynthesizeOneQubit, py::arg("m"), py::arg("basis"))
+        .def("zyz_angles", &PyKakSynthesizer::ZyzAngles, py::arg("m"))
         .def("kak4", &PyKakSynthesizer::Kak4, py::arg("u"))
         .def("factor_local", &PyKakSynthesizer::FactorLocal, py::arg("k"))
         .def("euler_ops", &PyKakSynthesizer::EulerOps, py::arg("m"), py::arg("qubit"), py::arg("basis"),

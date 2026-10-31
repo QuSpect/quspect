@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Collection
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from quspect.gates.gate import Gate
 from quspect.synthesis._memo import BoundedCache, matrix_key
+
+if TYPE_CHECKING:
+    from quspect.synthesis._native_kak import NativeKak
 
 #: Absolute tolerance on angles / matrix entries.
 _ATOL: float = 1e-9
@@ -356,6 +360,23 @@ def _synthesize_one_qubit(m: np.ndarray, basis: frozenset[str]) -> list[Gate] | 
     em = _EMITTERS.get(basis)
     if em is None:
         em = _EMITTERS[basis] = _Emitter(basis)
+    native = _native_backend()
+    if native is not None:
+        # 原生实现与下面的 Python 实现逐位一致；不能复刻的输入交回 Python
+        done, gates = native.one_qubit(m, em)
+        if done:
+            return gates
+    return _synthesize_one_qubit_reference(m, em)
+
+
+def _native_backend() -> NativeKak | None:
+    from quspect.synthesis.two_qubit import _native_kak
+
+    return _native_kak()
+
+
+def _synthesize_one_qubit_reference(m: np.ndarray, em: _Emitter) -> list[Gate] | None:
+    """Python reference of :func:`_synthesize_one_qubit` for the emitter ``em``."""
     best: list[Gate] | None = None
     for cand in _candidates(m, em):
         if cand is None:

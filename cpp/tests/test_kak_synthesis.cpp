@@ -17,6 +17,7 @@
 
 #include "quspect_native/synthesis/kak_synthesis.hpp"
 #include "quspect_native/synthesis/numpy_compat.hpp"
+#include "quspect_native/synthesis/one_qubit_synthesis.hpp"
 
 namespace {
 
@@ -791,6 +792,103 @@ TEST(KakSynthesizer, ApproximationFilterAndUnitarityCheck) {
     bad[0] = 2.0;
     EXPECT_THROW(s.CheckUnitary(ToArr<16>(bad)), Fallback);
     EXPECT_NO_THROW(s.CheckUnitary(ToArr<16>(kCZ)));
+}
+
+// ---- 单比特合成 ------------------------------------------------------------------
+
+std::array<M2, kNumFixedGates> FixedMatrices() {
+    const C t = std::exp(C(0, 3.141592653589793 / 4));
+    const std::vector<CM> mats = {kH, kX, kY, kZ, kSg, {1, 0, 0, C(0, -1)}, {1, 0, 0, t},
+                                  {1, 0, 0, std::conj(t)}, kSX, Dagger(kSX)};
+    std::array<M2, kNumFixedGates> out;
+    for (int i = 0; i < kNumFixedGates; ++i) {
+        out[static_cast<std::size_t>(i)] = ToArr<4>(mats[static_cast<std::size_t>(i)]);
+    }
+    return out;
+}
+
+CM Gate1Matrix(const Gate1& g, const std::array<M2, kNumFixedGates>& fixed) {
+    switch (g.kind) {
+        case 0:
+            return FromArr(fixed[static_cast<std::size_t>(g.index)]);
+        case 1:
+            return {std::exp(C(0, -g.p0 / 2)), 0, 0, std::exp(C(0, g.p0 / 2))};
+        case 2:
+            return {std::cos(g.p0 / 2), C(0, -std::sin(g.p0 / 2)), C(0, -std::sin(g.p0 / 2)), std::cos(g.p0 / 2)};
+        case 3:
+            return {std::cos(g.p0 / 2), -std::sin(g.p0 / 2), std::sin(g.p0 / 2), std::cos(g.p0 / 2)};
+        default: {
+            const double c = std::cos(g.p0 / 2);
+            const double s = std::sin(g.p0 / 2);
+            return {c, -s * std::exp(C(0, g.p2)), s * std::exp(C(0, g.p1)), c * std::exp(C(0, g.p1 + g.p2))};
+        }
+    }
+}
+
+TEST(OneQubitSynthesizer, SynthesizesInSeveralBases) {
+    const auto fixed = FixedMatrices();
+    const OneQubitSynthesizer synth(ArithModes{}, fixed);
+    OneQubitBasis zxz;  // {rz, h, x}
+    zxz.rz = zxz.h = zxz.x = true;
+    zxz.named = {kGateH, kGateX};
+    OneQubitBasis zsx;  // {rz, sx, x}
+    zsx.rz = zsx.sx = zsx.x = true;
+    zsx.named = {kGateX, kGateSX};
+    OneQubitBasis u3;
+    u3.u3 = true;
+    OneQubitBasis clifford_t;  // {h, s, t}：只能表示 Clifford+T
+    clifford_t.h = true;
+    clifford_t.named = {kGateH, kGateS, kGateT};
+    clifford_t.has_word[1 + 4] = true;
+    clifford_t.words[1 + 4] = {kGateT};
+    clifford_t.has_word[2 + 4] = true;
+    clifford_t.words[2 + 4] = {kGateS};
+    clifford_t.has_word[3 + 4] = true;
+    clifford_t.words[3 + 4] = {kGateS, kGateT};
+    std::mt19937_64 rng(17);
+    std::vector<CM> mats = {kI2, kH, kX, kSX, kSg};
+    for (int i = 0; i < 8; ++i) {
+        mats.push_back(RandomUnitary(rng, 2));
+    }
+    for (const OneQubitBasis* basis : {&zxz, &zsx, &u3}) {
+        for (const CM& m : mats) {
+            if (basis == &u3 && std::abs(m[1]) < 1e-12 && std::abs(m[0] - m[3]) > 1e-9) {
+                // 没有 rz 类门时对角矩阵只能走 rz（与 Python 相同：无法表示）
+                EXPECT_FALSE(synth.Synthesize(ToArr<4>(m), *basis).has_value());
+                continue;
+            }
+            const auto gates = synth.Synthesize(ToArr<4>(m), *basis);
+            ASSERT_TRUE(gates.has_value());
+            CM rebuilt = kI2;
+            for (const Gate1& g : *gates) {
+                rebuilt = MatMul(Gate1Matrix(g, fixed), rebuilt);
+            }
+            EXPECT_LT(DistanceUpToPhase(rebuilt, m), 1e-9);
+            EXPECT_LE(gates->size(), 5u);
+        }
+    }
+    // 恒等、具名门
+    EXPECT_TRUE(synth.Synthesize(ToArr<4>(kI2), zxz)->empty());
+    const auto h = synth.Synthesize(ToArr<4>(kH), zxz);
+    ASSERT_EQ(h->size(), 1u);
+    EXPECT_EQ((*h)[0].index, kGateH);
+    // Clifford+T：S·T 可以表示，随机酉矩阵不行
+    const CM st = MatMul(FromArr(fixed[kGateT]), FromArr(fixed[kGateS]));
+    EXPECT_TRUE(synth.Synthesize(ToArr<4>(st), clifford_t).has_value());
+    EXPECT_FALSE(synth.Synthesize(ToArr<4>(mats.back()), clifford_t).has_value());
+}
+
+TEST(OneQubitSynthesizer, ZyzAnglesRebuildTheMatrix) {
+    const OneQubitSynthesizer synth(ArithModes{}, FixedMatrices());
+    std::mt19937_64 rng(23);
+    for (int i = 0; i < 20; ++i) {
+        const CM m = RandomUnitary(rng, 2);
+        const auto a = synth.ZyzAngles(ToArr<4>(m));
+        const Gate1 g{4, 0, a[0], a[1], a[2]};
+        EXPECT_LT(DistanceUpToPhase(Gate1Matrix(g, FixedMatrices()), m), 1e-12);
+        EXPECT_GE(a[1], 0.0);
+        EXPECT_LT(a[1], 2 * 3.141592653589793);
+    }
 }
 
 }  // namespace
