@@ -289,6 +289,8 @@ class _Native:
     def __init__(self, core: Any, length: _LengthModel) -> None:
         named = np.array(length.named_entries, dtype=complex).reshape(-1, 2, 2)
         self.core = core
+        #: Whether :func:`orient_cx_gates` may use these kernels.
+        self.orientation = True
         self.model = core._GaugeLengthModel(
             length.h, length.x, length.sx, length.sxdg, named
         )
@@ -351,9 +353,46 @@ def _native_kernels(length: _LengthModel) -> _Native | None:
         core = None
     if core is not None and hasattr(core, "_GaugeBeamSearch"):
         native = _Native(core, length)
-        if not _self_check(native, length):  # pragma: no cover - platform specific
-            native = None
+        if _ARITHMETIC[0] == "probed" or not _self_check(native, length):
+            native = _probed_kernels(core, length)
     _NATIVE_CACHE[length.basis] = native
+    return native
+
+
+#: Arithmetic of the native kernels: ``"default"`` (the CPython / numpy
+#: evaluation orders of the arm64 builds the kernels were written for) or
+#: ``"probed"`` once :func:`_probed_kernels` switched the (process-wide)
+#: kernels to the orders probed by the native KAK backend.
+_ARITHMETIC: list[str] = ["default"]
+
+
+def _probed_kernels(core: Any, length: _LengthModel) -> _Native | None:
+    """Kernels using the complex-arithmetic orders this platform's numpy and
+    CPython actually use (as probed by the native KAK backend), or ``None``.
+
+    Used when the default orders fail the self-check (e.g. Linux x86_64,
+    where CPython and numpy scalars do not contract to FMA).  Only the beam
+    search of :func:`_minimize` uses these kernels: its native and Python
+    paths give identical circuits.  The global CX orientation
+    (:func:`orient_cx_gates`, native only) stays disabled, as it is whenever
+    the default kernels are unavailable, so results do not change.
+    """
+    if not hasattr(core, "_gauge_arithmetic"):
+        return None
+    from quspect.synthesis.two_qubit import _native_kak
+
+    kak = _native_kak()
+    if kak is None:
+        return None
+    if _ARITHMETIC[0] != "probed":
+        core._gauge_arithmetic(kak._synth)
+        _ARITHMETIC[0] = "probed"
+        # 已按默认运算顺序自检过的内核不再适用：重新检查
+        _NATIVE_CACHE.clear()
+    native = _Native(core, length)
+    native.orientation = False
+    if not _self_check(native, length):  # pragma: no cover - platform specific
+        return None
     return native
 
 
@@ -543,7 +582,11 @@ def orient_cx_gates(
     if not length.fast or _gauge_backend() == "python":
         return circuit
     native = _native_kernels(length)
-    if native is None or not hasattr(native.core, "_cx_orientation"):
+    if (
+        native is None
+        or not native.orientation
+        or not hasattr(native.core, "_cx_orientation")
+    ):
         return circuit
     instrs = circuit.instructions
     cx_instr: list[int] = []

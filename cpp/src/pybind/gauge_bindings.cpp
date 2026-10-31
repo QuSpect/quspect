@@ -943,6 +943,31 @@ Matrix2 ArgMatrix(const py::handle& obj) {
 
 void BindGauge(py::module_& m) {
     m.def(
+        "_gauge_arithmetic",
+        [](const py::object& synth) {
+            transpiler::GaugeArithmetic a;  // 默认（arm64 上 clang 的形式）
+            if (!synth.is_none()) {
+                const synthesis::NumpyLinalg* la = KakLinalg(synth);
+                if (la == nullptr) {
+                    throw std::invalid_argument("synth must be a _KakSynthesizer or None");
+                }
+                const synthesis::ArithModes& modes = la->modes();
+                a.py_mul = static_cast<int>(modes.py);
+                a.np_scalar_mul = static_cast<int>(modes.np_scalar);
+                a.scalar_arr_mul = static_cast<int>(modes.scalar_arr);
+                // CPython 的复数除法与乘法由同一个编译器、同样的选项编译：收缩与否相同
+                a.py_div_fma = modes.py != synthesis::MulMode::kPlain;
+                a.np_div_fma = modes.np_div == synthesis::DivMode::kFma;
+            }
+            transpiler::SetGaugeArithmetic(a);
+            return py::make_tuple(a.py_mul, a.np_scalar_mul, a.scalar_arr_mul, a.py_div_fma, a.np_div_fma);
+        },
+        py::arg("synth"),
+        "Set the complex-arithmetic semantics of the single-qubit minimization kernels: the defaults (None) "
+        "or the orders probed by a _KakSynthesizer. Returns (py_mul, np_scalar_mul, scalar_arr_mul, "
+        "py_div_fma, np_div_fma).");
+
+    m.def(
         "_gauge_minimize",
         [](const py::sequence& instrs, const transpiler::LengthModel& model, const py::object& synth,
            const py::object& one_qubit, const py::object& matrix_of, const py::object& axes_of,
