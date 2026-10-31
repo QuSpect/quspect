@@ -106,9 +106,7 @@ bool SameBits(const A& a, const B& b) noexcept {
 
 // dag.nodes_on_wire("q<i>")：沿线遍历，不是简单链时退回扫描拓扑序。
 void NodesOnWire(DagStore& dag, WireId wire, std::vector<NodeId>& out) {
-    if (!dag.walk_wire(wire, wire, out)) {
-        dag.scan_wire(wire, out);
-    }
+    dag.nodes_on_wire(wire, out);
 }
 
 std::string WireLabel(WireId w) {
@@ -288,6 +286,8 @@ bool CancelOnWire(DagStore& dag, DagPassHost& host, WireId wire, IdMap<std::uint
     if (gates.size() < 2) {
         return false;
     }
+    // gate_nodes 只会删除当前位置的两个元素（del gate_nodes[i : i + 2]），位置不回退：
+    // 删除后的列表从 i 起就是原数组 i + 2 之后的部分，所以只移动下标、不搬动元素。
     bool canceled = false;
     std::size_t i = 0;
     while (i + 1 < gates.size()) {
@@ -312,8 +312,7 @@ bool CancelOnWire(DagStore& dag, DagPassHost& host, WireId wire, IdMap<std::uint
             RemoveNodePair(dag, host, a, b, buf);
             removed[a] = 1;
             removed[b] = 1;
-            gates.erase(gates.begin() + static_cast<std::ptrdiff_t>(i),
-                        gates.begin() + static_cast<std::ptrdiff_t>(i + 2));
+            i += 2;
             canceled = true;
         } else {
             i += 1;
@@ -557,30 +556,33 @@ bool MergeOnWire(DagStore& dag, DagPassHost& host, WireId wire, std::vector<Node
     if (gates.size() < 2) {
         return false;
     }
+    // gate_nodes 只会删除 i + 1 处的元素（del gate_nodes[i + 1]）：用 next 指向原数组中
+    // 当前位置之后的第一个未删除元素，删除即 next 前移，不搬动元素。
     bool merged = false;
     std::size_t i = 0;
-    while (i + 1 < gates.size()) {
+    std::size_t next = 1;
+    while (next < gates.size()) {
         const NodeId a = gates[i];
-        const NodeId b = gates[i + 1];
+        const NodeId b = gates[next];
         const PassNode& na = host.node(a);
         const PassNode& nb = host.node(b);
         if (na.type == PassInstrType::kNone || nb.type == PassInstrType::kNone || !na.has_gate || !nb.has_gate) {
-            i += 1;
+            i = next++;
             continue;
         }
         const std::int32_t family_a = RotationFamily(na.name);
         const std::int32_t family_b = RotationFamily(nb.name);
         if (family_a == kNameNone || family_b == kNameNone || family_a != family_b) {
-            i += 1;
+            i = next++;
             continue;
         }
         // _get_rotation_angle：第一个参数为具体数值时取 float(params[0])。
         if (na.params.empty() || na.concrete[0] == 0 || nb.params.empty() || nb.concrete[0] == 0) {
-            i += 1;
+            i = next++;
             continue;
         }
         if (!dag.has_edge(a, b, wire)) {
-            i += 1;
+            i = next++;
             continue;
         }
         const double merged_angle = na.params[0] + nb.params[0];
@@ -590,7 +592,7 @@ bool MergeOnWire(DagStore& dag, DagPassHost& host, WireId wire, std::vector<Node
         }
         host.substitute_rotation(a, gate_name, merged_angle);
         RemoveNodeOnWire(dag, host, b, wire);
-        gates.erase(gates.begin() + static_cast<std::ptrdiff_t>(i + 1));
+        ++next;
         merged = true;
     }
     return merged;

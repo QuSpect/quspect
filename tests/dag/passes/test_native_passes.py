@@ -47,8 +47,17 @@ _BASIS = frozenset({"cz", "h", "rz", "x", "sx", "s", "sdg", "t", "tdg", "y", "z"
 
 def _state(dag: DAGCircuit) -> tuple[object, ...]:
     st = dag._core_getstate()  # type: ignore[attr-defined]
-    nodes = [(n[0], n[1], tuple(n[2]), repr(n[3].instruction)) for n in st[1]]
+    nodes = [(n[0], n[1], tuple(n[2]), _fields(n[3].instruction)) for n in st[1]]
     return (nodes, *st[2:])
+
+
+def _fields(instr: object) -> object:
+    """Instruction value, type and attribute layout (also for native objects)."""
+    if instr is None:
+        return None
+    gate = instr.gate  # type: ignore[attr-defined]
+    gate_vars = None if gate is None else (type(gate), list(vars(gate).items()))
+    return (repr(instr), type(instr), list(vars(instr)), gate_vars, hash(instr))
 
 
 def _pipeline(basis: frozenset[str] | None = _BASIS) -> list[object]:

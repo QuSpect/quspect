@@ -1,7 +1,6 @@
 #include "quspect_native/ir/dag_store.hpp"
 
 #include <algorithm>
-#include <unordered_set>
 
 namespace quspect::native::ir {
 
@@ -36,20 +35,6 @@ void EraseBySeq(DagStore::AdjList& list, EdgeSeq seq) noexcept {
     }
 }
 
-// 搜索中的访问标记集合。
-class SeenSet {
-public:
-    void insert(NodeId id) {
-        set_.insert(id);
-    }
-    bool contains(NodeId id) const {
-        return set_.count(id) > 0;
-    }
-
-private:
-    std::unordered_set<NodeId> set_;
-};
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -76,6 +61,7 @@ void DagStore::add_node(NodeId id, DagNodeKind kind, const WireId* wires, std::s
     for (std::size_t i = 0; i < num_wires; ++i) {
         const WireId w = wires[i];
         wire_count_[w] += 1;
+        bump_wire(w);
         if (kind == DagNodeKind::kInput) {
             if (wire_input_.contains(w)) {
                 ambiguous_wires_[w] = 1;
@@ -99,6 +85,7 @@ void DagStore::remove_node(NodeId id) {
     NodeSlot& s = slots_[idx];
     for (WireId w : s.wires) {
         wire_count_[w] -= 1;
+        bump_wire(w);
         if (s.kind == DagNodeKind::kInput) {
             ambiguous_wires_[w] = 1;
         }
@@ -210,6 +197,7 @@ void DagStore::link(EdgeSeq seq, const DagEdge& edge) {
     }
     edges_[k] = EdgeRec{edge, true};
     ++num_edges_;
+    bump_wire(edge.wire);
     const DagAdj out_entry{seq, edge.target, edge.wire};
     const DagAdj in_entry{seq, edge.source, edge.wire};
     if (seq >= next_seq_) {
@@ -229,6 +217,7 @@ DagEdge DagStore::unlink(EdgeSeq seq) {
     rec.alive = false;
     --num_edges_;
     const DagEdge edge = rec.edge;
+    bump_wire(edge.wire);
     if (Adjacency* a = adj_.find(edge.source)) {
         EraseBySeq(a->out, seq);
     }
@@ -475,11 +464,15 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
         return true;  // 已经与新顺序一致
     }
 
-    // 从 first 向前搜索，以 second 的编号为界。
-    std::vector<NodeId> forward{first};
-    SeenSet seen_f;
-    seen_f.insert(first);
-    std::vector<NodeId> stack{first};
+    // 从 first 向前搜索，以 second 的编号为界。访问标记用按代编号的标记表（不逐次分配）。
+    const std::uint64_t mark_f = ++mark_generation_;
+    const std::uint64_t mark_b = ++mark_generation_;
+    std::vector<NodeId>& forward = pk_forward_;
+    std::vector<NodeId>& backward = pk_backward_;
+    std::vector<NodeId>& stack = pk_stack_;
+    forward.assign(1, first);
+    mark_[first] = mark_f;
+    stack.assign(1, first);
     while (!stack.empty()) {
         const NodeId nid = stack.back();
         stack.pop_back();
@@ -487,10 +480,11 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
             if (e.nbr == second) {
                 return false;
             }
-            if (!seen_f.contains(e.nbr)) {
+            std::uint64_t& m = mark_[e.nbr];
+            if (m != mark_f) {
                 const std::int64_t* p = pos.find(e.nbr);
                 if (p != nullptr && *p < ub) {
-                    seen_f.insert(e.nbr);
+                    m = mark_f;
                     forward.push_back(e.nbr);
                     stack.push_back(e.nbr);
                 }
@@ -498,18 +492,18 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
         }
     }
     // 从 second 向后搜索，以 first 的编号为界。
-    std::vector<NodeId> backward{second};
-    SeenSet seen_b;
-    seen_b.insert(second);
+    backward.assign(1, second);
+    mark_[second] = mark_b;
     stack.assign(1, second);
     while (!stack.empty()) {
         const NodeId nid = stack.back();
         stack.pop_back();
         for (const DagAdj& e : in_adj(nid)) {
-            if (!seen_b.contains(e.nbr)) {
+            std::uint64_t& m = mark_[e.nbr];
+            if (m != mark_b) {
                 const std::int64_t* p = pos.find(e.nbr);
                 if (p != nullptr && *p > lb) {
-                    seen_b.insert(e.nbr);
+                    m = mark_b;
                     backward.push_back(e.nbr);
                     stack.push_back(e.nbr);
                 }
@@ -520,10 +514,10 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
     auto by_pos = [&pos](NodeId a, NodeId b) { return *pos.find(a) < *pos.find(b); };
     std::stable_sort(backward.begin(), backward.end(), by_pos);
     std::stable_sort(forward.begin(), forward.end(), by_pos);
-    std::vector<NodeId> moved = std::move(backward);
+    std::vector<NodeId>& moved = backward;
     moved.insert(moved.end(), forward.begin(), forward.end());
-    std::vector<std::int64_t> slots;
-    slots.reserve(moved.size());
+    std::vector<std::int64_t>& slots = pk_slots_;
+    slots.clear();
     for (NodeId nid : moved) {
         slots.push_back(*pos.find(nid));
     }
@@ -615,6 +609,23 @@ bool DagStore::walk_wire(WireId wire, std::optional<WireId> member, std::vector<
         nid = *nxt;
     }
     return out.size() == expected;
+}
+
+void DagStore::nodes_on_wire(WireId wire, std::vector<NodeId>& out) {
+    const std::uint64_t version = wire_version(wire);
+    WalkCache& cache = walk_cache_[wire];
+    if (cache.valid && cache.version == version) {
+        out.assign(cache.nodes.begin(), cache.nodes.end());
+        return;
+    }
+    if (walk_wire(wire, wire, out)) {
+        cache.nodes.assign(out.begin(), out.end());
+        cache.version = version;
+        cache.valid = true;
+        return;
+    }
+    cache.valid = false;
+    scan_wire(wire, out);
 }
 
 void DagStore::scan_wire(WireId member, std::vector<NodeId>& out) {

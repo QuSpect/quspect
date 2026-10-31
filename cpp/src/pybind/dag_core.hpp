@@ -12,6 +12,8 @@
 
 #include <pybind11/pybind11.h>
 
+#include "py_interned.hpp"
+
 #include "quspect_native/ir/dag_passes.hpp"
 #include "quspect_native/ir/dag_store.hpp"
 #include "quspect_native/ir/id_map.hpp"
@@ -48,16 +50,16 @@ inline void RequireRegistry() {
 
 // 预先驻留的属性名。
 struct Names {
-    py::str node_id{"node_id"};
-    py::str node_type{"node_type"};
-    py::str instruction{"instruction"};
-    py::str qubits{"qubits"};
-    py::str clbits{"clbits"};
-    py::str label{"label"};
-    py::str metadata{"metadata"};
-    py::str source_id{"source_id"};
-    py::str target_id{"target_id"};
-    py::str wire{"wire"};
+    py::str node_id = InternedStr("node_id");
+    py::str node_type = InternedStr("node_type");
+    py::str instruction = InternedStr("instruction");
+    py::str qubits = InternedStr("qubits");
+    py::str clbits = InternedStr("clbits");
+    py::str label = InternedStr("label");
+    py::str metadata = InternedStr("metadata");
+    py::str source_id = InternedStr("source_id");
+    py::str target_id = InternedStr("target_id");
+    py::str wire = InternedStr("wire");
 };
 
 inline Names& N() {
@@ -571,6 +573,7 @@ public:
         // 节点对象与线标签表。
         PyDict_Clear(nodes_.ptr());
         pass_entries_.clear();
+        pass_validated_version = -1;
         objects_.clear();
         for (std::size_t i = 0; i < node_objs.size(); ++i) {
             py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(node_objs[i].first));
@@ -695,6 +698,13 @@ public:
         py::object gate;
         ir::PassNode info;
     };
+    // 受信模式（PassManager 中全部是库自带的 pass 时开启）：pass 之间不会有其他代码直接改写
+    // node.instruction，所以版本号等于 pass_validated_version 时缓存一定有效，不必逐节点核对。
+    bool pass_trusted = false;
+    std::int64_t pass_validated_version = -1;
+    bool pass_cache_current() const noexcept {
+        return pass_trusted && pass_validated_version == store.version();
+    }
     ir::IdMap<PassEntry>& pass_entries() noexcept {
         return pass_entries_;
     }

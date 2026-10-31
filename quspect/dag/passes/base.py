@@ -245,6 +245,22 @@ def _signatures_differ(a: Any, b: Any) -> bool:
     return bool(a != b)
 
 
+def _trusts_native_cache(passes: list[BasePass], dag: DAGCircuit) -> bool:
+    """Whether the native node cache may skip re-validation between passes.
+
+    True when every pass is one of the library passes (no other code can
+    assign ``node.instruction`` directly between two passes) and ``dag``
+    is a plain native :class:`DAGCircuit`.
+    """
+    from quspect.dag.dag_circuit import DAGCircuit
+    from quspect.dag.passes._native import trusted_pass_types
+
+    if type(dag) is not DAGCircuit:
+        return False
+    allowed = trusted_pass_types()
+    return all(type(p) in allowed for p in passes)
+
+
 def _native_repr_cache() -> Any:
     """Return a native repr cache when the native passes are available."""
     from quspect.dag.passes._native import enabled, native_core
@@ -316,9 +332,26 @@ class PassManager:
                 ``max_iterations``.
         """
         self.stats_history.clear()
-        current = dag
         repr_cache: dict[int, tuple[object, str]] = {}
         native_cache = _native_repr_cache()
+        trusted = native_cache is not None and _trusts_native_cache(self._passes, dag)
+        if trusted:
+            dag._set_pass_trust(True)  # type: ignore[attr-defined]
+        try:
+            return self._run(dag, max_iterations, repr_cache, native_cache)
+        finally:
+            if trusted:
+                dag._set_pass_trust(False)  # type: ignore[attr-defined]
+
+    def _run(
+        self,
+        dag: DAGCircuit,
+        max_iterations: int,
+        repr_cache: dict[int, tuple[object, str]],
+        native_cache: Any,
+    ) -> DAGCircuit:
+        """Body of :meth:`run`."""
+        current = dag
         signature = _signature(current, repr_cache, native_cache)
 
         for iteration in range(max_iterations):

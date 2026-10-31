@@ -216,6 +216,14 @@ public:
     bool walk_wire(WireId wire, std::optional<WireId> member, std::vector<NodeId>& out) const;
     // walk_wire 失败时退回扫描拓扑序：列出成员线含 member 的全部节点。
     void scan_wire(WireId member, std::vector<NodeId>& out);
+    // nodes_on_wire 的规范线情形：walk_wire(wire, wire) 失败时 scan_wire(wire)。成功的沿线遍历按线缓存，
+    // 线的结构版本（见 wire_version）不变时直接复用。抛出 DagCycleError / DagKeyError（来自拓扑序）。
+    void nodes_on_wire(WireId wire, std::vector<NodeId>& out);
+    // 线的结构版本：该线上的边或以它为成员线的节点每次增删都会增加。
+    std::uint64_t wire_version(WireId wire) const noexcept {
+        const std::uint64_t* v = wire_version_.find(wire);
+        return v == nullptr ? 0 : *v;
+    }
 
     // 节点 id 是否位于成员线 member 上（加入时记录）。
     bool on_member_wire(NodeId id, WireId member) const noexcept;
@@ -290,6 +298,26 @@ private:
     bool journal_open_ = false;
     std::vector<JournalEntry> journal_;
     std::int64_t txn_depth_ = 0;
+
+    // 每条线的结构版本与沿线遍历缓存（只缓存成功的遍历）。
+    struct WalkCache {
+        std::uint64_t version = 0;
+        bool valid = false;
+        std::vector<NodeId> nodes;
+    };
+    void bump_wire(WireId wire) {
+        ++wire_version_[wire];
+    }
+    IdMap<std::uint64_t> wire_version_;
+    IdMap<WalkCache> walk_cache_;
+
+    // reverse_adjacent_edge_order 的工作区（访问标记按代编号，缓冲区复用）。
+    IdMap<std::uint64_t> mark_;
+    std::uint64_t mark_generation_ = 0;
+    std::vector<NodeId> pk_forward_;
+    std::vector<NodeId> pk_backward_;
+    std::vector<NodeId> pk_stack_;
+    std::vector<std::int64_t> pk_slots_;
 };
 
 }  // namespace quspect::native::ir

@@ -112,6 +112,35 @@ def use_native(dag: object, logger: logging.Logger) -> bool:
     )
 
 
+def trusted_pass_types() -> frozenset[type]:
+    """Passes that only change a DAG through :class:`DAGCircuit` methods.
+
+    Inside a :class:`~quspect.dag.passes.PassManager` made only of these, no
+    code assigns ``node.instruction`` directly between two passes, so the
+    native node cache does not need to be re-validated when the DAG's
+    modification count is unchanged.
+    """
+    from quspect.dag.passes.commutation import CommutationAnalysis
+    from quspect.dag.passes.diagonal_before_measure import (
+        EliminateDiagonalBeforeMeasurement,
+    )
+    from quspect.dag.passes.gate_cancellation import GateCancellation
+    from quspect.dag.passes.identity_removal import RemoveIdentityGates
+    from quspect.dag.passes.rotation_merging import RotationMerging
+    from quspect.dag.passes.single_qubit_fusion import SingleQubitGateFusion
+
+    return frozenset(
+        {
+            GateCancellation,
+            CommutationAnalysis,
+            RotationMerging,
+            SingleQubitGateFusion,
+            EliminateDiagonalBeforeMeasurement,
+            RemoveIdentityGates,
+        }
+    )
+
+
 def enabled() -> bool:
     """Return whether the native passes are active."""
     return _enabled

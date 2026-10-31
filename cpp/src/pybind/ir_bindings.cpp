@@ -18,6 +18,8 @@
 
 #include <pybind11/pybind11.h>
 
+#include "py_interned.hpp"
+
 #include "quspect_native/ir/circuit.hpp"
 #include "quspect_native/ir/operation.hpp"
 #include "quspect_native/ir/qasm2_parser.hpp"
@@ -54,15 +56,15 @@ IrRegistry& Reg() {
 }
 
 struct IrNames {
-    py::str type{"type"};
-    py::str qubits{"qubits"};
-    py::str clbits{"clbits"};
-    py::str gate{"gate"};
-    py::str channel{"channel"};
-    py::str label{"label"};
-    py::str name{"name"};
-    py::str num_qubits{"num_qubits"};
-    py::str params{"params"};
+    py::str type = InternedStr("type");
+    py::str qubits = InternedStr("qubits");
+    py::str clbits = InternedStr("clbits");
+    py::str gate = InternedStr("gate");
+    py::str channel = InternedStr("channel");
+    py::str label = InternedStr("label");
+    py::str name = InternedStr("name");
+    py::str num_qubits = InternedStr("num_qubits");
+    py::str params = InternedStr("params");
 };
 
 IrNames& Names() {

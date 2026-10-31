@@ -19,6 +19,8 @@
 
 #include <pybind11/pybind11.h>
 
+#include "py_interned.hpp"
+
 #include "quspect_native/ir/dag_passes.hpp"
 #include "quspect_native/ir/dag_store.hpp"
 
@@ -58,22 +60,27 @@ PassRegistry& Reg() {
 }
 
 struct PassNames {
-    py::str instruction{"instruction"};
-    py::str type{"type"};
-    py::str qubits{"qubits"};
-    py::str clbits{"clbits"};
-    py::str gate{"gate"};
-    py::str name{"name"};
-    py::str num_qubits{"num_qubits"};
-    py::str params{"params"};
-    py::str with_params{"with_params"};
-    py::str channel{"channel"};
-    py::str label{"label"};
+    py::str instruction = InternedStr("instruction");
+    py::str type = InternedStr("type");
+    py::str qubits = InternedStr("qubits");
+    py::str clbits = InternedStr("clbits");
+    py::str gate = InternedStr("gate");
+    py::str name = InternedStr("name");
+    py::str num_qubits = InternedStr("num_qubits");
+    py::str params = InternedStr("params");
+    py::str with_params = InternedStr("with_params");
+    py::str channel = InternedStr("channel");
+    py::str label = InternedStr("label");
 };
 
 PassNames& Names() {
     static PassNames* names = new PassNames();
     return *names;
+}
+
+PyObject* EmptyStr() {
+    static PyObject* empty = PyUnicode_FromString("");  // 进程内常驻
+    return empty;
 }
 
 PyObject* EmptyTuple() {
@@ -225,6 +232,10 @@ public:
         if (!Reg().ready || !dag_core::Registry().ready || core_.has_noncanonical_wires()) {
             return false;
         }
+        if (core_.pass_cache_current()) {
+            return true;
+        }
+        core_.pass_validated_version = -1;
         auto* node_cls = reinterpret_cast<PyTypeObject*>(dag_core::Registry().dag_node_cls.ptr());
         core_.store.node_ids(ids_);
         auto& entries = core_.pass_entries();
@@ -272,7 +283,7 @@ public:
         if (!value) {
             throw py::error_already_set();
         }
-        py::object gate = tmpl->attr(Names().with_params)(value);
+        py::object gate = NewRotation(*tmpl, value);
         PyObject* old = entry(id).instr.ptr();
         py::object instr = NewInstruction(Attr(old, Names().type), gate, old);
         substitute(id, instr);
@@ -339,14 +350,100 @@ private:
         return *e;
     }
 
-    // CircuitInstruction(type=type, gate=gate, qubits=old.qubits, clbits=old.clbits)
+    // 不经 __init__、按字段顺序写入（与冻结数据类 __init__ 的效果相同，见 ir_bindings.cpp）。
+    static py::object NewDataclass(const py::object& cls) {
+        auto* type = reinterpret_cast<PyTypeObject*>(cls.ptr());
+        PyObject* obj = PyBaseObject_Type.tp_new(type, EmptyTuple(), nullptr);
+        if (obj == nullptr) {
+            throw py::error_already_set();
+        }
+        return py::reinterpret_steal<py::object>(obj);
+    }
+    static void SetField(PyObject* obj, const py::str& name, PyObject* value) {
+        if (PyObject_GenericSetAttr(obj, name.ptr(), value) != 0) {
+            throw py::error_already_set();
+        }
+    }
+
+    // template.with_params(value)：Gate(name, num_qubits, params=(value,), label=template.label)。
+    // 模板不是普通 Gate 时调用 with_params 本身。
+    static py::object NewRotation(const py::object& tmpl, const py::object& value) {
+        PassRegistry& reg = Reg();
+        PassNames& n = Names();
+        if (Py_TYPE(tmpl.ptr()) != reinterpret_cast<PyTypeObject*>(reg.gate_cls.ptr())) {
+            return tmpl.attr(n.with_params)(value);
+        }
+        py::object params = py::reinterpret_steal<py::object>(PyTuple_Pack(1, value.ptr()));
+        if (!params) {
+            throw py::error_already_set();
+        }
+        py::object gate = NewDataclass(reg.gate_cls);
+        SetField(gate.ptr(), n.name, Attr(tmpl.ptr(), n.name).ptr());
+        SetField(gate.ptr(), n.num_qubits, Attr(tmpl.ptr(), n.num_qubits).ptr());
+        SetField(gate.ptr(), n.params, params.ptr());
+        SetField(gate.ptr(), n.label, Attr(tmpl.ptr(), n.label).ptr());
+        return gate;
+    }
+
+    // CircuitInstruction(type=type, gate=gate, qubits=old.qubits, clbits=old.clbits)。
+    // 常见情形（GATE、单比特普通门、比特为非负 int）直接写字段，__post_init__ 的校验在这里
+    // 必然通过；其他情形调用构造函数（同样的校验与异常）。
     static py::object NewInstruction(const py::object& type, const py::object& gate, PyObject* old) {
+        PassRegistry& reg = Reg();
+        PassNames& n = Names();
+        py::object qubits = Attr(old, n.qubits);
+        py::object clbits = Attr(old, n.clbits);
+        if (type.is(reg.type_gate) && Py_TYPE(gate.ptr()) == reinterpret_cast<PyTypeObject*>(reg.gate_cls.ptr())
+            && SimpleOneQubit(gate.ptr(), qubits.ptr(), clbits.ptr())) {
+            py::object instr = NewDataclass(reg.instr_cls);
+            SetField(instr.ptr(), n.type, type.ptr());
+            SetField(instr.ptr(), n.qubits, qubits.ptr());
+            SetField(instr.ptr(), n.clbits, clbits.ptr());
+            SetField(instr.ptr(), n.gate, gate.ptr());
+            SetField(instr.ptr(), n.channel, Py_None);
+            SetField(instr.ptr(), n.label, EmptyStr());
+            return instr;
+        }
+        return CallInstruction(type, gate, qubits, clbits);
+    }
+
+    // gate.num_qubits == 1 == len(qubits)，比特都是非负 int 组成的 tuple。
+    static bool SimpleOneQubit(PyObject* gate, PyObject* qubits, PyObject* clbits) {
+        if (!PyTuple_CheckExact(qubits) || PyTuple_GET_SIZE(qubits) != 1 || !PyTuple_CheckExact(clbits)) {
+            return false;
+        }
+        py::object nq = Attr(gate, Names().num_qubits);
+        if (!PyLong_CheckExact(nq.ptr()) || PyLong_AsLong(nq.ptr()) != 1) {
+            PyErr_Clear();
+            return false;
+        }
+        auto nonneg_int = [](PyObject* v) {
+            if (!PyLong_CheckExact(v)) {
+                return false;
+            }
+            int overflow = 0;
+            const long long x = PyLong_AsLongLongAndOverflow(v, &overflow);
+            return overflow > 0 || (overflow == 0 && x >= 0);
+        };
+        if (!nonneg_int(PyTuple_GET_ITEM(qubits, 0))) {
+            return false;
+        }
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(clbits); ++i) {
+            if (!nonneg_int(PyTuple_GET_ITEM(clbits, i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static py::object CallInstruction(const py::object& type, const py::object& gate, const py::object& qubits,
+                                      const py::object& clbits) {
         PassNames& n = Names();
         py::dict kwargs;
         kwargs[n.type] = type;
         kwargs[n.gate] = gate;
-        kwargs[n.qubits] = Attr(old, n.qubits);
-        kwargs[n.clbits] = Attr(old, n.clbits);
+        kwargs[n.qubits] = qubits;
+        kwargs[n.clbits] = clbits;
         PyObject* r = PyObject_Call(Reg().instr_cls.ptr(), EmptyTuple(), kwargs.ptr());
         if (r == nullptr) {
             throw py::error_already_set();
@@ -414,6 +511,23 @@ private:
 };
 
 // 把 pass 中的 C++ 异常翻译成 Python 端参考实现会抛出的异常。
+template <typename F>
+void Translate(F&& f);
+
+// 运行一个 pass：解码节点（失败时不修改 DAG、返回 false），运行，完成后记下缓存有效的版本号。
+template <typename F>
+bool RunPass(PyDagCore& d, PyPassHost& host, F&& f) {
+    if (!host.prepare()) {
+        return false;
+    }
+    bool done = true;
+    Translate([&] { done = f(); });
+    if (done) {
+        d.pass_validated_version = d.store.version();
+    }
+    return done;
+}
+
 template <typename F>
 void Translate(F&& f) {
     try {
@@ -639,6 +753,9 @@ public:
         by_instr_.emplace(instr, std::make_pair(py::reinterpret_borrow<py::object>(instr), id));
         return id;
     }
+    const std::string& text(std::int32_t id) const {
+        return reprs_[static_cast<std::size_t>(id)];
+    }
     py::str repr(std::int32_t id) const {
         return py::str(reprs_[static_cast<std::size_t>(id)]);
     }
@@ -650,10 +767,12 @@ private:
     std::string text_;
 };
 
-// 每条线上依次出现的指令 repr（以编号表示）；与 _wire_sequences 返回的 dict 判等关系相同。
+// 每条线上依次出现的指令；与 _wire_sequences 返回的 dict 判等关系相同：同一个指令对象的 repr
+// 必然相同（Python 端的 repr_cache 同样按身份复用），不同对象才比较 repr（经缓存，只算一次）。
 class WireSignature {
 public:
-    std::vector<std::vector<std::int32_t>> seqs;  // 下标为线编号（qubit q -> 2q，clbit c -> 2c+1）
+    std::vector<std::vector<PyObject*>> seqs;  // 下标为线编号（qubit q -> 2q，clbit c -> 2c+1）
+    std::vector<py::object> keep;              // 持有指令对象，保证身份比较有效
     std::shared_ptr<ReprCache> cache;
 
     void trim() {
@@ -661,8 +780,27 @@ public:
             seqs.pop_back();
         }
     }
-    bool operator==(const WireSignature& other) const {
-        return seqs == other.seqs;
+    bool equals(const WireSignature& other) const {
+        if (seqs.size() != other.seqs.size()) {
+            return false;
+        }
+        for (std::size_t w = 0; w < seqs.size(); ++w) {
+            const auto& a = seqs[w];
+            const auto& b = other.seqs[w];
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (std::size_t i = 0; i < a.size(); ++i) {
+                if (a[i] == b[i]) {
+                    continue;
+                }
+                if (cache == other.cache ? cache->id_of(a[i]) != cache->id_of(b[i])
+                                         : cache->text(cache->id_of(a[i])) != other.cache->text(other.cache->id_of(b[i]))) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // _wire_sequences 的 dict 形式（qubit q 的键为 q，clbit c 的键为 -1 - c）。
@@ -676,7 +814,7 @@ public:
             const std::int64_t key = wire % 2 == 0 ? wire / 2 : -1 - wire / 2;
             py::list seq(seqs[w].size());
             for (std::size_t i = 0; i < seqs[w].size(); ++i) {
-                seq[i] = cache->repr(seqs[w][i]);
+                seq[i] = cache->repr(cache->id_of(seqs[w][i]));
             }
             out[py::int_(key)] = seq;
         }
@@ -688,45 +826,56 @@ py::object ComputeSignature(PyDagCore& core, const std::shared_ptr<ReprCache>& c
     if (core.has_noncanonical_wires()) {
         return py::none();
     }
-    const std::vector<NodeId>& order = [&]() -> const std::vector<NodeId>& {
-        try {
-            return core.store.topological_order();
-        } catch (const ir::DagKeyError& e) {
-            if (e.has_int_key()) {
-                py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(e.key()));
-                PyErr_SetObject(PyExc_KeyError, key.ptr());
-                throw py::error_already_set();
-            }
-            throw py::key_error(e.what());
-        } catch (const ir::DagCycleError& e) {
-            PyErr_SetString(PyExc_RuntimeError, e.what());
-            throw py::error_already_set();
-        }
-    }();
+    // 每条线上依次出现的操作节点 = nodes_on_wire(线) 中的操作节点（与按拓扑序逐节点追加的结果相同；
+    // 沿线遍历按线缓存，未改动的线不必重走）。
+    ir::DagStore& store = core.store;
+    const bool trusted = core.pass_cache_current();
+    std::vector<NodeId> ids;
+    store.node_ids(ids);
     auto sig = std::make_unique<WireSignature>();
     sig->cache = cache;
-    for (NodeId id : order) {
-        if (core.store.kind(id) != DagNodeKind::kOperation) {
+    sig->keep.reserve(ids.size());
+    ir::IdMap<PyObject*> instrs;
+    std::vector<std::uint8_t> present;
+    for (NodeId id : ids) {
+        if (store.kind(id) != DagNodeKind::kOperation) {
             continue;
         }
-        PyObject* obj = core.node_object(id);
-        if (obj == nullptr) {
-            continue;
-        }
-        py::object instr = Attr(obj, Names().instruction);
-        const std::int32_t key = cache->id_of(instr.ptr());
-        const ir::DagStore::WireList* wires = core.store.node_wires(id);
-        if (wires == nullptr) {
-            continue;
-        }
-        for (WireId w : *wires) {
-            const auto idx = static_cast<std::size_t>(w);
-            if (idx >= sig->seqs.size()) {
-                sig->seqs.resize(idx + 1);
+        PyDagCore::PassEntry* e = trusted ? core.pass_entries().find(id) : nullptr;
+        if (e != nullptr) {
+            sig->keep.push_back(e->instr);
+        } else {
+            PyObject* obj = core.node_object(id);
+            if (obj == nullptr) {
+                continue;
             }
-            sig->seqs[idx].push_back(key);
+            sig->keep.push_back(Attr(obj, Names().instruction));
+        }
+        instrs[id] = sig->keep.back().ptr();
+        for (WireId w : *store.node_wires(id)) {
+            const auto idx = static_cast<std::size_t>(w);
+            if (idx >= present.size()) {
+                present.resize(idx + 1, 0);
+            }
+            present[idx] = 1;
         }
     }
+    sig->seqs.resize(present.size());
+    std::vector<NodeId> wire_nodes;
+    Translate([&] {
+        for (std::size_t w = 0; w < present.size(); ++w) {
+            if (present[w] == 0) {
+                continue;
+            }
+            store.nodes_on_wire(static_cast<WireId>(w), wire_nodes);
+            auto& seq = sig->seqs[w];
+            for (NodeId id : wire_nodes) {
+                if (PyObject* const* k = instrs.find(id)) {
+                    seq.push_back(*k);
+                }
+            }
+        }
+    });
     sig->trim();
     return py::cast(std::move(sig));
 }
@@ -793,75 +942,67 @@ void BindDagPasses(py::module_& m, py::class_<PyDagCore>& core) {
 
     py::class_<WireSignature>(m, "_WireSignature", py::module_local(),
                               "Per-wire instruction sequence of a DAG (PassManager convergence check).")
-        .def("__eq__", [](const WireSignature& a, const WireSignature& b) { return a == b; }, py::is_operator())
-        .def("__ne__", [](const WireSignature& a, const WireSignature& b) { return !(a == b); }, py::is_operator())
+        .def("__eq__", [](const WireSignature& a, const WireSignature& b) { return a.equals(b); }, py::is_operator())
+        .def("__ne__", [](const WireSignature& a, const WireSignature& b) { return !a.equals(b); }, py::is_operator())
         .def("to_dict", &WireSignature::to_dict, "Return the signature in the form of _wire_sequences.");
 
     core.def(
+            "_set_pass_trust", [](PyDagCore& d, bool trusted) { d.pass_trusted = trusted; }, py::arg("trusted"))
+        .def(
             "_wire_signature",
             [](PyDagCore& d, const std::shared_ptr<ReprCache>& cache) { return ComputeSignature(d, cache); },
             py::arg("cache"))
         .def("_native_gate_cancellation",
              [](PyDagCore& d) {
                  PyPassHost host(d);
-                 if (!host.prepare()) {
-                     return false;
-                 }
-                 Translate([&] { ir::RunGateCancellation(d.store, host); });
-                 return true;
+                 return RunPass(d, host, [&] {
+                     ir::RunGateCancellation(d.store, host);
+                     return true;
+                 });
              })
         .def(
             "_native_commutation",
             [](PyDagCore& d, std::int64_t max_lookahead) {
                 PyPassHost host(d);
-                if (!host.prepare()) {
-                    return false;
-                }
-                Translate([&] { ir::RunCommutationAnalysis(d.store, host, max_lookahead); });
-                return true;
+                return RunPass(d, host, [&] {
+                    ir::RunCommutationAnalysis(d.store, host, max_lookahead);
+                    return true;
+                });
             },
             py::arg("max_lookahead"))
         .def("_native_rotation_merging",
              [](PyDagCore& d) {
                  PyPassHost host(d);
-                 if (!host.prepare()) {
-                     return false;
-                 }
-                 Translate([&] { ir::RunRotationMerging(d.store, host); });
-                 return true;
+                 return RunPass(d, host, [&] {
+                     ir::RunRotationMerging(d.store, host);
+                     return true;
+                 });
              })
         .def(
             "_native_single_qubit_resynthesis",
             [](PyDagCore& d, py::object pass_obj, FusionRunCache* cache) {
                 PyPassHost host(d);
                 host.set_fusion(pass_obj, cache);
-                if (!host.prepare()) {
-                    return false;
-                }
-                Translate([&] { ir::RunSingleQubitResynthesis(d.store, host); });
-                return true;
+                return RunPass(d, host, [&] {
+                    ir::RunSingleQubitResynthesis(d.store, host);
+                    return true;
+                });
             },
             py::arg("pass_obj"), py::arg("cache"))
         .def("_native_diagonal_before_measure",
              [](PyDagCore& d) {
                  PyPassHost host(d);
-                 if (!host.prepare()) {
-                     return false;
-                 }
-                 Translate([&] { ir::RunEliminateDiagonalBeforeMeasurement(d.store, host); });
-                 return true;
+                 return RunPass(d, host, [&] {
+                     ir::RunEliminateDiagonalBeforeMeasurement(d.store, host);
+                     return true;
+                 });
              })
         .def(
             "_native_identity_removal",
             [](PyDagCore& d, py::object is_identity) {
                 PyPassHost host(d);
                 host.set_identity_fn(is_identity);
-                if (!host.prepare()) {
-                    return false;
-                }
-                bool done = false;
-                Translate([&] { done = ir::RunRemoveIdentityGates(d.store, host); });
-                return done;
+                return RunPass(d, host, [&] { return ir::RunRemoveIdentityGates(d.store, host); });
             },
             py::arg("is_identity"));
 }
