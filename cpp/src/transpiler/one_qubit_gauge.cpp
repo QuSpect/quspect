@@ -562,7 +562,8 @@ int GaugeBeamSearch::Prepare(const std::vector<int>& slots, const std::vector<in
     phi_fixed_ = phi_fixed;
     run_length_ = run_length;
     base_changed_ = base_changed;
-    entry_unique_.assign(n, {});
+    entry_unique_.clear();
+    entry_begin_.assign(1, 0);
     unique_.clear();
     compute_row_.clear();
     compute_unique_.clear();
@@ -607,8 +608,9 @@ int GaugeBeamSearch::Prepare(const std::vector<int>& slots, const std::vector<in
                 }
                 unique_.push_back(Unique{static_cast<int>(r), e.phi, key, hit, compute});
             }
-            entry_unique_[r].push_back(found);
+            entry_unique_.push_back(found);
         }
+        entry_begin_.push_back(static_cast<int>(entry_unique_.size()));
     }
     return static_cast<int>(compute_row_.size());
 }
@@ -732,7 +734,7 @@ void GaugeBeamSearch::Finish(const std::vector<Matrix2>& m, const std::vector<Ma
         nxt.clear();
         for (std::size_t pi = 0; pi < prev.size(); ++pi) {
             const std::int64_t total = prev[pi].total;
-            const Unique& u = unique_[static_cast<std::size_t>(entry_unique_[r][pi])];
+            const Unique& u = unique_[static_cast<std::size_t>(entry_unique_[static_cast<std::size_t>(entry_begin_[r]) + pi])];
             const MemoOptions& opts = u.hit != nullptr ? *u.hit : computed[static_cast<std::size_t>(u.compute)];
             for (std::size_t j = 0; j < opts.phis.size(); ++j) {
                 const double phi = opts.phis[j];
@@ -805,6 +807,18 @@ const GaugeBeamSearch::MemoOptions* GaugeBeamSearch::MemoGet(const MemoKey& key)
 
 void GaugeBeamSearch::MemoPut(const MemoKey& key, MemoOptions options) {
     memo_.emplace(key, std::move(options));  // 已有的键保持不变（首次写入为准）
+}
+
+void GaugeBeamSearch::AbsorbMemo(GaugeBeamSearch& other) {
+    if (memo_.empty()) {
+        memo_.swap(other.memo_);
+        return;
+    }
+    memo_.reserve(memo_.size() + other.memo_.size());
+    for (auto& kv : other.memo_) {
+        memo_.emplace(kv.first, std::move(kv.second));
+    }
+    other.memo_.clear();
 }
 
 std::int64_t GaugeBeamSearch::Backtrack(int slot, std::vector<double>* angles, std::vector<int>* costs) const {

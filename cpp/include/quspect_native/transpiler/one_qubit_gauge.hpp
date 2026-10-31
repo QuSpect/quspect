@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "quspect_native/ir/small_vector.hpp"
+
 namespace quspect::native::transpiler {
 
 // 单比特门最小化（quspect.transpiler._gauge）的标量内核。
@@ -94,10 +96,11 @@ class GaugeBeamSearch {
         }
     };
 
+    // 选项最多 5 个（0 与 4 个前导角），存放在对象内部，memo 项不做堆分配。
     struct MemoOptions {
         double phi_in;  // 首次写入时的 phi_in（同键的选项由它算出）
-        std::vector<double> phis;
-        std::vector<int> costs;
+        ir::SmallVector<double, 5> phis;
+        ir::SmallVector<int, 5> costs;
     };
 
     GaugeBeamSearch(int num_slots, int beam, int gate_weight, int run_weight, LengthModel model);
@@ -164,6 +167,8 @@ class GaugeBeamSearch {
     // Python 端顺序求值使用的 memo 接口（与上面共用同一张表；Put 只在键缺失时写入）。
     const MemoOptions* MemoGet(const MemoKey& key) const;
     void MemoPut(const MemoKey& key, MemoOptions options);
+    // 把 other 的 memo 项并入本对象（已有的键保持不变），other 的 memo 随后为空。
+    void AbsorbMemo(GaugeBeamSearch& other);
 
  private:
     struct MemoKeyHash {
@@ -192,7 +197,8 @@ class GaugeBeamSearch {
     std::vector<double> phi_fixed_;
     std::vector<int> run_length_;
     std::vector<std::uint8_t> base_changed_;
-    std::vector<std::vector<int>> entry_unique_;  // 每行：束条目 → 唯一条目
+    std::vector<int> entry_unique_;               // 每行的束条目 → 唯一条目（entry_begin_ 为每行起点）
+    std::vector<int> entry_begin_;
     std::vector<Unique> unique_;
     std::vector<int> compute_row_;
     std::vector<int> compute_unique_;

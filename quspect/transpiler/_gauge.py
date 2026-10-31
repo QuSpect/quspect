@@ -42,6 +42,7 @@ from __future__ import annotations
 import cmath
 import math
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -475,6 +476,9 @@ def _minimize_local(
         length = _LengthModel(one_qubit)
         native = _native_kernels(length)
         if native is not None:
+            done = _minimize_driver(circuit, one_qubit, native)
+            if done is not None:
+                return done
             try:
                 return _minimize(circuit, one_qubit, native)
             except _NativeFallbackError:
@@ -615,21 +619,18 @@ def _reverse_cx(circuit: QuantumCircuit, reverse: set[int]) -> QuantumCircuit:
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
 
 
-def _minimize(
-    circuit: QuantumCircuit, one_qubit: frozenset[str], native: _Native | None
-) -> QuantumCircuit:
-    """Body of :func:`minimize_single_qubit_gates`.
+def _gate_tables() -> tuple[
+    Callable[[Gate], np.ndarray | None],
+    Callable[[Gate], tuple[str | None, str | None]],
+]:
+    """Cached ``matrix_of(gate)`` and ``axes_of(gate)`` of one minimization.
 
-    ``native`` selects the C++ kernels (batched initial beam search, native
-    run lengths / leading angles / rotations); ``None`` runs the pure-Python
-    reference.  Both produce identical circuits.
+    ``matrix_of``: the gate's matrix (``None`` if unknown or unhashable);
+    ``axes_of``: the Pauli axes commuting with a two-qubit gate on each of
+    its qubits (``None`` where none does).
     """
-    from quspect.circuit.circuit import QuantumCircuit
-    from quspect.circuit.instruction import CircuitInstruction, InstructionType
     from quspect.gates._matrix_utils import gate_matrix
-    from quspect.gates.synthesis import synthesize_one_qubit
 
-    instrs = circuit.instructions
     mat_cache: dict[Gate, np.ndarray | None] = {}
 
     def matrix_of(gate: Gate) -> np.ndarray | None:
@@ -663,6 +664,92 @@ def _minimize(
         )
         axis_cache[gate] = ax
         return ax
+
+    return matrix_of, axes_of
+
+
+#: Environment variable selecting who drives the native minimization:
+#: ``"auto"`` (default: the whole minimization runs in C++ when numpy's
+#: BLAS is available to it, see :func:`_minimize_driver`) or ``"python"``
+#: (the Python body calls the native kernels).  Both give identical results.
+GAUGE_DRIVER_ENV = "QUSPECT_GAUGE_DRIVER"
+
+
+def _minimize_driver(
+    circuit: QuantumCircuit, one_qubit: frozenset[str], native: _Native
+) -> QuantumCircuit | None:
+    """:func:`_minimize` with ``native`` run entirely in C++, or ``None``.
+
+    The native driver repeats the Python body step by step (same runs,
+    anchors, beam search, memo, orientation sweep and emission order; the
+    2×2 products are numpy's BLAS calls through the native KAK backend) and
+    calls :func:`~quspect.gates.synthesis.synthesize_one_qubit` for the
+    emitted runs.  ``None`` (use the Python body) when it is disabled or
+    unavailable or the input is outside what it reproduces.
+    """
+    driver = os.environ.get(GAUGE_DRIVER_ENV, "auto") or "auto"
+    if driver not in ("auto", "python"):
+        raise ValueError(f"{GAUGE_DRIVER_ENV} must be auto or python; got {driver!r}")
+    if (
+        driver == "python"
+        or _WINDOW != 0
+        or not hasattr(native.core, "_gauge_minimize")
+    ):
+        return None
+    from quspect.synthesis.two_qubit import _native_kak
+
+    kak = _native_kak()
+    if kak is None:
+        return None
+    from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.gates.gate import Gate
+    from quspect.gates.synthesis import synthesize_one_qubit
+
+    matrix_of, axes_of = _gate_tables()
+    done, out = native.core._gauge_minimize(
+        circuit.instructions,
+        native.model,
+        kak._synth,
+        one_qubit,
+        matrix_of,
+        axes_of,
+        lambda m: synthesize_one_qubit(m, one_qubit),
+        CircuitInstruction,
+        InstructionType.GATE,
+        InstructionType.BARRIER,
+        Gate,
+        _H,
+        list(_TO_Z_STACK),
+        list(_TO_Z_CONJ),
+        _BEAM,
+        _GATE_WEIGHT,
+        _RUN_WEIGHT,
+        _SWEEPS,
+        _ATOL_1Q,
+    )
+    if not done:
+        return None
+    if out is None:
+        return circuit
+    return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
+def _minimize(
+    circuit: QuantumCircuit, one_qubit: frozenset[str], native: _Native | None
+) -> QuantumCircuit:
+    """Body of :func:`minimize_single_qubit_gates`.
+
+    ``native`` selects the C++ kernels (batched initial beam search, native
+    run lengths / leading angles / rotations); ``None`` runs the pure-Python
+    reference.  Both produce identical circuits.
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.gates.synthesis import synthesize_one_qubit
+
+    instrs = circuit.instructions
+    matrix_of, axes_of = _gate_tables()
 
     # --- split every wire into runs and anchors ---------------------------
     runs: list[_Run] = []

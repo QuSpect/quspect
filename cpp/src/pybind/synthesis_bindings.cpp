@@ -473,6 +473,11 @@ class PyKakSynthesizer {
         return last_fallback_;
     }
 
+    // numpy 语义的线性代数（单比特门最小化等其他原生实现复用）。
+    const synthesis::NumpyLinalg& Linalg() const {
+        return impl_.linalg();
+    }
+
  private:
     const py::str& Name(int entangler) const {
         return names_.at(static_cast<std::size_t>(entangler));
@@ -605,6 +610,13 @@ void BindSynthesis(py::module_& m) {
           "Elementwise complex arithmetic in one of the candidate evaluation orders (semantics probes).");
     m.def("_synthesis_scalar", &Scalar, py::arg("fn"), py::arg("a"),
           "CPython / libm scalar functions as reproduced by the native synthesis (semantics probes).");
+}
+
+const synthesis::NumpyLinalg* KakLinalg(py::handle obj) {
+    if (!py::isinstance<PyKakSynthesizer>(obj)) {
+        return nullptr;
+    }
+    return &obj.cast<const PyKakSynthesizer&>().Linalg();
 }
 
 }  // namespace quspect::native::pybind
