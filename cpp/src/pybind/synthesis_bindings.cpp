@@ -269,6 +269,55 @@ class PyKakSynthesizer {
         }
     }
 
+    // _verified_euler_ops_uncached：ops；False = Python 返回 None；None = 交给 Python。
+    py::object VerifiedEuler(const ComplexArray& u, double atol, int euler) const {
+        last_fallback_.clear();
+        try {
+            const auto ops = impl_.VerifiedEuler(ToMatrix<4>(u), atol, euler);
+            if (!ops) {
+                return py::bool_(false);
+            }
+            return conv_.Convert(*ops, py::str("?"));
+        } catch (const Fallback& e) {
+            last_fallback_ = e.what();
+            return py::none();
+        }
+    }
+
+    // 块的 4×4 酉矩阵（见 KakSynthesizer::BlockUnitary）。
+    py::array_t<std::complex<double>> BlockUnitary(const py::list& mats, const std::vector<int>& slots,
+                                                   const ComplexArray& swap4) const {
+        if (mats.size() != slots.size()) {
+            throw std::invalid_argument("one slot per matrix");
+        }
+        std::vector<ComplexArray> keep;
+        keep.reserve(mats.size());
+        std::vector<KakSynthesizer::BlockMember> members;
+        members.reserve(mats.size());
+        for (std::size_t i = 0; i < mats.size(); ++i) {
+            keep.push_back(mats[i].cast<ComplexArray>());
+            const int slot = slots[i];
+            const py::ssize_t expected = (slot == 1 || slot == 2) ? 4 : 16;
+            if (slot < 0 || slot > 4 || keep.back().size() != expected) {
+                throw std::invalid_argument("bad block member");
+            }
+            members.push_back({reinterpret_cast<const Cx*>(keep.back().data()), slot});
+        }
+        return FromMatrix(impl_.BlockUnitary(members, ToMatrix<16>(swap4)));
+    }
+
+    // 单比特门串的矩阵：u = I；对每个门 u = m @ u（numpy 的 2×2 乘法）。
+    py::array_t<std::complex<double>> RunUnitary(const py::list& mats) const {
+        M2 u{Cx{1.0, 0.0}, Cx{0.0, 0.0}, Cx{0.0, 0.0}, Cx{1.0, 0.0}};
+        for (const auto item : mats) {
+            const M2 m = ToMatrix<4>(item.cast<ComplexArray>());
+            M2 next;
+            impl_.linalg().MatMul(2, View(m), View(u), next.data());
+            u = next;
+        }
+        return FromMatrix(u);
+    }
+
     // ---- 单比特合成 ----
     int AddOneQubitBasis(const py::list& fixed, bool rz, bool h, bool x, bool sx, bool sxdg, bool rx, bool ry,
                          bool u3, const py::dict& words, const std::vector<int>& named) {
@@ -539,6 +588,9 @@ void BindSynthesis(py::module_& m) {
              py::arg("named"))
         .def("synthesize_one_qubit", &PyKakSynthesizer::SynthesizeOneQubit, py::arg("m"), py::arg("basis"))
         .def("zyz_angles", &PyKakSynthesizer::ZyzAngles, py::arg("m"))
+        .def("verified_euler", &PyKakSynthesizer::VerifiedEuler, py::arg("u"), py::arg("atol"), py::arg("euler"))
+        .def("block_unitary", &PyKakSynthesizer::BlockUnitary, py::arg("mats"), py::arg("slots"), py::arg("swap4"))
+        .def("run_unitary", &PyKakSynthesizer::RunUnitary, py::arg("mats"))
         .def("kak4", &PyKakSynthesizer::Kak4, py::arg("u"))
         .def("factor_local", &PyKakSynthesizer::FactorLocal, py::arg("k"))
         .def("euler_ops", &PyKakSynthesizer::EulerOps, py::arg("m"), py::arg("qubit"), py::arg("basis"),

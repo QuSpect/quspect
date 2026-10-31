@@ -1987,7 +1987,29 @@ def _block_unitary(
     Returns ``None`` if a gate of the block has no numeric matrix.
     """
     from quspect.gates._matrix_utils import gate_matrix
+    from quspect.synthesis import two_qubit
 
+    native = two_qubit._native_kak()
+    if native is not None:
+        # 与下面的循环逐位相同（同样的 numpy 乘法与 kron）
+        mats: list[np.ndarray] = []
+        places: list[int] = []
+        for i in block:
+            g = gates[i]
+            gate = g.gate if g.gate is not None else circuit[g.index].gate
+            if gate is None:
+                return None
+            try:
+                mats.append(np.asarray(gate_matrix(gate), dtype=complex))
+            except (KeyError, TypeError, ValueError):
+                return None
+            if g.is_two_qubit:
+                places.append(0 if g.q1 == a else 4)
+            else:
+                places.append(1 if g.q1 == a else 2)
+        found = native.block_unitary(mats, places, _SWAP_4)
+        if found is not None:
+            return found
     u = np.eye(4, dtype=complex)
     for i in block:
         g = gates[i]

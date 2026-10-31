@@ -52,8 +52,28 @@ def _block_unitary(
 ) -> np.ndarray | None:
     """Unitary of the block on ``block.pair`` (first qubit most significant)."""
     from quspect.gates._matrix_utils import gate_matrix
+    from quspect.synthesis import two_qubit
 
     q0, q1 = block.pair
+    native = two_qubit._native_kak()
+    if native is not None:
+        # 与下面的循环逐位相同（同样的 numpy 乘法、kron 与置换）
+        mats: list[np.ndarray] = []
+        places: list[int] = []
+        for idx in block.indices:
+            ins = instrs[idx]
+            assert ins.gate is not None
+            try:
+                mats.append(np.asarray(gate_matrix(ins.gate), dtype=complex))
+            except (KeyError, ValueError, TypeError):
+                return None
+            if len(ins.qubits) == 1:
+                places.append(1 if ins.qubits[0] == q0 else 2)
+            else:
+                places.append(0 if ins.qubits == (q0, q1) else 3)
+        found = native.block_unitary(mats, places, two_qubit._SWAP4)
+        if found is not None:
+            return found
     u = np.eye(4, dtype=complex)
     for idx in block.indices:
         ins = instrs[idx]

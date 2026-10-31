@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+import quspect.synthesis.two_qubit as _two_qubit
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.circuit.instruction import CircuitInstruction
 from quspect.synthesis._memo import BoundedCache, matrix_key
@@ -83,7 +84,12 @@ def _verified_euler_ops(
     cached = _EULER_CACHE.get(key)
     if cached is not None:
         return list(cached) if isinstance(cached, tuple) else None
-    ops = _verified_euler_ops_uncached(u, atol, euler)
+    native = _two_qubit._native_kak()
+    found = None if native is None else native.verified_euler(u, atol, euler)
+    if found is None:
+        ops = _verified_euler_ops_uncached(u, atol, euler)
+    else:
+        ops = list(found) if isinstance(found, list) else None
     _EULER_CACHE.put(key, False if ops is None else tuple(ops))
     return ops
 
@@ -477,31 +483,7 @@ class ConsolidateBlocksPass:
             return
         self.stats.blocks_examined += 1
         self.stats.two_qubit_before += block.cost
-        qa, _ = block.qubits
-        u = np.eye(4, dtype=complex)
-        lifted = self._lifted_cache
-        for m in block.members:
-            mat = mats[m]
-            assert mat is not None
-            qs = instrs[m].qubits
-            if len(qs) == 2 and qs[0] == qa:
-                full = mat
-            else:
-                # 4×4 形式只取决于矩阵本身与它作用的位置：按矩阵对象缓存
-                # （矩阵来自按门缓存的 _matrix，同一个门总是同一个对象）。
-                slot = 0 if len(qs) == 2 else (1 if qs[0] == qa else 2)
-                hit = lifted.get((id(mat), slot))
-                if hit is not None and hit[0] is mat:
-                    full = hit[1]
-                else:
-                    if slot == 0:
-                        full = mat[np.ix_(_REV, _REV)]
-                    elif slot == 1:
-                        full = np.kron(mat, _I2)
-                    else:
-                        full = np.kron(_I2, mat)
-                    lifted[(id(mat), slot)] = (mat, full)
-            u = full @ u
+        u = self._block_unitary(block, instrs, mats)
         err = None
         try:
             if self._max_infidelity > 0:
@@ -543,6 +525,57 @@ class ConsolidateBlocksPass:
         else:
             self.stats.two_qubit_after += block.cost
 
+    def _block_unitary(
+        self,
+        block: _Block,
+        instrs: tuple[CircuitInstruction, ...],
+        mats: list[np.ndarray | None],
+    ) -> np.ndarray:
+        """The block's ``4×4`` unitary (its first qubit most significant)."""
+        qa, _ = block.qubits
+        native = _two_qubit._native_kak()
+        if native is not None:
+            # 与下面的循环逐位相同（同样的 numpy 乘法、kron 与置换）
+            block_mats: list[np.ndarray] = []
+            places: list[int] = []
+            for m in block.members:
+                mat = mats[m]
+                assert mat is not None
+                qs = instrs[m].qubits
+                block_mats.append(mat)
+                if len(qs) == 2:
+                    places.append(0 if qs[0] == qa else 3)
+                else:
+                    places.append(1 if qs[0] == qa else 2)
+            found = native.block_unitary(block_mats, places, _two_qubit._SWAP4)
+            if found is not None:
+                return found
+        u = np.eye(4, dtype=complex)
+        lifted = self._lifted_cache
+        for m in block.members:
+            mat = mats[m]
+            assert mat is not None
+            qs = instrs[m].qubits
+            if len(qs) == 2 and qs[0] == qa:
+                full = mat
+            else:
+                # 4×4 形式只取决于矩阵本身与它作用的位置：按矩阵对象缓存
+                # （矩阵来自按门缓存的 _matrix，同一个门总是同一个对象）。
+                slot = 0 if len(qs) == 2 else (1 if qs[0] == qa else 2)
+                hit = lifted.get((id(mat), slot))
+                if hit is not None and hit[0] is mat:
+                    full = hit[1]
+                else:
+                    if slot == 0:
+                        full = mat[np.ix_(_REV, _REV)]
+                    elif slot == 1:
+                        full = np.kron(mat, _I2)
+                    else:
+                        full = np.kron(_I2, mat)
+                    lifted[(id(mat), slot)] = (mat, full)
+            u = full @ u
+        return u
+
     def _fuse_single_qubit_runs(
         self, instrs: list[CircuitInstruction]
     ) -> list[CircuitInstruction]:
@@ -554,13 +587,19 @@ class ConsolidateBlocksPass:
             run = runs.pop(q, None)
             if run is None or len(run) < 2:
                 return
-            u = np.eye(2, dtype=complex)
+            run_mats: list[np.ndarray] = []
             for i in run:
                 gate = instrs[i].gate
                 assert gate is not None
                 mat = self._matrix(gate)
                 assert mat is not None
-                u = mat @ u
+                run_mats.append(mat)
+            native = _two_qubit._native_kak()
+            u = None if native is None else native.run_unitary(run_mats)
+            if u is None:  # 原生结果与下面的乘法逐位相同
+                u = np.eye(2, dtype=complex)
+                for mat in run_mats:
+                    u = mat @ u
             ops = _verified_euler_ops(u, self._atol, self._basis.euler)
             if ops is None or len(ops) >= len(run):
                 return

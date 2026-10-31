@@ -719,6 +719,73 @@ KakSynthesizer::TryResult KakSynthesizer::EmitFixedLayers(const M4& u, const std
     return best;
 }
 
+std::optional<std::vector<Op>> KakSynthesizer::VerifiedEuler(const M2& u, double atol, int basis) const {
+    for (double tol : {atol, std::min(atol, 1e-12)}) {
+        std::vector<Op> ops;
+        EulerOps(u, 0, basis, tol, &ops);
+        const M2 v = OpsLayerMatrix(ops, 0, ops.size());
+        // overlap = np.vdot(v, u)；phase = overlap / abs(overlap)；max |u − phase·v| <= 1e-9
+        Cx overlap{0.0, 0.0};
+        for (int e = 0; e < 4; ++e) {
+            overlap = Cx{overlap.re + (v[e].re * u[e].re + v[e].im * u[e].im),
+                         overlap.im + (v[e].re * u[e].im - v[e].im * u[e].re)};
+        }
+        const double ab = PyAbs(overlap);
+        Cx phase{1.0, 0.0};
+        if (ab > 1e-300) {
+            phase = Cx{overlap.re / ab, overlap.im / ab};
+        }
+        double dist = 0.0;
+        for (int e = 0; e < 4; ++e) {
+            const Cx diff = Sub(u[e], Mul(np_.modes().scalar_arr, phase, v[e]));
+            dist = std::max(dist, std::hypot(diff.re, diff.im));
+        }
+        if (Verified(dist, 1e-9)) {
+            return ops;
+        }
+    }
+    return std::nullopt;
+}
+
+M4 KakSynthesizer::BlockUnitary(const std::vector<BlockMember>& members, const M4& swap4) const {
+    M4 u{};
+    for (int i = 0; i < 4; ++i) {
+        u[i * 5] = Cx{1.0, 0.0};
+    }
+    for (const BlockMember& member : members) {
+        M4 full;
+        switch (member.slot) {
+            case 0:
+                std::copy(member.matrix, member.matrix + 16, full.begin());
+                break;
+            case 1:
+            case 2: {
+                M2 m;
+                std::copy(member.matrix, member.matrix + 4, m.begin());
+                full = member.slot == 1 ? Kron2(m, c_.i2) : Kron2(c_.i2, m);
+                break;
+            }
+            case 3: {
+                constexpr int kRev[4] = {0, 2, 1, 3};
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        full[r * 4 + c] = member.matrix[kRev[r] * 4 + kRev[c]];
+                    }
+                }
+                break;
+            }
+            default: {
+                M4 m;
+                std::copy(member.matrix, member.matrix + 16, m.begin());
+                full = Mat4(Mat4(swap4, m), swap4);
+                break;
+            }
+        }
+        u = Mat4(full, u);
+    }
+    return u;
+}
+
 // ---- 稳定子候选 ----------------------------------------------------------------
 
 std::vector<KakSynthesizer::Pair> KakSynthesizer::StabilizerFamily(

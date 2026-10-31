@@ -124,6 +124,19 @@ class KakSynthesizer {
     // 超出预算）。不能确定时抛出 Fallback。
     bool ApproximationImpossible(const Kak& kak, double max_infidelity, double atol, int max_entanglers) const;
 
+    // quspect.transpiler._consolidate._verified_euler_ops_uncached：先按 atol 去掉零旋转，误差超出
+    // 1e-9 时改用精确角度；都不满足时返回 nullopt（Python 返回 None）。
+    std::optional<std::vector<Op>> VerifiedEuler(const M2& u, double atol, int basis) const;
+
+    // 块的 4×4 酉矩阵：u = I；对每个成员 u = full @ u（numpy 的乘法）。slot 0：4×4 原样；1：
+    // np.kron(m, I2)；2：np.kron(I2, m)；3：交换两个比特的置换副本（m[np.ix_(REV, REV)]）；
+    // 4：swap4 @ m @ swap4。
+    struct BlockMember {
+        const Cx* matrix;
+        int slot;
+    };
+    M4 BlockUnitary(const std::vector<BlockMember>& members, const M4& swap4) const;
+
     // 单比特欧拉合成 ``euler_ops(m, qubit, basis, atol)``（公开以便测试）。
     void EulerOps(const M2& m, int qubit, int basis, double atol, std::vector<Op>* out) const;
     // ``_kron2``、``_axis_rot``、``_axis_angle``（公开以便与 Python 对拍）。

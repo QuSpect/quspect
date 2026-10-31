@@ -578,6 +578,38 @@ class NativeKak:
             return em, -1, ()
         return entry
 
+    def verified_euler(
+        self, u: np.ndarray, atol: float, euler: str
+    ) -> list[SynthOp] | bool | None:
+        """``_verified_euler_ops_uncached``: ops, ``False`` (``None``) or ``None``."""
+        if euler not in _EULER or u.dtype != _C128 or u.shape != (2, 2):
+            return None
+        result = self._call(
+            self._synth.verified_euler, np.ascontiguousarray(u), atol, _EULER[euler]
+        )
+        return result  # type: ignore[no-any-return]
+
+    def block_unitary(
+        self, mats: list[np.ndarray], slots: list[int], swap4: np.ndarray
+    ) -> np.ndarray | None:
+        """``u = I; u = full @ u`` over a block's members (see the C++ docs).
+
+        ``None`` unless every matrix is C-contiguous ``complex128`` (numpy's
+        BLAS calls depend on the operand layout).
+        """
+        if not all(m.dtype == _C128 and m.flags.c_contiguous for m in mats):
+            return None
+        return np.asarray(self._synth.block_unitary(mats, slots, swap4))
+
+    def run_unitary(self, mats: list[np.ndarray]) -> np.ndarray | None:
+        """``u = I; u = m @ u`` over a run of C-contiguous ``2×2`` matrices."""
+        if not all(
+            m.dtype == _C128 and m.shape == (2, 2) and m.flags.c_contiguous
+            for m in mats
+        ):
+            return None
+        return np.asarray(self._synth.run_unitary(mats))
+
     def num_cz(self, u: object, atol: float) -> int | None:
         """``_count_from_coords(_kak4(u)[2], atol)``."""
         if not self._usable(u):

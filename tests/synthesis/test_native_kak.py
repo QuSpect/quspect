@@ -331,3 +331,72 @@ def test_one_qubit_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(gs, "_native_backend", lambda: None)
     python = run()
     assert repr(native) == repr(python)
+
+
+# ---------------------------------------------------------------------------
+# Block products and verified Euler runs (consolidation, SWAP-face, mapping)
+# ---------------------------------------------------------------------------
+
+
+def test_block_and_run_products_are_bitwise() -> None:
+    from quspect.transpiler._mapping import _SWAP_4
+
+    assert NATIVE is not None
+    rng = np.random.default_rng(37)
+    rev = [0, 2, 1, 3]
+    eye2 = np.eye(2, dtype=complex)
+    specials = [eye2, np.array([[0, 1], [1, 0]], dtype=complex), tq._H, tq._Z]
+    for _ in range(200):
+        mats: list[np.ndarray] = []
+        slots: list[int] = []
+        for _ in range(int(rng.integers(1, 10))):
+            slot = int(rng.integers(0, 5))
+            if slot in (1, 2):
+                pick = int(rng.integers(0, 6))
+                mats.append(specials[pick].copy() if pick < 4 else _haar(rng, 2))
+            else:
+                mats.append(_CZ.copy() if rng.random() < 0.2 else _haar(rng, 4))
+            slots.append(slot)
+        u = np.eye(4, dtype=complex)
+        for m, slot in zip(mats, slots, strict=True):
+            if slot == 0:
+                full = m
+            elif slot == 1:
+                full = np.kron(m, eye2)
+            elif slot == 2:
+                full = np.kron(eye2, m)
+            elif slot == 3:
+                full = m[np.ix_(rev, rev)]
+            else:
+                full = _SWAP_4 @ m @ _SWAP_4
+            u = full @ u
+        got = NATIVE.block_unitary(mats, slots, _SWAP_4)
+        assert got is not None and got.tobytes() == u.tobytes()
+        run = [m for m in mats if m.shape == (2, 2)]
+        v = np.eye(2, dtype=complex)
+        for m in run:
+            v = m @ v
+        got_run = NATIVE.run_unitary(run)
+        assert got_run is not None and got_run.tobytes() == v.tobytes()
+    # 非 C 连续的矩阵交回 Python（numpy 的 BLAS 调用取决于布局）
+    assert (
+        NATIVE.block_unitary([np.asfortranarray(_haar(rng, 4))], [0], _SWAP_4) is None
+    )
+
+
+def test_verified_euler_matches_consolidation() -> None:
+    from quspect.transpiler import _consolidate
+
+    assert NATIVE is not None
+    rng = np.random.default_rng(41)
+    mats = [_haar(rng, 2) for _ in range(30)]
+    mats += [np.diag([1, np.exp(1j * t)]) for t in (0.0, 1e-10, 1e-13, 0.3, np.pi / 2)]
+    mats += [tq._H @ np.diag([1, np.exp(1e-10j)]), tq._SX, tq._X]
+    for m in mats:
+        m = np.ascontiguousarray(m, dtype=complex)
+        for atol in (1e-9, 1e-12):
+            for euler in ("zxz", "zsx"):
+                got = NATIVE.verified_euler(m, atol, euler)
+                ref = _consolidate._verified_euler_ops_uncached(m, atol, euler)
+                assert got is not None
+                assert _same(None if got is False else got, ref)
