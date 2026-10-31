@@ -119,7 +119,9 @@ KakConstants ToConstants(const py::dict& d) {
     }
     std::memcpy(c.phase_map.data(), pm.data(), sizeof(double) * 16);
     std::memcpy(c.can_phases.data(), cp.data(), sizeof(double) * 12);
-    c.normals = d["normals"].cast<std::vector<double>>();
+    if (d.contains("normals")) {
+        c.normals = d["normals"].cast<std::vector<double>>();
+    }
     return c;
 }
 
@@ -175,6 +177,10 @@ class PyKakSynthesizer {
     PyKakSynthesizer(const py::dict& fns, bool ilp64, const py::dict& modes, const py::dict& constants)
         : impl_(ToFunctions(fns, ilp64), ToModes(modes), ToConstants(constants)) {}
 
+    void SetNormals(const std::vector<double>& normals) {
+        impl_.SetNormals(normals);
+    }
+
     int AddEntangler(const std::string& name, const ComplexArray& matrix, const ComplexArray& b0,
                      const ComplexArray& b1, const ComplexArray& a0, const ComplexArray& a1, bool symmetric) {
         EntanglerSpec spec;
@@ -192,6 +198,7 @@ class PyKakSynthesizer {
                           bool swap_face_template, bool mirrored) const {
         const SynthOptions opt = Options(entangler, euler, atol, verify_atol, swap_face_template, mirrored);
         const M4 m = ToMatrix<16>(u);
+        last_fallback_.clear();
         try {
             impl_.CheckUnitary(m);
             bool uses_flag = false;
@@ -210,6 +217,7 @@ class PyKakSynthesizer {
                           bool want_exact) const {
         const SynthOptions opt = Options(entangler, euler, atol, verify_atol, swap_face_template, mirrored);
         const M4 m = ToMatrix<16>(u);
+        last_fallback_.clear();
         try {
             impl_.CheckUnitary(m);
             const Kak kak = impl_.Kak4(m);
@@ -232,6 +240,7 @@ class PyKakSynthesizer {
     py::object SwapFace(const ComplexArray& u, int entangler, int euler, double verify_atol, bool mirrored) const {
         const SynthOptions opt = Options(entangler, euler, 1e-9, verify_atol, false, mirrored);
         const M4 m = ToMatrix<16>(u);
+        last_fallback_.clear();
         try {
             impl_.CheckUnitary(m);
             const auto ops = impl_.SynthesizeSwapFace(m, opt);
@@ -248,6 +257,7 @@ class PyKakSynthesizer {
     // _count_from_coords(_kak4(u)[2], atol)；−1 = 交给 Python。
     int NumCz(const ComplexArray& u, double atol) const {
         const M4 m = ToMatrix<16>(u);
+        last_fallback_.clear();
         try {
             impl_.CheckUnitary(m);
             return KakSynthesizer::CountFromCoords(impl_.Kak4(m).v, atol);
@@ -437,6 +447,7 @@ void BindSynthesis(py::module_& m) {
                                  "Two-qubit KAK synthesis reproducing quspect.synthesis.two_qubit bit for bit.")
         .def(py::init<const py::dict&, bool, const py::dict&, const py::dict&>(), py::arg("functions"),
              py::arg("ilp64"), py::arg("modes"), py::arg("constants"))
+        .def("set_normals", &PyKakSynthesizer::SetNormals, py::arg("normals"))
         .def("add_entangler", &PyKakSynthesizer::AddEntangler, py::arg("name"), py::arg("matrix"), py::arg("before0"),
              py::arg("before1"), py::arg("after0"), py::arg("after1"), py::arg("symmetric"))
         .def("synthesize", &PyKakSynthesizer::Synthesize, py::arg("u"), py::arg("entangler"), py::arg("euler"),

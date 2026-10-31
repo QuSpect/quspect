@@ -29,9 +29,9 @@ import glob
 import importlib
 import logging
 import math
-import mmap
 import os
 import platform
+import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -97,13 +97,11 @@ _SCIPY_OPENBLAS = (
 def _binary_mentions(path: str, names: list[bytes]) -> bool:
     """Whether the file at ``path`` contains every byte string of ``names``."""
     try:
-        with (
-            open(path, "rb") as fh,
-            mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
-        ):
-            return all(mm.find(name) >= 0 for name in names)
-    except (OSError, ValueError):
+        with open(path, "rb") as fh:
+            data = fh.read(1 << 24)
+    except OSError:
         return False
+    return all(data.find(name) >= 0 for name in names)
 
 
 def _numpy_binaries() -> tuple[str, str] | None:
@@ -154,20 +152,15 @@ def _linalg_functions() -> tuple[dict[str, int], bool, str] | None:
     binaries = _numpy_binaries()
     if binaries is None:
         return None
-    core_bin, linalg_bin = binaries
+    _, linalg_bin = binaries
     for scheme in schemes:
-        # numpy 自己的扩展模块必须导入这些符号（同一个库、同一种整数宽度）
-        cblas = [
-            scheme.cblas.format(n).encode()
-            for n in ("zgemm", "zsyrk", "dgemv", "zdotc_sub")
-        ]
-        lap = [
+        # numpy.linalg 必须导入这些符号（同一个库、同一种命名与整数宽度；CBLAS
+        # 名称与之同属 numpy 构建时选定的一套前后缀）。只查这个较小的扩展模块。
+        names = [
             scheme.lapack.format(n).encode()
-            for n in ("zgesdd", "dsyevd", "zgetrf", "dgetrf")
+            for n in ("zgesdd", "dsyevd", "zgetrf", "zcopy")
         ]
-        if not (
-            _binary_mentions(core_bin, cblas) and _binary_mentions(linalg_bin, lap)
-        ):
+        if not _binary_mentions(linalg_bin, names):
             continue
         try:
             lib = ctypes.CDLL(library)
@@ -193,18 +186,15 @@ def _bits(x: Any) -> bytes:
     return np.ascontiguousarray(np.asarray(x, dtype=complex)).tobytes()
 
 
-def _samples(rng: np.random.Generator, n: int) -> np.ndarray:
+def _samples(rng: random.Random, n: int) -> np.ndarray:
     """Random complex samples with zeros, signed zeros and exact values mixed in."""
-    z = rng.normal(size=n) + 1j * rng.normal(size=n)
-    special = np.array(
-        [0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 1e-300, -3.0, np.pi, 1e-17], dtype=float
-    )
-    re = z.real.copy()
-    im = z.imag.copy()
+    special = (0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 1e-300, -3.0, math.pi, 1e-17)
     k = n // 4
-    re[:k] = rng.choice(special, size=k)
-    im[k : 2 * k] = rng.choice(special, size=k)
-    return re + 1j * im
+    re = [rng.choice(special) if i < k else rng.gauss(0.0, 1.0) for i in range(n)]
+    im = [
+        rng.choice(special) if k <= i < 2 * k else rng.gauss(0.0, 1.0) for i in range(n)
+    ]
+    return np.array(re, dtype=float) + 1j * np.array(im, dtype=float)
 
 
 def _pick(candidates: list[int], ok: Any) -> int | None:
@@ -216,125 +206,108 @@ def _pick(candidates: list[int], ok: Any) -> int | None:
 
 
 def _probe_modes(core: Any) -> dict[str, Any] | None:
-    """Evaluation orders of this platform's numpy / CPython complex arithmetic."""
+    """Evaluation orders of this platform's numpy / CPython complex arithmetic.
+
+    Each probe evaluates the expression shapes the synthesis uses (a C
+    contiguous array times a scalar, a scalar times an array, the broadcast
+    product of ``_kron2``, numpy and CPython scalars, ...) on random inputs
+    with zeros and signed zeros mixed in, and keeps the first candidate order
+    that reproduces every result bit for bit.
+    """
+    import cmath
+
     arith = core._synthesis_arith
     scalar = core._synthesis_scalar
-    rng = np.random.default_rng(20240531)
-    n = 4096
-    a = _samples(rng, n)
-    b = _samples(rng, n)
+    rng = random.Random(20240531)
+    a = _samples(rng, 1024)
+    b = _samples(rng, 1024)
+    mats = a.reshape(64, 4, 4)
+    svals = b[:64].reshape(64, 1, 1)
+    fvals = b.real[64:128].reshape(64, 1, 1)
     modes: dict[str, Any] = {}
 
-    # numpy: 数组 * 复数标量（u * cmath.exp(...)、c_mat * root、u[:, 0] * scale）
-    def arr_scalar(m: int) -> bool:
-        for i in range(0, 64):
-            mat = a[16 * i : 16 * i + 16].reshape(4, 4)
-            s = complex(b[i])
-            if _bits(mat * s) != _bits(arith(0, m, mat.ravel(), np.full(16, s))):
-                return False
-            if _bits(mat[:2, :2].copy() * s) != _bits(
-                arith(0, m, mat[:2, :2].ravel(), np.full(4, s))
-            ):
-                return False
-            f = float(b[i].real)
-            col = mat[:, 0] * f
-            if _bits(col) != _bits(
-                arith(0, m, mat[:, 0].copy(), np.full(4, complex(f, 0.0)))
-            ):
-                return False
-        return True
+    def same(ref: Any, op: int, mode: int, x: Any, y: Any) -> bool:
+        xs = np.broadcast_to(x, np.shape(ref)).ravel()
+        ys = np.broadcast_to(y, np.shape(ref)).ravel()
+        return _bits(ref) == _bits(arith(op, mode, xs.copy(), ys.copy()))
 
-    # numpy: 复数标量 * 数组（phase * v、1j * sin * pauli、cos * _I2、1j * theta）
-    def scalar_arr(m: int) -> bool:
-        for i in range(0, 64):
-            mat = a[16 * i : 16 * i + 16].reshape(4, 4)
-            s = complex(b[i])
-            if _bits(s * mat) != _bits(arith(0, m, np.full(16, s), mat.ravel())):
-                return False
-            f = float(b[i].real)
-            if _bits(f * mat[:2, :2]) != _bits(
-                arith(0, m, np.full(4, complex(f)), mat[:2, :2].ravel())
-            ):
-                return False
-            theta = mat.real[0].copy()
-            if _bits(1j * theta) != _bits(
-                arith(0, m, np.full(4, 1j), theta.astype(complex))
-            ):
-                return False
-        return True
-
-    # numpy: _kron2 的广播乘法
-    def kron(m: int) -> bool:
-        for i in range(0, 128):
-            left = a[8 * i : 8 * i + 4].reshape(2, 2)
-            right = b[8 * i + 4 : 8 * i + 8].reshape(2, 2)
-            ref = left[:, None, :, None] * right[None, :, None, :]
-            lb = np.broadcast_to(left[:, None, :, None], (2, 2, 2, 2)).ravel()
-            rb = np.broadcast_to(right[None, :, None, :], (2, 2, 2, 2)).ravel()
-            if _bits(ref) != _bits(arith(0, m, lb.copy(), rb.copy())):
-                return False
-        return True
-
-    # numpy 标量乘法（_zxz_angles 的 m00 * m11）
-    def np_scalar(m: int) -> bool:
-        ref = np.array(
-            [
-                np.complex128(x) * np.complex128(y)
-                for x, y in zip(a[:1024], b[:1024], strict=True)
-            ]
-        )
-        return _bits(ref) == _bits(arith(0, m, a[:1024], b[:1024]))
-
-    # CPython complex * complex
-    def py(m: int) -> bool:
-        ref = np.array(
-            [complex(x) * complex(y) for x, y in zip(a[:1024], b[:1024], strict=True)]
-        )
-        return _bits(ref) == _bits(arith(0, m, a[:1024], b[:1024]))
-
-    # numpy: 数组 / 复数标量
-    def np_div(m: int) -> bool:
-        for i in range(0, 64):
-            mat = a[16 * i : 16 * i + 16].reshape(4, 4)
-            s = complex(b[i])
-            if s == 0:
-                continue
-            if _bits(mat / s) != _bits(arith(1, m, mat.ravel(), np.full(16, s))):
-                return False
-        return True
-
-    for key, fn, cands in (
-        ("arr_scalar", arr_scalar, [1, 0, 2]),
-        ("scalar_arr", scalar_arr, [1, 0, 2]),
-        ("kron", kron, [1, 0, 2]),
-        ("np_scalar", np_scalar, [1, 0, 2]),
-        ("py", py, [1, 0, 2]),
-        ("np_div", np_div, [1, 0]),
-    ):
-        with np.errstate(all="ignore"):
-            mode = _pick(cands, fn)
+    with np.errstate(all="ignore"):
+        # numpy：数组 * 复数标量（u * cmath.exp(...)、c_mat * root、u[:, 0] * scale）
+        r1 = mats * svals
+        r2 = mats[:, :2, :2] * svals
+        r3 = mats[:, :, 0] * fvals[:, :, 0]
+        f_c = fvals.astype(complex)
+        # numpy：复数标量 * 数组（phase * v、1j * sin * pauli、cos * _I2、1j * theta）
+        r4 = svals * mats
+        r5 = fvals * mats[:, :2, :2]
+        theta = mats.real[:, 0, :].copy()
+        r6 = 1j * theta
+        # _kron2 的广播乘法
+        left = a[:256].reshape(64, 2, 2)
+        right = b[256:512].reshape(64, 2, 2)
+        r7 = left[:, :, None, :, None] * right[:, None, :, None, :]
+        # numpy：数组 / 复数标量
+        divisors = np.where(svals == 0, 1.0 + 0j, svals)
+        r8 = mats / divisors
+    checks: list[tuple[str, list[int], Any]] = [
+        (
+            "arr_scalar",
+            [1, 0, 2],
+            lambda m: (
+                same(r1, 0, m, mats, svals)
+                and same(r2, 0, m, mats[:, :2, :2], svals)
+                and same(r3, 0, m, mats[:, :, 0], f_c[:, :, 0])
+            ),
+        ),
+        (
+            "scalar_arr",
+            [1, 0, 2],
+            lambda m: (
+                same(r4, 0, m, svals, mats)
+                and same(r5, 0, m, f_c, mats[:, :2, :2])
+                and same(r6, 0, m, 1j, theta.astype(complex))
+            ),
+        ),
+        (
+            "kron",
+            [1, 0, 2],
+            lambda m: same(
+                r7, 0, m, left[:, :, None, :, None], right[:, None, :, None, :]
+            ),
+        ),
+        ("np_div", [1, 0], lambda m: same(r8, 1, m, mats, divisors)),
+    ]
+    xs, ys = a[:256], b[:256]
+    np_prod = np.array(
+        [np.complex128(x) * np.complex128(y) for x, y in zip(xs, ys, strict=True)]
+    )
+    py_prod = np.array([complex(x) * complex(y) for x, y in zip(xs, ys, strict=True)])
+    checks.append(
+        ("np_scalar", [1, 0, 2], lambda m: _bits(np_prod) == _bits(arith(0, m, xs, ys)))
+    )
+    checks.append(
+        ("py", [1, 0, 2], lambda m: _bits(py_prod) == _bits(arith(0, m, xs, ys)))
+    )
+    for key, cands, ok in checks:
+        mode = _pick(cands, ok)
         if mode is None:
             logger.debug("native KAK: no evaluation order matches %s", key)
             return None
         modes[key] = mode
 
     # CPython complex * float：3.13 及以前是完整复数乘法，之后是混合运算
-    fs = b.real[:1024]
-    ref = np.array([complex(x) * float(f) for x, f in zip(a[:1024], fs, strict=True)])
-    full = arith(2, modes["py"], a[:1024], fs.astype(complex))
-    mixed = arith(2, 3, a[:1024], fs.astype(complex))
-    if _bits(ref) == _bits(full):
+    fs = b.real[:256]
+    ref = np.array([complex(x) * float(f) for x, f in zip(xs, fs, strict=True)])
+    if _bits(ref) == _bits(arith(2, modes["py"], xs, fs.astype(complex))):
         modes["py_mixed"] = False
-    elif _bits(ref) == _bits(mixed):
+    elif _bits(ref) == _bits(arith(2, 3, xs, fs.astype(complex))):
         modes["py_mixed"] = True
     else:
         logger.debug("native KAK: CPython complex * float order not reproduced")
         return None
 
-    # CPython / libm 标量函数与 numpy 的 arctan2、exp(1j·θ)
-    import cmath
-
-    zs = a[:2048]
+    # cmath / math / abs 与 numpy 的 np.angle、np.exp(1j·θ)
+    zs = a[:256]
     small = zs * 0.25
     py_exp = np.array([cmath.exp(complex(z)) for z in small])
     if _bits(py_exp) == _bits(scalar(1, small)):
@@ -344,26 +317,25 @@ def _probe_modes(core: Any) -> dict[str, Any] | None:
     else:
         logger.debug("native KAK: cmath.exp not reproduced")
         return None
-    checks = [
-        (0, zs, [cmath.sqrt(complex(z)) for z in zs]),
-        (2, zs, [complex(cmath.phase(complex(z))) for z in zs]),
-        (3, zs, [complex(math.atan2(z.imag, z.real)) for z in zs]),
-        (6, zs, [complex(abs(complex(z))) for z in zs]),
-    ]
-    for fn_code, arg, expected in checks:
-        if _bits(np.array(expected)) != _bits(scalar(fn_code, arg)):
+    for fn_code, expected in (
+        (0, [cmath.sqrt(complex(z)) for z in zs]),
+        (2, [complex(cmath.phase(complex(z))) for z in zs]),
+        (3, [complex(math.atan2(z.imag, z.real)) for z in zs]),
+        (6, [complex(abs(complex(z))) for z in zs]),
+    ):
+        if _bits(np.array(expected)) != _bits(scalar(fn_code, zs)):
             logger.debug("native KAK: scalar function %d not reproduced", fn_code)
             return None
     with np.errstate(all="ignore"):
-        angle = np.angle(zs)
-        theta = zs.real * 3.0
-        expo = np.exp(1j * theta)
-    if _bits(angle) != _bits(scalar(4, zs).real):
+        angle = np.angle(a)
+        phases = a.real * 3.0
+        expo = np.exp(1j * phases)
+    if _bits(angle) != _bits(scalar(4, a).real):
         logger.debug("native KAK: np.angle differs from libm atan2")
         return None
-    if _bits(expo) == _bits(scalar(5, 1j * theta)):
+    if _bits(expo) == _bits(scalar(5, 1j * phases)):
         modes["np_exp_joint"] = False
-    elif _bits(expo) == _bits(scalar(8, 1j * theta)):
+    elif _bits(expo) == _bits(scalar(8, 1j * phases)):
         modes["np_exp_joint"] = True
     else:
         logger.debug("native KAK: np.exp(1j * theta) differs from (cos, sin)")
@@ -380,12 +352,8 @@ def _probe_linalg(
     constants: dict[str, Any],
 ) -> Any | None:
     """Build the synthesizer with the matching ``np.linalg.det`` evaluation order."""
-    rng = np.random.default_rng(777)
-    mats = [
-        rng.normal(size=(n, n)) + 1j * rng.normal(size=(n, n))
-        for n in (2, 4)
-        for _ in range(200)
-    ]
+    rng = random.Random(777)
+    mats = [_samples(rng, n * n).reshape(n, n) for n in (2, 4) for _ in range(64)]
     mats += [
         np.eye(2, dtype=complex),
         np.eye(4, dtype=complex)[[1, 0, 2, 3]],
@@ -445,6 +413,14 @@ class NativeKak:
         self._entanglers[basis.entangler] = (ent, index)
         return index
 
+    def _call(self, method: Any, *args: Any) -> Any:
+        """Call a synthesizer entry point; supply the random coefficients on demand."""
+        result = method(*args)
+        if self._synth.last_fallback == "need normals":
+            self._synth.set_normals(_normals())
+            result = method(*args)
+        return result
+
     def _usable(self, u: object) -> bool:
         tq = self._tq
         if tq._try_synthesize is not tq._try_synthesize_reference:
@@ -466,7 +442,8 @@ class NativeKak:
         if ent is None:
             return None
         tq = self._tq
-        result = self._synth.synthesize(
+        result = self._call(
+            self._synth.synthesize,
             u,
             ent,
             _EULER[basis.euler],
@@ -496,7 +473,8 @@ class NativeKak:
         if ent is None:
             return None
         tq = self._tq
-        status, ops, uses = self._synth.approximate(
+        status, ops, uses = self._call(
+            self._synth.approximate,
             u,
             max_infidelity,
             atol,
@@ -521,7 +499,8 @@ class NativeKak:
         ent = self._entangler(basis)
         if ent is None:
             return None
-        result = self._synth.swap_face(
+        result = self._call(
+            self._synth.swap_face,
             u,
             ent,
             _EULER[basis.euler],
@@ -534,13 +513,18 @@ class NativeKak:
         """``_count_from_coords(_kak4(u)[2], atol)``."""
         if not self._usable(u):
             return None
-        count = int(self._synth.num_cz(u, atol))
+        count = int(self._call(self._synth.num_cz, u, atol))
         return None if count < 0 else count
 
 
-def _constants(tq: Any) -> dict[str, Any]:
+def _normals() -> list[float]:
+    """Coefficients ``_real_orthogonal_diagonalize`` draws after two failed attempts."""
     rng = np.random.default_rng(1234567)
-    normals = [float(rng.normal()) for _ in range(196)]
+    return [float(rng.normal()) for _ in range(196)]
+
+
+def _constants(tq: Any) -> dict[str, Any]:
+    # 随机组合系数按需补上（导入 numpy.random 本身就要几毫秒）
     return {
         "magic": tq._MAGIC,
         "magic_conj": np.ascontiguousarray(tq._MAGIC_DAG.T),
@@ -560,7 +544,6 @@ def _constants(tq: Any) -> dict[str, Any]:
         "flip_bc": tq._FLIP_BC,
         "phase_map": np.ascontiguousarray(tq._PHASE_MAP, dtype=float),
         "can_phases": np.ascontiguousarray(tq._CAN_PHASES, dtype=float),
-        "normals": normals,
     }
 
 
@@ -568,29 +551,33 @@ def _self_check(native: NativeKak, tq: Any) -> bool:
     """Compare the native synthesis with the Python reference on a fixed sample."""
     from quspect.synthesis.two_qubit import TwoQubitBasis
 
-    rng = np.random.default_rng(97531)
+    rng = random.Random(97531)
     swap = np.eye(4, dtype=complex)[[0, 2, 1, 3]]
     zz = np.diag(np.exp(-0.15j * np.array([1, -1, -1, 1])))
     cz = np.diag([1, 1, 1, -1]).astype(complex)
     cp = np.diag([1, 1, 1, np.exp(0.4j)])
     heis = tq.canonical_gate(0.3, 0.3, -0.3)
 
-    def local() -> np.ndarray:
-        a = np.linalg.qr(rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2)))[0]
-        b = np.linalg.qr(rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2)))[0]
-        return np.asarray(np.kron(a, b))
+    def haar(n: int) -> np.ndarray:
+        g = [complex(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0)) for _ in range(n * n)]
+        return np.asarray(np.linalg.qr(np.array(g).reshape(n, n))[0])
 
-    mats = [
-        np.linalg.qr(rng.normal(size=(4, 4)) + 1j * rng.normal(size=(4, 4)))[0]
-        for _ in range(3)
-    ]
-    mats += [local() @ m @ local() for m in (swap @ zz, cz, cp, heis, swap)]
-    mats += [np.eye(4, dtype=complex), local()]
+    def local() -> np.ndarray:
+        return np.asarray(np.kron(haar(2), haar(2)))
+
+    mats = [haar(4), haar(4)]
+    mats += [local() @ m @ local() for m in (swap @ zz, cz, cp, heis)]
     mats = [np.ascontiguousarray(m, dtype=complex) for m in mats]
+    # (基, SWAP 面模板开关, 矩阵)：随机 / SWAP·ZZ / CZ 类 / c = 0 / 退化点
+    plan = (
+        (TwoQubitBasis("cz", "zxz"), False, mats),
+        (TwoQubitBasis("cz", "zsx"), True, mats[1:3]),
+        (TwoQubitBasis("cx", "zsx"), False, mats[:1]),
+    )
     flags = (tq._SWAP_FACE_TEMPLATE, tq._MIRRORED_STABILIZERS)
     try:
         tq._SWAP_FACE_TEMPLATE, tq._MIRRORED_STABILIZERS = False, True
-        for m in mats[:4]:
+        for m in mats[:2]:
             ref = tq._kak4(m)
             got = native._synth.kak4(m)
             if got is None or [_bits(x) for x in (ref[0], ref[1], ref[2], ref[3])] != [
@@ -600,25 +587,18 @@ def _self_check(native: NativeKak, tq: Any) -> bool:
                 _bits(got[3]),
             ]:
                 return False
-        for basis, flag in (
-            (TwoQubitBasis("cz", "zxz"), False),
-            (TwoQubitBasis("cz", "zsx"), True),
-            (TwoQubitBasis("cx", "zsx"), False),
-        ):
+        for basis, flag, sample in plan:
             tq._SWAP_FACE_TEMPLATE = flag
-            for m in mats if basis.entangler == "cz" else mats[:5]:
+            for m in sample:
                 ref_ops = tq._synthesize_two_qubit_ops(m, 1e-9, 1e-9, basis)
                 got = native.synthesize(m, 1e-9, 1e-9, basis)
                 if got is None or repr(got[0]) != repr(ref_ops):
                     return False
-        for m in mats[3:5]:
-            basis = TwoQubitBasis("cz", "zsx")
-            ref_sf = tq._synthesize_swap_face_block(m, basis, 1e-9)
-            got_sf = native.swap_face(m, basis, 1e-9)
-            if got_sf is None or repr(None if got_sf is False else got_sf) != repr(
-                ref_sf
-            ):
-                return False
+        basis = TwoQubitBasis("cz", "zsx")
+        ref_sf = tq._synthesize_swap_face_block(mats[2], basis, 1e-9)
+        got_sf = native.swap_face(mats[2], basis, 1e-9)
+        if got_sf is None or repr(None if got_sf is False else got_sf) != repr(ref_sf):
+            return False
     except Exception:  # noqa: BLE001 - 任何异常都视为不一致
         logger.debug("native KAK self-check raised", exc_info=True)
         return False

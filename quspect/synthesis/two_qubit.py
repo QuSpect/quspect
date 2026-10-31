@@ -420,7 +420,7 @@ def _real_orthogonal_diagonalize(m2: np.ndarray) -> np.ndarray:
     m2 = m2.copy()
     m2.real[np.abs(m2.real) < 1e-14] = 0.0
     m2.imag[np.abs(m2.imag) < 1e-14] = 0.0
-    rng = np.random.default_rng(1234567)
+    rng: np.random.Generator | None = None  # 前两次尝试失败时才需要（同一个种子）
     best_p: np.ndarray | None = None
     best_err = math.inf
     for attempt in range(100):
@@ -429,6 +429,8 @@ def _real_orthogonal_diagonalize(m2: np.ndarray) -> np.ndarray:
         elif attempt == 1:
             w_re, w_im = 0.0, 1.0
         else:
+            if rng is None:
+                rng = np.random.default_rng(1234567)
             w_re, w_im = rng.normal(), rng.normal()
         _, p = np.linalg.eigh(w_re * m2.real + w_im * m2.imag)
         d = p.T @ m2 @ p

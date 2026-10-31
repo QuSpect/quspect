@@ -31,6 +31,12 @@ class Fallback : public std::runtime_error {
     explicit Fallback(const char* what) : std::runtime_error(what) {}
 };
 
+// _real_orthogonal_diagonalize 需要随机组合系数，但尚未提供（见 KakConstants::normals）。
+class NeedNormals : public Fallback {
+ public:
+    NeedNormals() : Fallback("need normals") {}
+};
+
 // 合成出的一个门（局部比特 0 / 1）。
 enum class OpKind : std::uint8_t { kEntangler, kRz, kH, kX, kSX };
 struct Op {
@@ -52,7 +58,9 @@ struct KakConstants {
     M4 flip_ab{}, flip_ac{}, flip_bc{};
     std::array<double, 16> phase_map{};    // _PHASE_MAP（4×4，C 连续）
     std::array<double, 12> can_phases{};   // _CAN_PHASES（4×3）
-    std::vector<double> normals;           // default_rng(1234567).normal() 的前 2·98 个值
+    // default_rng(1234567).normal() 的前 2·98 个值（只有前两次尝试都失败时才用到；为空时抛出
+    // NeedNormals，由调用方补上后重试）
+    std::vector<double> normals;
 };
 
 // 本地纠缠门（quspect.synthesis.two_qubit.Entangler）。
@@ -87,6 +95,11 @@ class KakSynthesizer {
     KakSynthesizer(const LinalgFunctions& fns, const ArithModes& modes, KakConstants constants);
 
     int AddEntangler(EntanglerSpec spec);
+    // 补上 KakConstants::normals（至少 196 个）。
+    void SetNormals(std::vector<double> normals);
+    bool HasNormals() const {
+        return c_.normals.size() >= 196;
+    }
 
     // ``_check_unitary_4`` 的判断：true = 是酉矩阵；不是酉矩阵或落在容差边界上时抛出 Fallback。
     void CheckUnitary(const M4& u) const;

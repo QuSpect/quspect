@@ -88,9 +88,16 @@ struct KakSynthesizer::UFactors {
 
 KakSynthesizer::KakSynthesizer(const LinalgFunctions& fns, const ArithModes& modes, KakConstants constants)
     : np_(fns, modes), c_(std::move(constants)) {
-    if (c_.normals.size() < 196) {
+    if (!c_.normals.empty() && c_.normals.size() < 196) {
         throw std::invalid_argument("need 196 precomputed normal deviates");
     }
+}
+
+void KakSynthesizer::SetNormals(std::vector<double> normals) {
+    if (normals.size() < 196) {
+        throw std::invalid_argument("need 196 precomputed normal deviates");
+    }
+    c_.normals = std::move(normals);
 }
 
 int KakSynthesizer::AddEntangler(EntanglerSpec spec) {
@@ -286,6 +293,9 @@ std::array<double, 16> KakSynthesizer::RealOrthogonalDiagonalize(const M4& m2_in
             w_re = 0.0;
             w_im = 1.0;
         } else {
+            if (!HasNormals()) {
+                throw NeedNormals();
+            }
             w_re = c_.normals[static_cast<std::size_t>(2 * (attempt - 2))];
             w_im = c_.normals[static_cast<std::size_t>(2 * (attempt - 2) + 1)];
         }
