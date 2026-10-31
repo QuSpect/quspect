@@ -17,14 +17,15 @@ it does not depend on :class:`~quspect.dag.DAGCircuit` internals.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 import quspect.synthesis.two_qubit as _two_qubit
 from quspect.circuit.circuit import QuantumCircuit
-from quspect.circuit.instruction import CircuitInstruction
+from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.synthesis._memo import BoundedCache, matrix_key
 from quspect.synthesis.two_qubit import (
     DEFAULT_ATOL,
@@ -390,6 +391,20 @@ class ConsolidateBlocksPass:
         self.stats = ConsolidationStats()
         instrs = circuit.instructions
         slots: list[list[CircuitInstruction] | CircuitInstruction | None] = list(instrs)
+        swept = self._native_sweep(instrs)
+        if swept is not None:
+            # 原生扫描给出与下面的循环相同的矩阵与块（按关闭顺序）；逐块重综合不变。
+            native_mats, closed = swept
+            for qubits, members, first_2q, cost, num_2q in closed:
+                block = _Block(
+                    qubits=qubits,
+                    members=members,
+                    first_2q=first_2q,
+                    cost=cost,
+                    num_2q=num_2q,
+                )
+                self._finalize(block, instrs, native_mats, slots)
+            return self._assemble(circuit, slots)
         mats: list[np.ndarray | None] = [None] * len(instrs)
         open_block: dict[int, _Block] = {}
         pending: dict[int, list[int]] = {}
@@ -452,7 +467,34 @@ class ConsolidateBlocksPass:
 
         for blk in list({id(b): b for b in open_block.values()}.values()):
             close(blk)
+        return self._assemble(circuit, slots)
 
+    def _native_sweep(
+        self, instrs: tuple[CircuitInstruction, ...]
+    ) -> tuple[list[np.ndarray | None], list[tuple[Any, ...]]] | None:
+        """Block sweep of :meth:`run` on the native core (``None``: unavailable)."""
+        core = _sweep_core()
+        if core is None or type(self) is not ConsolidateBlocksPass:
+            return None
+        result: tuple[list[np.ndarray | None], list[tuple[Any, ...]]] | None
+        result = core._consolidate_blocks(
+            instrs,
+            CircuitInstruction,
+            InstructionType.GATE,
+            InstructionType.BARRIER,
+            self._matrix_cache,
+            self._matrix,
+            _KNOWN_2Q_COST,
+            self._cost,
+        )
+        return result
+
+    def _assemble(
+        self,
+        circuit: QuantumCircuit,
+        slots: list[list[CircuitInstruction] | CircuitInstruction | None],
+    ) -> QuantumCircuit:
+        """Flatten the slots, fuse single-qubit runs and build the circuit."""
         flat: list[CircuitInstruction] = []
         for slot in slots:
             if slot is None:
@@ -587,6 +629,9 @@ class ConsolidateBlocksPass:
             run = runs.pop(q, None)
             if run is None or len(run) < 2:
                 return
+            resynthesize(q, run)
+
+        def resynthesize(q: int, run: list[int]) -> None:
             run_mats: list[np.ndarray] = []
             for i in run:
                 gate = instrs[i].gate
@@ -607,24 +652,42 @@ class ConsolidateBlocksPass:
                 slots[i] = None
             slots[run[0]] = ops_to_instructions(ops, (q, q))
 
-        for idx, ins in enumerate(instrs):
-            gate = ins.gate
-            if (
-                ins.is_gate
-                and gate is not None
-                and len(ins.qubits) == 1
-                and self._matrix(gate) is not None
-            ):
-                runs.setdefault(ins.qubits[0], []).append(idx)
-                continue
-            if not ins.qubits and ins.is_barrier:
-                for q in list(runs):
+        core = _sweep_core()
+        found = (
+            None
+            if core is None or type(self) is not ConsolidateBlocksPass
+            else core._single_qubit_runs(
+                instrs,
+                CircuitInstruction,
+                InstructionType.GATE,
+                InstructionType.BARRIER,
+                self._matrix_cache,
+                self._matrix,
+            )
+        )
+        if found is not None:
+            # 与下面的扫描相同的单比特串（按 flush 顺序，只含长度 >= 2 的串）
+            for q, run in found:
+                resynthesize(q, run)
+        else:
+            for idx, ins in enumerate(instrs):
+                gate = ins.gate
+                if (
+                    ins.is_gate
+                    and gate is not None
+                    and len(ins.qubits) == 1
+                    and self._matrix(gate) is not None
+                ):
+                    runs.setdefault(ins.qubits[0], []).append(idx)
+                    continue
+                if not ins.qubits and ins.is_barrier:
+                    for q in list(runs):
+                        flush(q)
+                    continue
+                for q in ins.qubits:
                     flush(q)
-                continue
-            for q in ins.qubits:
+            for q in list(runs):
                 flush(q)
-        for q in list(runs):
-            flush(q)
 
         flat: list[CircuitInstruction] = []
         for slot in slots:
@@ -635,3 +698,22 @@ class ConsolidateBlocksPass:
             else:
                 flat.append(slot)
         return flat
+
+
+def _sweep_core() -> Any | None:
+    """The extension module if it provides the native consolidation sweeps."""
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    if core is None or not hasattr(core, "_consolidate_blocks"):
+        return None
+    if os.environ.get(CONSOLIDATE_SWEEP_ENV) == "python":
+        return None
+    return core
+
+
+#: ``python`` keeps the consolidation sweeps in Python (reference / tests).
+CONSOLIDATE_SWEEP_ENV = "QUSPECT_CONSOLIDATE_SWEEP"
