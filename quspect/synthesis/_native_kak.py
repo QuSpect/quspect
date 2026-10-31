@@ -322,6 +322,8 @@ def _probe_modes(core: Any) -> dict[str, Any] | None:
         (2, [complex(cmath.phase(complex(z))) for z in zs]),
         (3, [complex(math.atan2(z.imag, z.real)) for z in zs]),
         (6, [complex(abs(complex(z))) for z in zs]),
+        # numpy 标量的 abs（npy_cabs，单比特合成的角度用到）
+        (6, [complex(float(abs(np.complex128(z)))) for z in zs]),
     ):
         if _bits(np.array(expected)) != _bits(scalar(fn_code, zs)):
             logger.debug("native KAK: scalar function %d not reproduced", fn_code)
