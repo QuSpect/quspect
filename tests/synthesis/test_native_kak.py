@@ -382,6 +382,19 @@ def test_block_and_run_products_are_bitwise() -> None:
     assert (
         NATIVE.block_unitary([np.asfortranarray(_haar(rng, 4))], [0], _SWAP_4) is None
     )
+    m4 = _haar(rng, 4)
+    assert NATIVE.block_unitary([m4.astype(np.complex64)], [0], _SWAP_4) is None
+    assert NATIVE.block_unitary([m4[:, ::-1]], [0], _SWAP_4) is None
+    assert NATIVE.run_unitary([_haar(rng, 2).astype(np.complex64)]) is None
+    assert NATIVE.run_unitary([_haar(rng, 2).T]) is None
+    assert NATIVE.run_unitary([np.zeros(4, dtype=complex)]) is None
+    # 原生的布局判断与 Python 端的判断结果相同
+    synth = NATIVE._synth
+    two = _haar(rng, 2)
+    assert synth.run_unitary_strict([two]).tobytes() == (
+        synth.run_unitary([two]).tobytes()
+    )
+    assert synth.block_unitary_strict([m4.T], [0], _SWAP_4) is None
 
 
 def test_verified_euler_matches_consolidation() -> None:

@@ -599,12 +599,23 @@ class NativeKak:
         ``None`` unless every matrix is C-contiguous ``complex128`` (numpy's
         BLAS calls depend on the operand layout).
         """
+        strict = getattr(self._synth, "block_unitary_strict", None)
+        if strict is not None and type(mats) is list:
+            # 布局判断在原生代码中完成；不满足时照常走下面的判断
+            found = strict(mats, slots, swap4)
+            if found is not None:
+                return np.asarray(found)
         if not all(m.dtype == _C128 and m.flags.c_contiguous for m in mats):
             return None
         return np.asarray(self._synth.block_unitary(mats, slots, swap4))
 
     def run_unitary(self, mats: list[np.ndarray]) -> np.ndarray | None:
         """``u = I; u = m @ u`` over a run of C-contiguous ``2×2`` matrices."""
+        strict = getattr(self._synth, "run_unitary_strict", None)
+        if strict is not None and type(mats) is list:
+            found = strict(mats)
+            if found is not None:
+                return np.asarray(found)
         if not all(
             m.dtype == _C128 and m.shape == (2, 2) and m.flags.c_contiguous
             for m in mats

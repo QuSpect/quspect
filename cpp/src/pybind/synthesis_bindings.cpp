@@ -26,6 +26,8 @@ namespace {
 using namespace quspect::native::synthesis;
 
 using ComplexArray = py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast>;
+// 不做转换：只接受本来就是 C 连续 complex128 的数组。
+using StrictArray = py::array_t<std::complex<double>, py::array::c_style>;
 using RealArray = py::array_t<double, py::array::c_style | py::array::forcecast>;
 
 static_assert(sizeof(Cx) == sizeof(std::complex<double>), "Cx must match complex128");
@@ -304,6 +306,31 @@ class PyKakSynthesizer {
             members.push_back({reinterpret_cast<const Cx*>(keep.back().data()), slot});
         }
         return FromMatrix(impl_.BlockUnitary(members, ToMatrix<16>(swap4)));
+    }
+
+    // 与 BlockUnitary / RunUnitary 相同，但先核对每个矩阵都是 C 连续的 complex128 数组
+    // （numpy 的 BLAS 调用取决于操作数的布局；与 Python 端 m.dtype == complex128 and
+    // m.flags.c_contiguous 的判断相同，run 还要求形状为 (2, 2)），否则返回 None。
+    py::object BlockUnitaryStrict(const py::list& mats, const std::vector<int>& slots,
+                                  const ComplexArray& swap4) const {
+        for (const auto item : mats) {
+            if (!StrictArray::check_(item)) {
+                return py::none();
+            }
+        }
+        return BlockUnitary(mats, slots, swap4);
+    }
+    py::object RunUnitaryStrict(const py::list& mats) const {
+        for (const auto item : mats) {
+            if (!StrictArray::check_(item)) {
+                return py::none();
+            }
+            const auto arr = py::reinterpret_borrow<py::array>(item);
+            if (arr.ndim() != 2 || arr.shape(0) != 2 || arr.shape(1) != 2) {
+                return py::none();
+            }
+        }
+        return RunUnitary(mats);
     }
 
     // 单比特门串的矩阵：u = I；对每个门 u = m @ u（numpy 的 2×2 乘法）。
@@ -596,6 +623,9 @@ void BindSynthesis(py::module_& m) {
         .def("verified_euler", &PyKakSynthesizer::VerifiedEuler, py::arg("u"), py::arg("atol"), py::arg("euler"))
         .def("block_unitary", &PyKakSynthesizer::BlockUnitary, py::arg("mats"), py::arg("slots"), py::arg("swap4"))
         .def("run_unitary", &PyKakSynthesizer::RunUnitary, py::arg("mats"))
+        .def("block_unitary_strict", &PyKakSynthesizer::BlockUnitaryStrict, py::arg("mats"), py::arg("slots"),
+             py::arg("swap4"))
+        .def("run_unitary_strict", &PyKakSynthesizer::RunUnitaryStrict, py::arg("mats"))
         .def("kak4", &PyKakSynthesizer::Kak4, py::arg("u"))
         .def("factor_local", &PyKakSynthesizer::FactorLocal, py::arg("k"))
         .def("euler_ops", &PyKakSynthesizer::EulerOps, py::arg("m"), py::arg("qubit"), py::arg("basis"),
