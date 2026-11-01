@@ -2,7 +2,9 @@
 // * _instruction_bit_counts：QuantumCircuit.num_qubits / num_clbits（各比特元组的最大值 + 1）；
 // * _instruction_stats：transpile 的 (两比特门数, 深度, 两比特门深度, 门数)；
 // * _remap_instruction_qubits：QuantumCircuit.compose 按比特映射逐条重建指令；
-// * _synth_op_instructions：two_qubit.ops_to_instructions（合成结果 -> 指令）。
+// * _synth_op_instructions：two_qubit.ops_to_instructions（合成结果 -> 指令）；
+// * _unsupported_gate_indices：分解时需要逐条处理的指令（门名不在目标门集中的门）的下标；
+// * _flatten_slots：块重综合的槽位表展开（None 跳过、list 展开、其他原样）。
 // 只处理 CircuitInstruction 本身、比特为 int 组成的 tuple 的输入；其他情形返回 None，由 Python 端
 // 按原实现处理（因此异常类型与信息都来自原实现）。直接构造的指令按数据类 __init__ 的字段顺序
 // 逐个写入，只在 __post_init__ 的校验必然通过时这样做。
@@ -359,9 +361,97 @@ py::object SynthOps(const py::sequence& ops, const py::sequence& qubits, const p
     return out;
 }
 
+// 需要逐条处理的指令下标：is_gate and gate is not None and gate.name not in supported 的门，以及
+// 无法在这里判断的指令（不是 CircuitInstruction 本身、type 不是 InstructionType 的成员、门名
+// 不是 str）。其余指令（非门、无门、门名在 supported 中）原样保留，调用方按区间整段复制。
+// supported 不是 set / frozenset 时返回 None。
+py::object UnsupportedIndices(const py::list& instrs, const py::object& instr_cls, const py::object& type_gate,
+                              const py::tuple& other_types, const py::object& supported) {
+    if (!PyAnySet_Check(supported.ptr())) {
+        return py::none();
+    }
+    auto* cls = reinterpret_cast<PyTypeObject*>(instr_cls.ptr());
+    CircuitNames& n = Names();
+    py::list out;
+    auto take = [&](Py_ssize_t i) {
+        py::object idx = py::reinterpret_steal<py::object>(PyLong_FromSsize_t(i));
+        if (!idx || PyList_Append(out.ptr(), idx.ptr()) != 0) {
+            throw py::error_already_set();
+        }
+    };
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(instrs.ptr()); ++i) {
+        PyObject* ins = PyList_GET_ITEM(instrs.ptr(), i);
+        if (Py_TYPE(ins) != cls) {
+            take(i);
+            continue;
+        }
+        py::object type = Attr(ins, n.type);
+        if (type.ptr() != type_gate.ptr()) {
+            bool known = false;
+            for (py::handle t : other_types) {
+                known = known || t.ptr() == type.ptr();
+            }
+            if (!known) {
+                take(i);
+            }
+            continue;
+        }
+        py::object gate = Attr(ins, n.gate);
+        if (gate.is_none()) {
+            continue;
+        }
+        py::object name = Attr(gate.ptr(), n.name);
+        if (!PyUnicode_CheckExact(name.ptr())) {
+            take(i);
+            continue;
+        }
+        const int has = PySet_Contains(supported.ptr(), name.ptr());
+        if (has < 0) {
+            throw py::error_already_set();
+        }
+        if (has == 0) {
+            take(i);
+        }
+    }
+    return out;
+}
+
+// for slot in slots: None 跳过；isinstance(slot, list) 时 extend；否则 append。
+py::list FlattenSlots(const py::list& slots) {
+    py::list out;
+    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(slots.ptr()); ++i) {
+        PyObject* slot = PyList_GET_ITEM(slots.ptr(), i);
+        if (slot == Py_None) {
+            continue;
+        }
+        if (PyList_Check(slot)) {
+            // list.extend(list 子类) 同样按迭代协议取元素
+            py::object items = py::reinterpret_steal<py::object>(PySequence_List(slot));
+            if (!items) {
+                throw py::error_already_set();
+            }
+            for (Py_ssize_t k = 0; k < PyList_GET_SIZE(items.ptr()); ++k) {
+                if (PyList_Append(out.ptr(), PyList_GET_ITEM(items.ptr(), k)) != 0) {
+                    throw py::error_already_set();
+                }
+            }
+            continue;
+        }
+        if (PyList_Append(out.ptr(), slot) != 0) {
+            throw py::error_already_set();
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 void BindCircuitHelpers(py::module_& m) {
+    m.def("_flatten_slots", &FlattenSlots, py::arg("slots"),
+          "Flatten a resynthesis slot list: skip None, extend lists, append anything else.");
+    m.def("_unsupported_gate_indices", &UnsupportedIndices, py::arg("instrs"), py::arg("instr_cls"),
+          py::arg("type_gate"), py::arg("other_types"), py::arg("supported"),
+          "Indices of the instructions a decomposition pass must look at one by one, or None.");
     m.def("_instruction_bit_counts", &BitCounts, py::arg("instrs"), py::arg("instr_cls"),
           "(num_qubits, num_clbits) of a QuantumCircuit instruction list, or None.");
     m.def("_instruction_stats", &Stats, py::arg("instrs"), py::arg("instr_cls"), py::arg("type_gate"),

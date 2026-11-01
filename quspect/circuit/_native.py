@@ -17,7 +17,14 @@ from typing import Any
 
 from quspect._native_loader import load_core
 
-__all__ = ["bit_counts", "instruction_stats", "native_ir", "remap_qubits"]
+__all__ = [
+    "bit_counts",
+    "flatten_slots",
+    "instruction_stats",
+    "native_ir",
+    "remap_qubits",
+    "unsupported_gate_indices",
+]
 
 
 @functools.cache
@@ -120,3 +127,51 @@ def remap_qubits(instructions: list[Any], mapping: Sequence[int]) -> list[Any] |
         instructions, CircuitInstruction, mapping
     )
     return result
+
+
+def unsupported_gate_indices(
+    instructions: list[Any], supported: Any
+) -> list[int] | None:
+    """Indices of the instructions a decomposition must examine one by one.
+
+    These are the gates whose name is not in ``supported`` plus every
+    instruction the native scan cannot classify (subclassed instructions,
+    non-``str`` gate names, ...); all other instructions are non-gates,
+    gate-less or supported gates.  ``None`` when the native helper is not
+    available or ``supported`` is not a ``set`` / ``frozenset``.
+    """
+    core = _circuit_helpers()
+    if core is None:
+        return None
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+    result: list[int] | None = core._unsupported_gate_indices(
+        instructions,
+        CircuitInstruction,
+        InstructionType.GATE,
+        (InstructionType.MEASURE, InstructionType.BARRIER, InstructionType.CHANNEL),
+        supported,
+    )
+    return result
+
+
+def flatten_slots(slots: list[Any]) -> list[Any]:
+    """Flatten a resynthesis slot list (skip ``None``, extend lists, append others).
+
+    Example:
+        >>> flatten_slots([1, None, [2, 3], 4])
+        [1, 2, 3, 4]
+    """
+    core = _circuit_helpers()
+    if core is not None and type(slots) is list:
+        result: list[Any] = core._flatten_slots(slots)
+        return result
+    flat: list[Any] = []
+    for slot in slots:
+        if slot is None:
+            continue
+        if isinstance(slot, list):
+            flat.extend(slot)
+        else:
+            flat.append(slot)
+    return flat

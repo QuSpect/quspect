@@ -176,3 +176,52 @@ def test_ops_to_instructions_unusual_inputs() -> None:
         two_qubit.ops_to_instructions([("cx", (0, 1), ())], (3, 3))
     neg = two_qubit.ops_to_instructions([("cx", (-1, 0), ())], (3, 4))
     assert neg[0].qubits == (4, 3) and neg[0].gate is CX
+
+
+def test_unsupported_gate_indices() -> None:
+    class Sub(CircuitInstruction):
+        pass
+
+    qc = QuantumCircuit().h(0).cx(0, 1).ccx(0, 1, 2).measure([0], [0]).barrier()
+    qc._instructions.append(Sub(InstructionType.GATE, (1,), gate=X))
+    qc.t(2)
+    idx = _native.unsupported_gate_indices(qc._instructions, {"h", "cx", "x"})
+    assert idx == [2, 5, 6]
+    assert _native.unsupported_gate_indices(qc._instructions, ["h"]) is None
+    assert _native.unsupported_gate_indices(qc._instructions, frozenset()) == [
+        0,
+        1,
+        2,
+        5,
+        6,
+    ]
+
+
+def test_flatten_slots() -> None:
+    class L(list):  # type: ignore[type-arg]
+        pass
+
+    a, b, c = object(), object(), object()
+    slots = [a, None, [b, c], L([c]), (a,), []]
+    assert _native.flatten_slots(slots) == [a, b, c, c, (a,)]
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_decompose_with_and_without_native_scan(
+    seed: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quspect.ir.compilation import decompose_circuit, decompose_deep
+
+    rng = random.Random(seed)
+    qc = _random_circuit(rng, 5, 60)
+    qc.u3(0.1, 0.2, 0.3, 1).swap(0, 2).cp(0.4, 1, 3)
+    supported = {"cz", "rz", "sx", "x", "h"}
+    fast = decompose_circuit(qc, supported_gates=supported)
+    deep = decompose_deep(qc, supported_gates=supported)
+    monkeypatch.setattr(_native, "unsupported_gate_indices", lambda *a: None)
+    assert decompose_circuit(qc, supported_gates=supported).instructions == (
+        fast.instructions
+    )
+    assert decompose_deep(qc, supported_gates=supported).instructions == (
+        deep.instructions
+    )

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 import quspect.synthesis.two_qubit as _two_qubit
+from quspect.circuit._native import flatten_slots
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.synthesis._memo import BoundedCache, matrix_key
@@ -495,14 +496,7 @@ class ConsolidateBlocksPass:
         slots: list[list[CircuitInstruction] | CircuitInstruction | None],
     ) -> QuantumCircuit:
         """Flatten the slots, fuse single-qubit runs and build the circuit."""
-        flat: list[CircuitInstruction] = []
-        for slot in slots:
-            if slot is None:
-                continue
-            if isinstance(slot, list):
-                flat.extend(slot)
-            else:
-                flat.append(slot)
+        flat: list[CircuitInstruction] = flatten_slots(slots)
         if self._fuse_1q:
             flat = self._fuse_single_qubit_runs(flat)
         logger.debug(
@@ -689,14 +683,7 @@ class ConsolidateBlocksPass:
             for q in list(runs):
                 flush(q)
 
-        flat: list[CircuitInstruction] = []
-        for slot in slots:
-            if slot is None:
-                continue
-            if isinstance(slot, list):
-                flat.extend(slot)
-            else:
-                flat.append(slot)
+        flat: list[CircuitInstruction] = flatten_slots(slots)
         return flat
 
 

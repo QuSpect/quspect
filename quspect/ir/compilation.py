@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import CircuitInstruction
     from quspect.gates.gate import Gate
 
 
@@ -610,44 +611,68 @@ def decompose_circuit(
     Returns:
         A new :class:`QuantumCircuit` with unsupported gates replaced.
     """
+    from quspect.circuit._native import unsupported_gate_indices
     from quspect.circuit.circuit import QuantumCircuit
-    from quspect.circuit.instruction import InstructionType, _gate_instructions
     from quspect.ir.qasm2 import get_supported_gates
 
     if supported_gates is None:
         supported_gates = get_supported_gates()
 
     new_circuit = QuantumCircuit(name=circuit.name)
+    out = new_circuit._instructions
+
+    indices = (
+        unsupported_gate_indices(circuit._instructions, supported_gates)
+        if type(circuit) is QuantumCircuit
+        else None
+    )
+    if indices is not None:
+        # Only the listed instructions can need a decomposition; the runs
+        # between them pass through unchanged.
+        instrs = circuit._instructions
+        start = 0
+        for i in indices:
+            out.extend(instrs[start:i])
+            _decompose_instruction(instrs[i], supported_gates, out)
+            start = i + 1
+        out.extend(instrs[start:])
+        return new_circuit
 
     for instr in circuit:
-        if instr.type != InstructionType.GATE or instr.gate is None:
-            # Pass through non-gate instructions
-            new_circuit._instructions.append(instr)
-            continue
-
-        gate = instr.gate
-        if gate.name in supported_gates:
-            # Already supported — pass through
-            new_circuit._instructions.append(instr)
-            continue
-
-        # Try decomposition
-        try:
-            direct = _synthesize_direct(gate, instr.qubits, supported_gates)
-            substitutions = (
-                direct if direct is not None else decompose_gate(gate, instr.qubits)
-            )
-        except ValueError:
-            # No rule available — keep the original gate and let the
-            # exporter raise the appropriate error.
-            new_circuit._instructions.append(instr)
-            continue
-
-        new_circuit._instructions.extend(
-            _gate_instructions(substitutions, instr.label if instr.label else "")
-        )
-
+        _decompose_instruction(instr, supported_gates, out)
     return new_circuit
+
+
+def _decompose_instruction(
+    instr: CircuitInstruction, supported_gates: set[str], out: list[CircuitInstruction]
+) -> None:
+    """Append ``instr`` or its decomposition to ``out`` (see decompose_circuit)."""
+    from quspect.circuit.instruction import InstructionType, _gate_instructions
+
+    if instr.type != InstructionType.GATE or instr.gate is None:
+        # Pass through non-gate instructions
+        out.append(instr)
+        return
+
+    gate = instr.gate
+    if gate.name in supported_gates:
+        # Already supported — pass through
+        out.append(instr)
+        return
+
+    # Try decomposition
+    try:
+        direct = _synthesize_direct(gate, instr.qubits, supported_gates)
+        substitutions = (
+            direct if direct is not None else decompose_gate(gate, instr.qubits)
+        )
+    except ValueError:
+        # No rule available — keep the original gate and let the
+        # exporter raise the appropriate error.
+        out.append(instr)
+        return
+
+    out.extend(_gate_instructions(substitutions, instr.label if instr.label else ""))
 
 
 #: Single-qubit gates whose rule chain is long on ``{h, rz}`` bases
@@ -709,13 +734,21 @@ def decompose_deep(
         RecursionError: If decomposition does not converge within
             *max_passes*.
     """
+    from quspect.circuit._native import unsupported_gate_indices
     from quspect.circuit.instruction import InstructionType
 
     current = circuit
     for _ in range(max_passes):
         decomposed = decompose_circuit(current, supported_gates=supported_gates)
+        indices = unsupported_gate_indices(decomposed._instructions, supported_gates)
+        # Only the listed instructions can be unsupported gates.
+        candidates = (
+            decomposed
+            if indices is None
+            else [decomposed._instructions[i] for i in indices]
+        )
         all_supported = True
-        for instr in decomposed:
+        for instr in candidates:
             if (
                 instr.type == InstructionType.GATE
                 and instr.gate is not None

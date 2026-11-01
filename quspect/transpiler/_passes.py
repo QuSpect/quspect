@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import CircuitInstruction
     from quspect.transpiler._target import CompilationTarget
 
 
@@ -101,9 +102,18 @@ class DecomposePass:
 
 def _unsupported(circuit: QuantumCircuit, supported: set[str]) -> set[tuple[str, int]]:
     """``(name, num_qubits)`` of the gates of *circuit* not in *supported*."""
+    from quspect.circuit._native import unsupported_gate_indices
+    from quspect.circuit.circuit import QuantumCircuit
+
+    candidates: Iterable[CircuitInstruction] = circuit
+    if type(circuit) is QuantumCircuit:
+        indices = unsupported_gate_indices(circuit._instructions, supported)
+        if indices is not None:
+            # Only the listed instructions can be unsupported gates.
+            candidates = [circuit._instructions[i] for i in indices]
     return {
         (i.gate.name, len(i.qubits))
-        for i in circuit
+        for i in candidates
         if i.is_gate and i.gate is not None and i.gate.name not in supported
     }
 

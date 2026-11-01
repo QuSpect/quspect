@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from quspect.circuit._native import flatten_slots
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.synthesis.two_qubit import synthesize_two_qubit_ops
@@ -465,14 +466,7 @@ class ThreeQubitBlockPass:
         for blk in {id(b): b for b in owner.values()}.values():
             close(blk)
 
-        flat: list[CircuitInstruction] = []
-        for slot in slots:
-            if slot is None:
-                continue
-            if isinstance(slot, list):
-                flat.extend(slot)
-            else:
-                flat.append(slot)
+        flat: list[CircuitInstruction] = flatten_slots(slots)
         if self.stats.blocks_replaced:
             logger.debug(
                 "ThreeQubitBlockPass: %d/%d blocks replaced, 2q %d -> %d",
