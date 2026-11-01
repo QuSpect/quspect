@@ -73,7 +73,9 @@ by the C++ high-performance engine.
 - **iSing optimization** — QUBO/Ising model conversion, recoverable cloud submission,
   and objective decoding with `quspect[isingq]`; see [iSing cloud optimization](docs/source/isingq.rst).
 - **Transpiler** — native-gate decomposition, topology-safe DAG optimization,
-  constrained physical-qubit mapping, and SABRE SWAP routing
+  constrained physical-qubit mapping, and SABRE SWAP routing; compilation results are bit-identical
+  on every platform (macOS, Linux x86_64/aarch64, Windows); see
+  [Reproducible compilation](docs/source/reproducibility.rst)
 - **Pulse envelopes** — `quspect.pulse` builds and decodes superconducting-qubit control envelopes
   (DRAG, flat-top, custom waveforms, sideband mixing, schedules); a C++ rebuild of envelopes-qc 0.1.5
   with bit-identical output; see [Pulse envelopes](docs/source/pulse.rst)

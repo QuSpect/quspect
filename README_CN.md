@@ -70,7 +70,8 @@ QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASC
 - **iSing 优化** — QUBO/Ising 模型转换、可恢复的云端提交与目标函数解码，需安装
   `quspect[isingq]`；参见 [iSing 云端优化](docs/source/isingq.rst)。
 - **编译器** — 原生门分解、拓扑安全的 DAG 优化、受限物理比特 mapping，以及
-  SABRE SWAP 路由
+  SABRE SWAP 路由；编译结果在所有平台（macOS、Linux x86_64/aarch64、Windows）上逐位一致，
+  见[可复现的编译](docs/source/reproducibility.rst)
 - **脉冲包络** — `quspect.pulse` 构建并解码超导量子比特控制包络（DRAG、平顶、自定义波形、
   边带混频、脉冲序列编排）；是 envelopes-qc 0.1.5 的 C++ 重新实现，输出逐位一致；参见
   [脉冲包络](docs/source/pulse.rst)

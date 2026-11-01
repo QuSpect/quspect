@@ -35,6 +35,7 @@ intermediate representations, and preparing for simulation and hardware executio
    ising_solver
    isingq
    pulse
+   reproducibility
    api
    architecture
    releasing

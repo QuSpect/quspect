@@ -20,7 +20,20 @@ same (correctly rounded) result.
   round the high-precision approximation (deterministic; possibly not correctly rounded in such
   a case). The atan2 branch was reached at `y, x = 0x1.7fffffffffffdp-53, 0x1.ffffffffffffap-3`
   while transpiling `qiskit_hrs_multiplier_13` (the fall-through gives the correctly rounded
-  `0x1.8000000000002p-51`, checked with mpmath at 2000 bits); to be reported upstream.
+  `0x1.8000000000002p-51`, checked with mpmath at 2000 bits); not reported upstream yet.
+
+  Review of the atan2 change: the exact value at that input lies only about 2^-152.6 ulp above a
+  rounding midpoint (y/x is just above a midpoint and the cubic term of the arctangent almost
+  cancels the excess), so the 192-bit approximation cannot prove the rounding direction; it still
+  rounds the right way. A search of 32,301 inputs (the input and all of its +-8-ulp neighbours, scaled
+  by several powers of two, and about 30,000 structured inputs of the same "3/4 * (1 + tiny)" form,
+  with both signs) against the unmodified upstream code found only that ratio (at six scalings)
+  reaching the branch, and the modified code returns the correctly rounded value there (mpmath, 6000
+  bits); a random sample of the other inputs agrees with mpmath as well. `test_detmath`
+  (`CoreMathAtan2WorstCaseIsCorrectlyRounded`) calls `cr_atan2` directly on the input, its +-1-ulp
+  neighbours and scaled copies. The detmath `Atan2` wrapper does not reach this code for such inputs
+  (it uses a short series for |y/x| <= 2^-30). No input reaching the `pow` branch is known; there the
+  256-bit approximation is rounded, which is deterministic but not proven correctly rounded.
 
 Build notes (see `cpp/CMakeLists.txt`):
 
