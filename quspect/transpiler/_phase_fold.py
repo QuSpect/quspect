@@ -161,6 +161,17 @@ class PhaseFoldingPass:
             >>> [i.gate.name for i in PhaseFoldingPass().run(qc)]
             ['cx', 'cx']
         """
+        native = _native_fold(circuit)
+        if native is not None:
+            folded, rotations_in, rotations_out = native
+            self.stats = PhaseFoldingStats(rotations_in, rotations_out)
+            if rotations_out < rotations_in:
+                logger.debug(
+                    "PhaseFoldingPass: %d -> %d diagonal rotations",
+                    rotations_in,
+                    rotations_out,
+                )
+            return QuantumCircuit._from_instruction_snapshot(folded, name=circuit.name)
         stats = PhaseFoldingStats()
         parity: dict[int, int] = {}
         const: dict[int, int] = {}
@@ -258,6 +269,39 @@ class PhaseFoldingPass:
         return QuantumCircuit._from_instruction_snapshot(
             [ins for ins in out if ins is not None], name=circuit.name
         )
+
+
+def _native_fold(
+    circuit: QuantumCircuit,
+) -> tuple[list[CircuitInstruction], int, int] | None:
+    """The sweep of :meth:`PhaseFoldingPass.run` in the native core.
+
+    Same output and counters as the Python sweep, with parities kept as
+    interned variable sets instead of integer bit sets.  ``None`` when the
+    extension is missing or the input needs the Python code.
+    """
+    if type(circuit) is not QuantumCircuit:
+        return None
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    fold = None if core is None else getattr(core, "_phase_fold", None)
+    if fold is None:
+        return None
+    result: tuple[list[CircuitInstruction], int, int] | None = fold(
+        circuit._instructions,
+        CircuitInstruction,
+        InstructionType.GATE,
+        _FIXED_PHASE,
+        _ROTATION_1Q,
+        _DIAGONAL,
+        Real,
+        _rz,
+    )
+    return result
 
 
 def _rz(angle: float, qubit: int) -> CircuitInstruction:
