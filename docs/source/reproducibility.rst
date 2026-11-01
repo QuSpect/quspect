@@ -51,7 +51,9 @@ platform math library:
 :func:`~quspect.synthesis.two_qubit.kak_decompose`,
 :func:`~quspect.synthesis.two_qubit.weyl_coordinates` and
 :meth:`~quspect.synthesis.two_qubit.Entangler.from_matrix` use the same
-deterministic KAK decomposition.
+deterministic KAK decomposition, and so does the approximate two-qubit
+synthesis (``approximation_degree``; its default budget of ``1e-12`` is
+always active).
 
 Verification
 ------------
@@ -81,8 +83,6 @@ cover:
 - ``seed=None`` (fresh operating-system entropy) and wall-clock limits
   (``time_limit``): the result then depends on the run or on the machine
   speed;
-- approximate synthesis (``approximation_degree < 1``): the approximation
-  candidates are still evaluated with numpy;
 - the inputs themselves: parameters computed in Python with :mod:`math` or
   numpy may differ in the last bit between platforms; the OpenQASM 2 parser
   evaluates parameter expressions with the correctly rounded functions;

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: QuSpect 0.5\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-01 08:26-0800\n"
+"POT-Creation-Date: 2026-11-01 09:51-0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -120,17 +120,19 @@ msgid ""
 ":func:`~quspect.synthesis.two_qubit.kak_decompose`, "
 ":func:`~quspect.synthesis.two_qubit.weyl_coordinates` and "
 ":meth:`~quspect.synthesis.two_qubit.Entangler.from_matrix` use the same "
-"deterministic KAK decomposition."
+"deterministic KAK decomposition, and so does the approximate two-qubit "
+"synthesis (``approximation_degree``; its default budget of ``1e-12`` is "
+"always active)."
 msgstr ""
 ":func:`~quspect.synthesis.two_qubit.kak_decompose`、:func:`~quspect.synthesis.two_qubit.weyl_coordinates`"
 " 和 :meth:`~quspect.synthesis.two_qubit.Entangler.from_matrix` 使用同一个确定性 "
-"KAK 分解。"
+"KAK 分解，近似两比特合成（``approximation_degree``；默认预算 ``1e-12`` 总是生效）也一样。"
 
-#: ../../source/reproducibility.rst:57
+#: ../../source/reproducibility.rst:59
 msgid "Verification"
 msgstr "验证"
 
-#: ../../source/reproducibility.rst:59
+#: ../../source/reproducibility.rst:61
 msgid ""
 "The test suite stores SHA-256 digests of complete compilations "
 "(``tests/transpiler/test_golden_transpile.py``: generated circuits on "
@@ -149,18 +151,18 @@ msgstr ""
 "上）检查这些摘要；同一组测试还会在不同的线程数和哈希种子下编译。``tools/det_fingerprint.py`` "
 "可以输出完整的记录（每个参数的 ``float.hex``），用于更大规模的跨机器比较。"
 
-#: ../../source/reproducibility.rst:70
+#: ../../source/reproducibility.rst:72
 msgid "Scope and exceptions"
 msgstr "范围与例外"
 
-#: ../../source/reproducibility.rst:72
+#: ../../source/reproducibility.rst:74
 msgid ""
 "The guarantee applies to the same QuSpect version with its compiled "
 "extension module (always present in the published wheels).  It does "
 "**not** cover:"
 msgstr "这一保证适用于同一 QuSpect 版本及其编译好的扩展模块（发布的 wheel 中总是包含）。它\\ **不**\\ 包括："
 
-#: ../../source/reproducibility.rst:76
+#: ../../source/reproducibility.rst:78
 msgid ""
 "the pure-Python fallback, used when the extension module is missing or a "
 "backend is forced to Python (``QUSPECT_SYNTHESIS_BACKEND``, "
@@ -173,18 +175,12 @@ msgstr ""
 "Python（``QUSPECT_SYNTHESIS_BACKEND``、``QUSPECT_ROUTING_BACKEND``、``QUSPECT_GAUGE_BACKEND``、``QUSPECT_DAG_PASS_BACKEND``"
 " 设为 ``python``）时使用。它依赖 numpy 和平台数学库，结果等价但不逐位一致；"
 
-#: ../../source/reproducibility.rst:81
+#: ../../source/reproducibility.rst:83
 msgid ""
 "``seed=None`` (fresh operating-system entropy) and wall-clock limits "
 "(``time_limit``): the result then depends on the run or on the machine "
 "speed;"
 msgstr "``seed=None``\\ （使用新的操作系统熵）和墙钟时间限制（``time_limit``）：此时结果取决于具体运行或机器速度；"
-
-#: ../../source/reproducibility.rst:84
-msgid ""
-"approximate synthesis (``approximation_degree < 1``): the approximation "
-"candidates are still evaluated with numpy;"
-msgstr "近似合成（``approximation_degree < 1``）：近似候选仍用 numpy 评估；"
 
 #: ../../source/reproducibility.rst:86
 msgid ""
