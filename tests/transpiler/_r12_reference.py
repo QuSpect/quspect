@@ -44,6 +44,22 @@ def clear_synthesis_caches() -> None:
     _toffoli._CCX_CHOICE_CACHE.clear()
 
 
+@contextmanager
+def python_numerics() -> Iterator[pytest.MonkeyPatch]:
+    """:func:`_python_numerics` with the synthesis caches emptied on entry and exit.
+
+    Results computed with the Python numerics must not stay in the caches,
+    where later (native) compilations in the same process would reuse them.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        _python_numerics(mp)
+        clear_synthesis_caches()
+        try:
+            yield mp
+        finally:
+            clear_synthesis_caches()
+
+
 def _python_numerics(mp: pytest.MonkeyPatch) -> None:
     """Use the Python (numpy) numerics everywhere (see the module docs)."""
     mp.setattr(two_qubit, "_native_kak", lambda: None)

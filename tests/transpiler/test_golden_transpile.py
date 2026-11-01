@@ -28,6 +28,7 @@ import os
 import random
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -296,6 +297,37 @@ GOLDEN: dict[int, dict[str, str]] = {
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _cold_caches() -> Iterator[None]:
+    """Start from empty synthesis caches, as a fresh process does.
+
+    Other tests switch numerics backends (Python reference numerics) and
+    leave results computed that way in the exact-input caches, which a later
+    compilation in the same worker would reuse.
+    """
+    _clear_caches()
+    yield
+    _clear_caches()
+
+
+def _clear_caches() -> None:
+    from quspect.gates import synthesis as one_qubit_synthesis
+    from quspect.synthesis import two_qubit
+    from quspect.transpiler import _consolidate, _toffoli
+
+    for cache in (
+        two_qubit._SYNTH_2Q_CACHE,
+        two_qubit._APPROX_2Q_CACHE,
+        two_qubit._SWAP_FACE_CACHE,
+        two_qubit._NUM_CZ_CACHE,
+        one_qubit_synthesis._SYNTH_1Q_CACHE,
+        _consolidate._EULER_CACHE,
+        _toffoli._CONTEXT_COST_CACHE,
+        _toffoli._CCX_CHOICE_CACHE,
+    ):
+        cache.clear()
 
 
 @pytest.mark.parametrize("level", LEVELS)

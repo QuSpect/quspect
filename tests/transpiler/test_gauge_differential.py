@@ -52,9 +52,9 @@ from quspect.transpiler._gauge import (
 )
 from tests.transpiler._legacy_gauge_r12 import legacy_minimize_single_qubit_gates
 from tests.transpiler._r12_reference import (
-    _python_numerics,
     current_without_round_17,
     legacy_r12,
+    python_numerics,
     transpile_signature,
 )
 
@@ -221,13 +221,11 @@ def test_minimize_matches_round_12(
         pytest.skip("native kernels not built")
     basis = IBM_ONE if ibm else CZ_ONE
     qc = _random_circuit(seed, two_qubit, ibm, 3 + seed % 4)
-    with pytest.MonkeyPatch.context() as mp:
-        _python_numerics(mp)
+    with python_numerics():
         expected = legacy_minimize_single_qubit_gates(qc, basis)
     monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, backend)
     if backend == "python":
-        with pytest.MonkeyPatch.context() as mp:
-            _python_numerics(mp)
+        with python_numerics():
             got = minimize_single_qubit_gates(qc, basis)
         assert _signature(got) == _signature(expected)
     else:
@@ -275,8 +273,7 @@ def test_native_fallback_on_unreproducible_input(
     monkeypatch.setattr(native.core, "_GaugeBeamSearch", no_search)
     monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's kernels
     qc = _random_circuit(5, "cx", False, 4)
-    with pytest.MonkeyPatch.context() as mp:
-        _python_numerics(mp)
+    with python_numerics() as mp:
         expected = _signature(legacy_minimize_single_qubit_gates(qc, CZ_ONE))
         mp.setenv(gauge.GAUGE_BACKEND_ENV, "auto")
         assert _signature(minimize_single_qubit_gates(qc, CZ_ONE)) == expected

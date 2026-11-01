@@ -238,6 +238,47 @@ TEST(DetmathScalar, Atan2HardCaseDoesNotExit) {
 // 继续舍入 192 位近似值，见 third_party/core-math/README.md）。精确值比舍入中点只高约
 // 2^-152.6 ulp；期望值是 mpmath 2000 位的正确舍入。直接调 cr_atan2（dm::Atan2 对 |y/x| ≤ 2^-30
 // 走级数，不进 CORE-MATH），同时覆盖 ±1 ulp 的邻域与按 2 的幂缩放的同一比值。
+// 结构化的秩 1 矩阵（transpile 中一个局部因子 k = A⊗C 的重排，小奇异值约 1e-16）：第一次 Jacobi
+// 扫描中 ε 量级的列与大列反复旋转而不收敛，需要放宽"可忽略列"的阈值重来（见 Svd 的注释）。
+TEST(DetmathLinalg, SvdOfStructuredRankOneMatrixConverges) {
+    const double a = 0x1.69e1774cf05f0p-1;
+    const Cx m[16] = {
+        {-a, 0.0}, {0.0, -a}, {0.0, -a}, {-a, 0.0},
+        {0.0, 0x1.562cd7c1e5ba0p-6}, {-0x1.562cd7c1e5b98p-6, 0.0}, {-0x1.562cd7c1e5ba0p-6, 0.0}, {0.0, 0x1.562cd7c1e5ba8p-6},
+        {0.0, -0x1.562cd7c1e5ba0p-6}, {0x1.562cd7c1e5ba0p-6, 0.0}, {0x1.562cd7c1e5ba0p-6, 0.0}, {0.0, -0x1.562cd7c1e5ba0p-6},
+        {a, 0.0}, {0.0, a}, {0.0, a}, {a, 0.0},
+    };
+    Cx u[16];
+    Cx vh[16];
+    double s[4];
+    ASSERT_TRUE(dm::Svd(4, m, u, s, vh));
+    EXPECT_NEAR(s[0], 2.0, 4e-15);
+    for (int k = 1; k < 4; ++k) {
+        EXPECT_LT(s[k], 1e-15);
+    }
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            double re = 0.0;
+            double im = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                const C x = C(u[i * 4 + k].re, u[i * 4 + k].im) * s[k] * C(vh[k * 4 + j].re, vh[k * 4 + j].im);
+                re += x.real();
+                im += x.imag();
+            }
+            EXPECT_NEAR(re, m[i * 4 + j].re, 1e-15);
+            EXPECT_NEAR(im, m[i * 4 + j].im, 1e-15);
+            C uu = 0.0;
+            C vv = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                uu += std::conj(C(u[k * 4 + i].re, u[k * 4 + i].im)) * C(u[k * 4 + j].re, u[k * 4 + j].im);
+                vv += C(vh[i * 4 + k].re, vh[i * 4 + k].im) * std::conj(C(vh[j * 4 + k].re, vh[j * 4 + k].im));
+            }
+            EXPECT_NEAR(std::abs(uu - C(i == j ? 1.0 : 0.0)), 0.0, 1e-15);
+            EXPECT_NEAR(std::abs(vv - C(i == j ? 1.0 : 0.0)), 0.0, 1e-15);
+        }
+    }
+}
+
 TEST(DetmathScalar, CoreMathAtan2WorstCaseIsCorrectlyRounded) {
     struct Case {
         double y, x, expected;

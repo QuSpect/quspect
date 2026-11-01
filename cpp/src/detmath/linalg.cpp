@@ -658,40 +658,61 @@ bool Svd(int n, const Cx* a_in, Cx* u, double* s, Cx* vh) {
     }
     // 对列对 (i, j) 右乘 2×2 酉矩阵 J = [[c, s·e], [−s·conj(e), c]]（e = γ / |γ|，γ = a_i^† a_j），
     // 使两列正交：a_i ← c·a_i − s·conj(e)·a_j，a_j ← s·e·a_i + c·a_j。
+    //
+    // negligible：可忽略列的平方范数比。先用 1e-36（范数比 1e-18）；极少数秩亏输入（例如结构化的
+    // 秩 1 重排矩阵，小奇异值约为 ε·σ_max）上，ε 量级的列与大列反复旋转、互相注入舍入噪声而不收敛，
+    // 此时从原矩阵重新开始，把范数比 1e-14 以下的列视为可忽略（仍是 ε 量级，由下面的 Gram-Schmidt 补齐）。
+    // 两次尝试都是固定步骤，结果确定；第一次收敛时与只有第一次的旧实现逐位相同。
     bool converged = false;
-    for (int sweep = 0; sweep < 64 && !converged; ++sweep) {
-        converged = true;
-        for (int i = 0; i < n - 1; ++i) {
-            for (int j = i + 1; j < n; ++j) {
-                const double alpha = ColumnNorm2(n, a, i);
-                const double beta = ColumnNorm2(n, a, j);
-                // 可忽略的列（相对于另一列小于 1e-18 倍，或接近下溢）不再旋转：它们在 ε 以下，
-                // 继续正交化只会在次正规数范围内反复舍入；对应的 U 列最后用 Gram-Schmidt 补齐
-                if (!(alpha > 1e-280) || !(beta > 1e-280) || std::min(alpha, beta) <= 1e-36 * std::max(alpha, beta)) {
-                    continue;
-                }
-                const Cx gamma = ColumnDot(n, a, i, j);
-                const double g = Abs(gamma);
-                if (!(g > 1e-15 * (Sqrt(alpha) * Sqrt(beta))) || !(g > 1e-300)) {
-                    continue;
-                }
-                converged = false;
-                const double zeta = (beta - alpha) / (2.0 * g);
-                const double t = (zeta >= 0.0 ? 1.0 : -1.0) / (std::fabs(zeta) + Sqrt(1.0 + zeta * zeta));
-                const double c = 1.0 / Sqrt(1.0 + t * t);
-                const double sn = c * t;
-                const Cx e = DivReal(gamma, g);
-                const Cx se = Scale(e, sn);
-                const Cx sec = Conj(se);
-                for (Cx* m : {a, v}) {
-                    for (int r = 0; r < n; ++r) {
-                        const Cx mi = m[r * n + i];
-                        const Cx mj = m[r * n + j];
-                        m[r * n + i] = Sub(Scale(mi, c), Mul(sec, mj));
-                        m[r * n + j] = Add(Mul(se, mi), Scale(mj, c));
+    for (const double negligible : {1e-36, 1e-28}) {
+        if (negligible != 1e-36) {
+            for (int i = 0; i < n * n; ++i) {
+                a[i] = a_in[i];
+                v[i] = Cx{0.0, 0.0};
+            }
+            for (int i = 0; i < n; ++i) {
+                v[i * n + i] = Cx{1.0, 0.0};
+            }
+        }
+        converged = false;
+        for (int sweep = 0; sweep < 64 && !converged; ++sweep) {
+            converged = true;
+            for (int i = 0; i < n - 1; ++i) {
+                for (int j = i + 1; j < n; ++j) {
+                    const double alpha = ColumnNorm2(n, a, i);
+                    const double beta = ColumnNorm2(n, a, j);
+                    // 可忽略的列（或接近下溢）不再旋转：它们在 ε 以下，继续正交化只会在舍入误差范围内
+                    // 反复旋转；对应的 U 列最后用 Gram-Schmidt 补齐
+                    if (!(alpha > 1e-280) || !(beta > 1e-280)
+                        || std::min(alpha, beta) <= negligible * std::max(alpha, beta)) {
+                        continue;
+                    }
+                    const Cx gamma = ColumnDot(n, a, i, j);
+                    const double g = Abs(gamma);
+                    if (!(g > 1e-15 * (Sqrt(alpha) * Sqrt(beta))) || !(g > 1e-300)) {
+                        continue;
+                    }
+                    converged = false;
+                    const double zeta = (beta - alpha) / (2.0 * g);
+                    const double t = (zeta >= 0.0 ? 1.0 : -1.0) / (std::fabs(zeta) + Sqrt(1.0 + zeta * zeta));
+                    const double c = 1.0 / Sqrt(1.0 + t * t);
+                    const double sn = c * t;
+                    const Cx e = DivReal(gamma, g);
+                    const Cx se = Scale(e, sn);
+                    const Cx sec = Conj(se);
+                    for (Cx* m : {a, v}) {
+                        for (int r = 0; r < n; ++r) {
+                            const Cx mi = m[r * n + i];
+                            const Cx mj = m[r * n + j];
+                            m[r * n + i] = Sub(Scale(mi, c), Mul(sec, mj));
+                            m[r * n + j] = Add(Mul(se, mi), Scale(mj, c));
+                        }
                     }
                 }
             }
+        }
+        if (converged) {
+            break;
         }
     }
     if (!converged) {
