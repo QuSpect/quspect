@@ -143,6 +143,38 @@ def test_measurement_is_a_hard_boundary() -> None:
     ]
 
 
+def test_merged_angle_survives_boundary() -> None:
+    # 回归：遇到屏障/测量时已合并的角度必须写回，而不是连同被删掉的后续旋转一起丢失
+    qc = QuantumCircuit().rz(0.3, 0).rz(0.2, 0).barrier(0).h(0)
+    out = PhaseFoldingPass().run(qc)
+    assert [i.gate.name if i.gate else "barrier" for i in out] == ["rz", "barrier", "h"]
+    assert out[0].gate is not None
+    assert out[0].gate.params[0] == pytest.approx(0.5)
+
+
+def _gates_only(circuit: QuantumCircuit) -> QuantumCircuit:
+    return QuantumCircuit._from_instruction_snapshot(
+        [ins for ins in circuit if ins.is_gate], name=circuit.name
+    )
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_random_circuits_with_boundaries_equivalent(seed: int) -> None:
+    n = 4
+    rng = random.Random(1000 + seed)
+    body = _random_circuit(n, 60, seed)
+    qc = QuantumCircuit()
+    for ins in body:
+        qc.append(ins.gate, ins.qubits)  # type: ignore[arg-type]
+        if rng.random() < 0.08:
+            qc.barrier(*rng.sample(range(n), rng.randint(1, n)))
+    out = PhaseFoldingPass().run(qc)
+    assert len(out) <= len(qc)
+    _assert_equal_up_to_phase(
+        _unitary(_gates_only(out), n), _unitary(_gates_only(qc), n)
+    )
+
+
 def test_symbolic_parameters_untouched() -> None:
     from quspect.circuit.parameter import Parameter
 
@@ -158,3 +190,56 @@ def test_unmerged_rotations_kept_verbatim() -> None:
     qc = QuantumCircuit().t(0).h(0).t(0)
     out = PhaseFoldingPass().run(qc)
     assert [(i.gate, i.qubits) for i in out] == [(i.gate, i.qubits) for i in qc]
+
+
+def _clbit_distribution(circuit: QuantumCircuit, n: int) -> np.ndarray:
+    """Distribution of the classical register when ``circuit`` runs on |0…0⟩.
+
+    Gates act on the state; each measurement only records which qubit feeds
+    which classical bit (all measurements are terminal here).
+    """
+    probs = np.abs(_unitary(_gates_only(circuit), n)[:, 0]) ** 2
+    to_clbit: dict[int, int] = {}
+    for ins in circuit:
+        if not ins.is_gate and ins.clbits:
+            to_clbit.update(zip(ins.qubits, ins.clbits, strict=True))
+    out = np.zeros(2**n)
+    for index, p in enumerate(probs):
+        bits = [(index >> (n - 1 - q)) & 1 for q in range(n)]  # big-endian
+        key = sum(bits[q] << (n - 1 - c) for q, c in to_clbit.items())
+        out[key] += p
+    return out
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+@pytest.mark.parametrize("seed", range(12))
+def test_transpile_with_barriers_and_measurements_equivalent(
+    level: int, seed: int
+) -> None:
+    # 回归：带屏障与末尾测量的线路经完整编译后，测量结果的分布与原线路相同
+    from quspect.transpiler import CompilationTarget, transpile
+
+    n = 3
+    rng = random.Random(seed)
+    qc = QuantumCircuit()
+    for _ in range(30):
+        r = rng.random()
+        if r < 0.35:
+            a, b = rng.sample(range(n), 2)
+            qc.cx(a, b)
+        elif r < 0.7:
+            qc.rz(rng.uniform(-3.0, 3.0), rng.randrange(n))
+        elif r < 0.8:
+            qc.t(rng.randrange(n))
+        elif r < 0.9:
+            qc.h(rng.randrange(n))
+        else:
+            qc.barrier(*range(n))
+    qc.measure_all()
+    target = CompilationTarget.from_coupling_map(
+        n, [(0, 1), (1, 2), (0, 2)], native_gates={"cz", "rz", "sx", "x"}
+    )
+    res = transpile(qc, target, optimization_level=level, seed=0)
+    np.testing.assert_allclose(
+        _clbit_distribution(res.circuit, n), _clbit_distribution(qc, n), atol=1e-9
+    )
