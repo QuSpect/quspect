@@ -314,8 +314,13 @@ private:
     // reverse_adjacent_edge_order 的工作区（访问标记按代编号，缓冲区复用）。
     IdMap<std::uint64_t> mark_;
     std::uint64_t mark_generation_ = 0;
-    std::vector<NodeId> pk_forward_;
-    std::vector<NodeId> pk_backward_;
+    // Pearce–Kelly 搜索的缓冲：(拓扑编号, 节点)。
+    struct PosNode {
+        std::int64_t pos;
+        NodeId node;
+    };
+    std::vector<PosNode> pk_forward_;
+    std::vector<PosNode> pk_backward_;
     std::vector<NodeId> pk_stack_;
     std::vector<std::int64_t> pk_slots_;
 };

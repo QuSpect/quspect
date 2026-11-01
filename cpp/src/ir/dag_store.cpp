@@ -465,12 +465,13 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
     }
 
     // 从 first 向前搜索，以 second 的编号为界。访问标记用按代编号的标记表（不逐次分配）。
+    // 访问到的节点连同编号一起记下（编号互不相同，按编号排序即与按编号的稳定排序相同）。
     const std::uint64_t mark_f = ++mark_generation_;
     const std::uint64_t mark_b = ++mark_generation_;
-    std::vector<NodeId>& forward = pk_forward_;
-    std::vector<NodeId>& backward = pk_backward_;
+    std::vector<PosNode>& forward = pk_forward_;
+    std::vector<PosNode>& backward = pk_backward_;
     std::vector<NodeId>& stack = pk_stack_;
-    forward.assign(1, first);
+    forward.assign(1, PosNode{lb, first});
     mark_[first] = mark_f;
     stack.assign(1, first);
     while (!stack.empty()) {
@@ -485,14 +486,14 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
                 const std::int64_t* p = pos.find(e.nbr);
                 if (p != nullptr && *p < ub) {
                     m = mark_f;
-                    forward.push_back(e.nbr);
+                    forward.push_back(PosNode{*p, e.nbr});
                     stack.push_back(e.nbr);
                 }
             }
         }
     }
     // 从 second 向后搜索，以 first 的编号为界。
-    backward.assign(1, second);
+    backward.assign(1, PosNode{ub, second});
     mark_[second] = mark_b;
     stack.assign(1, second);
     while (!stack.empty()) {
@@ -504,30 +505,42 @@ bool DagStore::reverse_adjacent_edge_order(NodeId first, NodeId second) {
                 const std::int64_t* p = pos.find(e.nbr);
                 if (p != nullptr && *p > lb) {
                     m = mark_b;
-                    backward.push_back(e.nbr);
+                    backward.push_back(PosNode{*p, e.nbr});
                     stack.push_back(e.nbr);
                 }
             }
         }
     }
 
-    auto by_pos = [&pos](NodeId a, NodeId b) { return *pos.find(a) < *pos.find(b); };
-    std::stable_sort(backward.begin(), backward.end(), by_pos);
-    std::stable_sort(forward.begin(), forward.end(), by_pos);
-    std::vector<NodeId>& moved = backward;
-    moved.insert(moved.end(), forward.begin(), forward.end());
+    // 先放 backward、再放 forward（各自按编号升序），依次取两者编号合并排序后的槽位。
+    auto by_pos = [](const PosNode& a, const PosNode& b) { return a.pos < b.pos; };
+    std::sort(backward.begin(), backward.end(), by_pos);
+    std::sort(forward.begin(), forward.end(), by_pos);
     std::vector<std::int64_t>& slots = pk_slots_;
-    slots.clear();
-    for (NodeId nid : moved) {
-        slots.push_back(*pos.find(nid));
-    }
-    std::sort(slots.begin(), slots.end());
-    for (std::size_t k = 0; k < moved.size(); ++k) {
-        std::int64_t& p = *pos.find(moved[k]);
-        if (journal_open_) {
-            journal_.push_back(JournalEntry{JournalKind::kPos, moved[k], DagEdge{}, p, nullptr});
+    slots.resize(backward.size() + forward.size());
+    {
+        std::size_t i = 0;
+        std::size_t j = 0;
+        std::size_t k = 0;
+        while (i < backward.size() && j < forward.size()) {
+            slots[k++] = backward[i].pos <= forward[j].pos ? backward[i++].pos : forward[j++].pos;
         }
-        p = slots[k];
+        while (i < backward.size()) {
+            slots[k++] = backward[i++].pos;
+        }
+        while (j < forward.size()) {
+            slots[k++] = forward[j++].pos;
+        }
+    }
+    std::size_t k = 0;
+    for (const std::vector<PosNode>* part : {&backward, &forward}) {
+        for (const PosNode& pn : *part) {
+            std::int64_t& p = *pos.find(pn.node);
+            if (journal_open_) {
+                journal_.push_back(JournalEntry{JournalKind::kPos, pn.node, DagEdge{}, p, nullptr});
+            }
+            p = slots[k++];
+        }
     }
     return true;
 }

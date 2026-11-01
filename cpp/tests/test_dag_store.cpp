@@ -2,7 +2,11 @@
 // 删除并重连、事务回滚恢复原边序、增量拓扑编号的环检测、分层与关键路径。
 // 语义参考 quspect.dag.dag_circuit 中的纯 Python 内核（tests/dag/test_dag_core_parity.py
 // 另有与 Python 内核的随机对拍）。
+#include <algorithm>
 #include <cstdint>
+#include <map>
+#include <random>
+#include <set>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -162,6 +166,107 @@ TEST(DagStore, ReverseAdjacentEdgeOrderDetectsCycles) {
     d.add_edge(ops[2], ops[1], QubitWire(5), true);
     EXPECT_FALSE(d.reverse_adjacent_edge_order(ops[1], ops[2]));
     EXPECT_THROW(d.topological_order(), DagCycleError);
+}
+
+// 增量拓扑编号的参考实现（Pearce–Kelly 一步）：从 first 沿出边、以 second 的编号为界的前向集，
+// 从 second 沿入边、以 first 的编号为界的后向集，各自按编号排序后依次（后向在前）取合并排序的槽位。
+std::map<NodeId, std::int64_t> ReferenceReorder(const DagStore& d, std::map<NodeId, std::int64_t> pos, NodeId first,
+                                                NodeId second) {
+    const std::int64_t lb = pos.at(first);
+    const std::int64_t ub = pos.at(second);
+    if (lb > ub) {
+        return pos;
+    }
+    auto collect = [&](NodeId start, bool forward) {
+        std::set<NodeId> seen{start};
+        std::vector<NodeId> stack{start};
+        while (!stack.empty()) {
+            const NodeId nid = stack.back();
+            stack.pop_back();
+            for (const auto& e : forward ? d.out_adj(nid) : d.in_adj(nid)) {
+                auto it = pos.find(e.nbr);
+                const bool inside = it != pos.end() && (forward ? it->second < ub : it->second > lb);
+                if (inside && seen.insert(e.nbr).second) {
+                    stack.push_back(e.nbr);
+                }
+            }
+        }
+        std::vector<NodeId> out(seen.begin(), seen.end());
+        std::stable_sort(out.begin(), out.end(), [&](NodeId a, NodeId b) { return pos.at(a) < pos.at(b); });
+        return out;
+    };
+    std::vector<NodeId> moved = collect(second, false);
+    const std::vector<NodeId> fwd = collect(first, true);
+    moved.insert(moved.end(), fwd.begin(), fwd.end());
+    std::vector<std::int64_t> slots;
+    for (NodeId n : moved) {
+        slots.push_back(pos.at(n));
+    }
+    std::sort(slots.begin(), slots.end());
+    for (std::size_t k = 0; k < moved.size(); ++k) {
+        pos[moved[k]] = slots[k];
+    }
+    return pos;
+}
+
+std::map<NodeId, std::int64_t> Positions(const DagStore& d) {
+    const auto st = d.export_state();
+    return {st.positions.begin(), st.positions.end()};
+}
+
+TEST(DagStore, ReverseAdjacentEdgeOrderMatchesReferenceRenumbering) {
+    std::mt19937 rng(7);
+    for (int trial = 0; trial < 20; ++trial) {
+        const int nq = 3 + trial % 3;
+        std::vector<std::vector<int>> gates;
+        for (int g = 0; g < 40; ++g) {
+            const int a = static_cast<int>(rng() % nq);
+            if (rng() % 2 == 0) {
+                gates.push_back({a});
+            } else {
+                gates.push_back({a, (a + 1 + static_cast<int>(rng() % (nq - 1))) % nq});
+            }
+        }
+        DagStore d;
+        const auto ops = BuildCircuit(d, nq, gates);
+        d.ensure_topological_positions();
+        const std::set<NodeId> op_set(ops.begin(), ops.end());
+        for (int step = 0; step < 60; ++step) {
+            const NodeId a = ops[rng() % ops.size()];
+            if (!d.has_node(a)) {
+                continue;
+            }
+            const WireId w = (*d.node_wires(a))[rng() % d.node_wires(a)->size()];
+            const auto b = d.wire_successor(a, w);
+            const auto pred = d.wire_predecessor(a, w);
+            if (!b || !pred || op_set.count(*b) == 0) {
+                continue;
+            }
+            const auto succ = d.wire_successor(*b, w);
+            const auto before = Positions(d);
+            const auto sp = d.begin_transaction();
+            d.remove_edge(*pred, a, w);
+            d.remove_edge(a, *b, w);
+            d.remove_edge(*b, *succ, w);
+            d.add_edge(*pred, *b, w, true);
+            d.add_edge(*b, a, w, true);
+            d.add_edge(a, *succ, w, true);
+            const auto expected = ReferenceReorder(d, before, a, *b);
+            if (d.reverse_adjacent_edge_order(a, *b)) {
+                EXPECT_EQ(Positions(d), expected);
+                std::vector<quspect::native::ir::DagEdge> edges;
+                d.edges(edges);
+                const auto pos = Positions(d);
+                for (const auto& e : edges) {
+                    EXPECT_LT(pos.at(e.source), pos.at(e.target));
+                }
+            } else {
+                d.rollback(sp);
+                EXPECT_EQ(Positions(d), before);
+            }
+            d.end_transaction();
+        }
+    }
 }
 
 TEST(DagStore, EdgeToMissingNodeRaisesKeyErrorInTopologicalOrder) {
