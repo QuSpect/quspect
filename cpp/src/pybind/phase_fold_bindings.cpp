@@ -114,6 +114,10 @@ public:
         FoldNames& n = Names();
         std::vector<PyObject*> out;  // 借用：输入指令（nullptr 为删除的位置）
         long long rotations_in = 0;
+        make_rz_ = &make_rz;
+        merged_.assign(PyList_GET_SIZE(instrs.ptr()), py::object());
+        dropped_.assign(PyList_GET_SIZE(instrs.ptr()), 0);
+        rotations_out_ = 0;
         for (Py_ssize_t i = 0; i < PyList_GET_SIZE(instrs.ptr()); ++i) {
             PyObject* ins = PyList_GET_ITEM(instrs.ptr(), i);
             if (Py_TYPE(ins) != instr_type_) {
@@ -185,12 +189,26 @@ public:
             out.push_back(ins);
         }
 
-        // 收尾：按 terms 的插入顺序（与 Python dict 相同）。
+        // 收尾：剩余的项按插入顺序（与 Python dict 相同）写回。
+        EmitTerms();
+        py::list result;
+        for (std::size_t k = 0; k < out.size(); ++k) {
+            if (dropped_[k] != 0) {
+                continue;
+            }
+            PyObject* item = merged_[k] ? merged_[k].ptr() : out[k];
+            if (PyList_Append(result.ptr(), item) != 0) {
+                throw py::error_already_set();
+            }
+        }
+        return py::make_tuple(result, rotations_in, rotations_out_);
+    }
+
+private:
+    // 把各项合并后的角度写回其第一次出现的位置（后续出现的旋转已从输出中删去）。
+    void EmitTerms() {
         constexpr double kTwoPi = 2.0 * 3.141592653589793;
         constexpr double kZeroAtol = 1e-12;
-        std::vector<py::object> merged(out.size());
-        std::vector<std::uint8_t> dropped(out.size(), 0);
-        long long rotations_out = 0;
         for (const Term& t : terms_) {
             const double x = t.sign == -1 ? -t.angle : t.angle;
             if (std::isinf(x)) {
@@ -198,30 +216,18 @@ public:
             }
             const double angle = std::remainder(x, kTwoPi);
             if (std::fabs(angle) <= kZeroAtol) {
-                dropped[t.slot] = 1;
+                dropped_[t.slot] = 1;
                 continue;
             }
-            ++rotations_out;
+            ++rotations_out_;
             if (t.count > 1) {
-                merged[t.slot] = make_rz(angle, t.qubit);
+                merged_[t.slot] = (*make_rz_)(angle, t.qubit);
             }
         }
-        py::list result;
-        for (std::size_t k = 0; k < out.size(); ++k) {
-            if (dropped[k] != 0) {
-                continue;
-            }
-            PyObject* item = merged[k] ? merged[k].ptr() : out[k];
-            if (PyList_Append(result.ptr(), item) != 0) {
-                throw py::error_already_set();
-            }
-        }
-        return py::make_tuple(result, rotations_in, rotations_out);
     }
 
-private:
     void Flush() {
-        // terms.clear()：已合并的项不再写回（与 Python 实现相同）
+        EmitTerms();
         terms_.clear();
         term_index_.clear();
         parity_.clear();
@@ -354,6 +360,10 @@ private:
     std::vector<Term> terms_;
     std::unordered_map<int, std::size_t> term_index_;
     std::vector<long long> qs_;
+    const py::object* make_rz_ = nullptr;
+    std::vector<py::object> merged_;
+    std::vector<std::uint8_t> dropped_;
+    long long rotations_out_ = 0;
 };
 
 }  // namespace

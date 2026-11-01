@@ -195,7 +195,19 @@ class PhaseFoldingPass:
             const[q] = 0
             next_var += 1
 
+        def emit_terms() -> None:
+            # 把已合并的角度写回各项第一次出现的位置（后续出现的旋转已从输出中删去）
+            for term in terms.values():
+                angle = math.remainder(term.sign * term.angle, _TWO_PI)
+                if abs(angle) <= _ZERO_ATOL:
+                    out[term.slot] = None
+                    continue
+                stats.rotations_out += 1
+                if term.count > 1:
+                    out[term.slot] = _rz(angle, term.qubit)
+
         def flush() -> None:
+            emit_terms()
             terms.clear()
             parity.clear()
             const.clear()
@@ -250,14 +262,7 @@ class PhaseFoldingPass:
                     refresh(q)
             out.append(ins)
 
-        for term in terms.values():
-            angle = math.remainder(term.sign * term.angle, _TWO_PI)
-            if abs(angle) <= _ZERO_ATOL:
-                out[term.slot] = None
-                continue
-            stats.rotations_out += 1
-            if term.count > 1:
-                out[term.slot] = _rz(angle, term.qubit)
+        emit_terms()
 
         self.stats = stats
         if stats.rotations_out < stats.rotations_in:
