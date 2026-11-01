@@ -255,6 +255,14 @@ class NativeKak:
         theta, phi, lam = self._synth.zyz_angles(m)
         return float(theta), float(phi), float(lam)
 
+    def core_matmul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """``a @ b`` for small square matrices on the deterministic layer."""
+        from quspect._native_loader import load_core
+
+        core = load_core()
+        assert core is not None  # NativeKak 只在有扩展模块时存在
+        return np.asarray(core._detmath_matmul(a, b))
+
     def run_unitary(self, mats: list[np.ndarray]) -> np.ndarray:
         """``u = I; u = m @ u`` over a run of ``2×2`` matrices."""
         return np.asarray(self._synth.run_unitary(mats))

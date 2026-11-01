@@ -44,6 +44,13 @@ std::array<Cx, N> ToMatrix(const ComplexArray& arr) {
     return out;
 }
 
+// 任意大小的 numpy 复数组按字节拷成 Cx 数组。
+std::vector<Cx> CopyCx(const ComplexArray& arr) {
+    std::vector<Cx> out(static_cast<std::size_t>(arr.size()));
+    std::memcpy(out.data(), arr.data(), out.size() * sizeof(Cx));
+    return out;
+}
+
 template <std::size_t N>
 py::array_t<std::complex<double>> FromMatrix(const std::array<Cx, N>& m) {
     const auto n = static_cast<py::ssize_t>(N == 4 ? 2 : 4);
@@ -187,18 +194,20 @@ class PyKakSynthesizer {
         if (mats.size() != slots.size()) {
             throw std::invalid_argument("one slot per matrix");
         }
-        std::vector<ComplexArray> keep;
+        // numpy 缓冲区按字节拷进 Cx 数组（不做类型双关）
+        std::vector<std::vector<Cx>> keep;
         keep.reserve(mats.size());
         std::vector<KakSynthesizer::BlockMember> members;
         members.reserve(mats.size());
         for (std::size_t i = 0; i < mats.size(); ++i) {
-            keep.push_back(mats[i].cast<ComplexArray>());
+            const auto arr = mats[i].cast<ComplexArray>();
             const int slot = slots[i];
             const py::ssize_t expected = (slot == 1 || slot == 2) ? 4 : 16;
-            if (slot < 0 || slot > 4 || keep.back().size() != expected) {
+            if (slot < 0 || slot > 4 || arr.size() != expected) {
                 throw std::invalid_argument("bad block member");
             }
-            members.push_back({reinterpret_cast<const Cx*>(keep.back().data()), slot});
+            keep.push_back(CopyCx(arr));
+            members.push_back({keep.back().data(), slot});
         }
         return FromMatrix(impl_.BlockUnitary(members));
     }
@@ -364,17 +373,18 @@ py::array_t<std::complex<double>> ThreeQubitUnitaryPy(const py::list& mats,
     if (mats.size() != qubits.size()) {
         throw std::invalid_argument("one qubit tuple per matrix");
     }
-    std::vector<ComplexArray> keep;
+    std::vector<std::vector<Cx>> keep;
     keep.reserve(mats.size());
     std::vector<LocalGate> gates;
     gates.reserve(mats.size());
     for (std::size_t i = 0; i < mats.size(); ++i) {
-        keep.push_back(mats[i].cast<ComplexArray>());
+        const auto arr = mats[i].cast<ComplexArray>();
         const auto dim = static_cast<py::ssize_t>(1) << qubits[i].size();
-        if (qubits[i].empty() || qubits[i].size() > 3 || keep.back().size() != dim * dim) {
+        if (qubits[i].empty() || qubits[i].size() > 3 || arr.size() != dim * dim) {
             throw std::invalid_argument("matrix size does not match its qubits");
         }
-        gates.push_back({reinterpret_cast<const Cx*>(keep.back().data()), qubits[i]});
+        keep.push_back(CopyCx(arr));
+        gates.push_back({keep.back().data(), qubits[i]});
     }
     return FromM8(ThreeQubitUnitary(gates));
 }

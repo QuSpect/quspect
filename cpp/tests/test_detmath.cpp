@@ -19,6 +19,9 @@
 #include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/detmath/scalar.hpp"
 
+// vendored CORE-MATH（C 链接）
+extern "C" double cr_atan2(double, double);
+
 namespace {
 
 namespace dm = quspect::native::detmath;
@@ -229,6 +232,35 @@ TEST(DetmathScalar, Atan2HardCaseDoesNotExit) {
     volatile double y = 0x1.7fffffffffffdp-53;
     volatile double x = 0x1.ffffffffffffap-3;
     EXPECT_EQ(Bits(dm::Atan2(y, x)), Bits(0x1.8000000000002p-51));
+}
+
+// CORE-MATH 的 atan2 在该提交对下面的输入走到"意外最坏情况"分支（上游会 exit(1)；本地修改为
+// 继续舍入 192 位近似值，见 third_party/core-math/README.md）。精确值比舍入中点只高约
+// 2^-152.6 ulp；期望值是 mpmath 2000 位的正确舍入。直接调 cr_atan2（dm::Atan2 对 |y/x| ≤ 2^-30
+// 走级数，不进 CORE-MATH），同时覆盖 ±1 ulp 的邻域与按 2 的幂缩放的同一比值。
+TEST(DetmathScalar, CoreMathAtan2WorstCaseIsCorrectlyRounded) {
+    struct Case {
+        double y, x, expected;
+    };
+    const Case cases[] = {
+        {0x1.7fffffffffffcp-53, 0x1.ffffffffffff9p-3, 0x1.8000000000001p-51},
+        {0x1.7fffffffffffcp-53, 0x1.ffffffffffffap-3, 0x1.8000000000000p-51},
+        {0x1.7fffffffffffcp-53, 0x1.ffffffffffffbp-3, 0x1.8000000000000p-51},
+        {0x1.7fffffffffffdp-53, 0x1.ffffffffffff9p-3, 0x1.8000000000002p-51},
+        {0x1.7fffffffffffdp-53, 0x1.ffffffffffffap-3, 0x1.8000000000002p-51},
+        {0x1.7fffffffffffdp-53, 0x1.ffffffffffffbp-3, 0x1.8000000000001p-51},
+        {0x1.7fffffffffffep-53, 0x1.ffffffffffff9p-3, 0x1.8000000000003p-51},
+        {0x1.7fffffffffffep-53, 0x1.ffffffffffffap-3, 0x1.8000000000003p-51},
+        {0x1.7fffffffffffep-53, 0x1.ffffffffffffbp-3, 0x1.8000000000002p-51},
+        {0x1.7fffffffffffdp-953, 0x1.ffffffffffffap-903, 0x1.8000000000002p-51},
+        {0x1.7fffffffffffdp+247, 0x1.ffffffffffffap+297, 0x1.8000000000002p-51},
+        {-0x1.7fffffffffffdp-53, 0x1.ffffffffffffap-3, -0x1.8000000000002p-51},
+    };
+    for (const Case& c : cases) {
+        volatile double y = c.y;
+        volatile double x = c.x;
+        EXPECT_EQ(Bits(cr_atan2(y, x)), Bits(c.expected)) << std::hexfloat << c.y << ", " << c.x;
+    }
 }
 
 TEST(DetmathScalar, PowExactCases) {

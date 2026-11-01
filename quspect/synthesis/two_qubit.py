@@ -573,9 +573,17 @@ def kak_decompose(unitary: np.ndarray) -> TwoQubitKAK:
         [0.785398, 0.0, 0.0]
     """
     u = _check_unitary_4(unitary)
-    phase, k1, v, k2 = _kak4(u)
-    k1l, k1r = _factor_local(k1)
-    k2l, k2r = _factor_local(k2)
+    native = _native_kak()
+    result = None if native is None else native.kak4(u)
+    if native is not None and result is not None:
+        # 确定性数值层：结果在所有平台上逐位相同
+        phase, k1, v, k2 = result
+        k1l, k1r = (np.asarray(x) for x in native._synth.factor_local(k1))
+        k2l, k2r = (np.asarray(x) for x in native._synth.factor_local(k2))
+    else:
+        phase, k1, v, k2 = _kak4(u)
+        k1l, k1r = _factor_local(k1)
+        k2l, k2r = _factor_local(k2)
     return TwoQubitKAK(
         a=float(v[0]),
         b=float(v[1]),
@@ -610,7 +618,9 @@ def weyl_coordinates(unitary: np.ndarray) -> tuple[float, float, float]:
         [0.785398, 0.785398, 0.785398]
     """
     u = _check_unitary_4(unitary)
-    _, _, v, _ = _kak4(u)
+    native = _native_kak()
+    result = None if native is None else native.kak4(u)
+    _, _, v, _ = _kak4(u) if result is None else result
     return float(v[0]), float(v[1]), float(v[2])
 
 
@@ -1077,17 +1087,29 @@ class Entangler:
             'cy'
         """
         e = _check_unitary_4(matrix)
-        _, k1e, ve, k2e = _kak4(e)
+        native = _native_kak()
+        det = None if native is None else native.kak4(e)
+        _, k1e, ve, k2e = _kak4(e) if det is None else det
         if _count_from_coords(ve, 1e-9) != 1:
             raise ValueError(
                 f"Entangler {name!r} is not locally equivalent to CZ (Weyl point "
                 f"{tuple(round(float(x), 6) for x in ve)}); only CZ-class "
                 "entanglers are supported."
             )
-        _, k1z, _, k2z = _kak4(_CZ4)
         # E ∝ k1e Can k2e and CZ ∝ k1z Can k2z ⇒ CZ ∝ (k1z k1e^†) E (k2e^† k2z).
-        a0, a1 = _factor_local(k1z @ k1e.conj().T)
-        b0, b1 = _factor_local(k2e.conj().T @ k2z)
+        if native is not None and det is not None:
+            # 确定性数值层（KAK、乘积、局部分解），修饰门在所有平台上逐位相同
+            kak_cz = native.kak4(_CZ4)
+            assert kak_cz is not None
+            _, k1z, _, k2z = kak_cz
+            mul = native.core_matmul
+            a0, a1 = native._synth.factor_local(mul(k1z, np.conj(k1e).T))
+            b0, b1 = native._synth.factor_local(mul(np.conj(k2e).T, k2z))
+            a0, a1, b0, b1 = (np.asarray(x) for x in (a0, a1, b0, b1))
+        else:
+            _, k1z, _, k2z = _kak4(_CZ4)
+            a0, a1 = _factor_local(k1z @ k1e.conj().T)
+            b0, b1 = _factor_local(k2e.conj().T @ k2z)
         rebuilt = _kron2(a0, a1) @ e @ _kron2(b0, b1)
         if _distance_up_to_phase(_CZ4, rebuilt) > 1e-12:  # pragma: no cover
             raise ValueError(f"Could not derive the CZ dressing of {name!r}.")

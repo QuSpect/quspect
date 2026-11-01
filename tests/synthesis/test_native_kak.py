@@ -693,3 +693,29 @@ def test_swap_residual_and_gate_matrices() -> None:
             m = mu.gate_matrix(g.with_params(*ps))
             ref = getattr(mu, f"_{g.name}_matrix")(*ps)
             assert np.max(np.abs(m - ref)) < 1e-15
+
+
+def test_public_kak_api_is_deterministic() -> None:
+    """``kak_decompose`` / ``weyl_coordinates`` run on the deterministic layer.
+
+    Their results are the native KAK bit for bit (hence platform independent,
+    see :func:`test_golden_digests_are_platform_independent`) and reconstruct
+    the input.
+    """
+    assert NATIVE is not None
+    for u in _golden_inputs():
+        phase, k1, v, k2 = NATIVE.kak4(u)
+        kak = tq.kak_decompose(u)
+        assert [kak.a, kak.b, kak.c] == [float(x) for x in v]
+        assert kak.global_phase == phase
+        assert tq.weyl_coordinates(u) == (kak.a, kak.b, kak.c)
+        k1l, k1r = NATIVE._synth.factor_local(k1)
+        assert np.asarray(kak.k1l).tobytes() == np.asarray(k1l).tobytes()
+        assert np.asarray(kak.k1r).tobytes() == np.asarray(k1r).tobytes()
+        rebuilt = (
+            np.exp(1j * kak.global_phase)
+            * np.kron(kak.k1l, kak.k1r)
+            @ tq.canonical_gate(kak.a, kak.b, kak.c)
+            @ np.kron(kak.k2l, kak.k2r)
+        )
+        assert np.max(np.abs(rebuilt - u)) < 1e-12

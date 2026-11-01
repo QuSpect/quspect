@@ -67,12 +67,20 @@ py::array_t<double> Scalar(const std::string& name, const RealArray& x, const Re
     return out;
 }
 
-const dm::Cx* Data(const ComplexArray& a, int* n) {
+// 方阵（1..8）按字节拷进 Cx 数组（不对 numpy 缓冲区做类型双关）。
+struct Square {
+    int n = 0;
+    dm::Cx data[dm::kMaxDim * dm::kMaxDim];
+};
+
+Square Data(const ComplexArray& a) {
     if (a.ndim() != 2 || a.shape(0) != a.shape(1) || a.shape(0) < 1 || a.shape(0) > dm::kMaxDim) {
         throw std::invalid_argument("expected a square matrix of size 1..8");
     }
-    *n = static_cast<int>(a.shape(0));
-    return reinterpret_cast<const dm::Cx*>(a.data());
+    Square out;
+    out.n = static_cast<int>(a.shape(0));
+    std::memcpy(out.data, a.data(), sizeof(dm::Cx) * static_cast<std::size_t>(out.n * out.n));
+    return out;
 }
 
 py::array_t<std::complex<double>> NewMatrix(int n, const dm::Cx* data) {
@@ -82,8 +90,9 @@ py::array_t<std::complex<double>> NewMatrix(int n, const dm::Cx* data) {
 }
 
 py::tuple Svd(const ComplexArray& a) {
-    int n = 0;
-    const dm::Cx* pa = Data(a, &n);
+    const Square sa = Data(a);
+    const int n = sa.n;
+    const dm::Cx* pa = sa.data;
     dm::Cx u[dm::kMaxDim * dm::kMaxDim];
     dm::Cx vh[dm::kMaxDim * dm::kMaxDim];
     double s[dm::kMaxDim];
@@ -109,8 +118,9 @@ py::tuple Eigh(const RealArray& a) {
 }
 
 py::tuple Qr(const ComplexArray& a) {
-    int n = 0;
-    const dm::Cx* pa = Data(a, &n);
+    const Square sa = Data(a);
+    const int n = sa.n;
+    const dm::Cx* pa = sa.data;
     dm::Cx q[dm::kMaxDim * dm::kMaxDim];
     dm::Cx r[dm::kMaxDim * dm::kMaxDim];
     dm::Qr(n, pa, q, r);
@@ -118,11 +128,12 @@ py::tuple Qr(const ComplexArray& a) {
 }
 
 py::array_t<std::complex<double>> MatMul(const ComplexArray& a, const ComplexArray& b) {
-    int n = 0;
-    int nb = 0;
-    const dm::Cx* pa = Data(a, &n);
-    const dm::Cx* pb = Data(b, &nb);
-    if (n != nb) {
+    const Square sa = Data(a);
+    const Square sb = Data(b);
+    const int n = sa.n;
+    const dm::Cx* pa = sa.data;
+    const dm::Cx* pb = sb.data;
+    if (n != sb.n) {
         throw std::invalid_argument("matrix sizes differ");
     }
     dm::Cx out[dm::kMaxDim * dm::kMaxDim];
@@ -131,8 +142,9 @@ py::array_t<std::complex<double>> MatMul(const ComplexArray& a, const ComplexArr
 }
 
 std::complex<double> Det(const ComplexArray& a) {
-    int n = 0;
-    const dm::Cx* pa = Data(a, &n);
+    const Square sa = Data(a);
+    const int n = sa.n;
+    const dm::Cx* pa = sa.data;
     const dm::Cx d = dm::Det(n, pa);
     return {d.re, d.im};
 }

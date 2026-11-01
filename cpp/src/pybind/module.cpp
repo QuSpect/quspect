@@ -1061,16 +1061,25 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
                 throw std::invalid_argument("stack sizes differ");
             }
             const py::ssize_t n = std::max(na, nb);
-            const auto* pa = reinterpret_cast<const detmath::Cx*>(a.data());
-            const auto* pb = reinterpret_cast<const detmath::Cx*>(b.data());
+            // numpy 缓冲区与 Cx 之间按字节拷贝（不做类型双关）
+            const auto copy = [](const ComplexArray& x) {
+                std::vector<detmath::Cx> v(static_cast<std::size_t>(x.size()));
+                std::memcpy(v.data(), x.data(), v.size() * sizeof(detmath::Cx));
+                return v;
+            };
+            const std::vector<detmath::Cx> va = copy(a);
+            const std::vector<detmath::Cx> vb = copy(b);
+            const std::size_t stacks = static_cast<std::size_t>(n < 0 ? 1 : n);
+            std::vector<detmath::Cx> vo(4 * stacks);
+            for (std::size_t i = 0; i < stacks; ++i) {
+                detmath::MatMul(2, va.data() + (na < 0 ? 0 : 4 * i), vb.data() + (nb < 0 ? 0 : 4 * i),
+                                vo.data() + 4 * i);
+            }
             py::array_t<std::complex<double>> out =
                 n < 0 ? py::array_t<std::complex<double>>({static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)})
                       : py::array_t<std::complex<double>>(
                             {n, static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)});
-            auto* po = reinterpret_cast<detmath::Cx*>(out.mutable_data());
-            for (py::ssize_t i = 0; i < (n < 0 ? 1 : n); ++i) {
-                detmath::MatMul(2, pa + (na < 0 ? 0 : 4 * i), pb + (nb < 0 ? 0 : 4 * i), po + 4 * i);
-            }
+            std::memcpy(out.mutable_data(), vo.data(), vo.size() * sizeof(detmath::Cx));
             return out;
         },
         py::arg("a"), py::arg("b"),

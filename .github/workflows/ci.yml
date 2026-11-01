@@ -210,6 +210,18 @@ jobs:
           COVERAGE_FILE: .coverage.tests
         run: pytest tests -q
 
+      # 跨平台金标准（完整 transpile 输出与确定性数值层的摘要）：pytest tests 已经在默认模块上
+      # 跑过；AVX2 runner 上再用 scalar 模块跑一遍，两个模块必须给出逐位相同的结果。
+      - name: Golden digests with the scalar module
+        if: matrix.kernel == 'avx2'
+        env:
+          QUSPECT_DISABLE_AVX2: "1"
+        run: >-
+          pytest -q -o addopts="" -p no:cacheprovider
+          tests/transpiler/test_golden_transpile.py
+          tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent
+          tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics
+
       # 注意：generate_report.main() 在拿到 junit.xml / coverage.json 后总是返回 0
       # （测试失败只写进报告），只有结果文件缺失时才返回 1。因此这里再检查
       # REPORT.md 中记录的 pytest 退出码，非 0（或找不到该行）时让这一步失败。
