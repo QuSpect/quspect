@@ -32,7 +32,7 @@ from quspect.synthesis.two_qubit import (
     DEFAULT_ATOL,
     SynthOp,
     TwoQubitBasis,
-    _approximate_two_qubit_ops,
+    _approximate_ops,
     _ops_layer_matrix,
     euler_ops,
     num_cz_required,
@@ -342,7 +342,7 @@ class ConsolidateBlocksPass:
             if key in memo:
                 found = memo[key]
             else:
-                found = _approximate_two_qubit_ops(
+                found = _approximate_ops(
                     mat,
                     self._max_infidelity,
                     self._atol,

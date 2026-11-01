@@ -112,8 +112,13 @@ class NativeKak:
         basis: TwoQubitBasis,
         max_entanglers: int,
         want_exact: bool,
-    ) -> tuple[list[SynthOp] | None, bool] | None:
-        """``None`` unless no approximation applies; then the exact ops (if wanted)."""
+    ) -> tuple[bool, list[SynthOp] | None, Any] | None:
+        """The native ``synthesize_two_qubit_approx`` (``None``: not handled).
+
+        ``(True, ops, (infidelity, distance))``: the approximation of
+        ``_approximate_two_qubit_ops``; ``(False, ops | None, uses_flag)``: no
+        approximation applies, with the exact ops if ``want_exact``.
+        """
         arr = self._matrix(u)
         ent = None if arr is None else self._entangler(basis)
         if arr is None or ent is None:
@@ -131,9 +136,11 @@ class NativeKak:
             bool(tq._MIRRORED_STABILIZERS),
             want_exact,
         )
+        if status == 2:
+            return True, ops, (float(uses[0]), float(uses[1]))
         if status != 0:
             return None
-        return ops, bool(uses)
+        return False, ops, bool(uses)
 
     def swap_face(
         self, u: object, basis: TwoQubitBasis, verify_atol: float

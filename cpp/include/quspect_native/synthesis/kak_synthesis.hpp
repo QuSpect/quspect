@@ -129,6 +129,21 @@ class KakSynthesizer {
     // ``_approximate_two_qubit_ops`` 是否一定返回 None（每个更少的纠缠门数的预测不保真度都超出预算）。
     bool ApproximationImpossible(const Kak& kak, double max_infidelity, double atol, int max_entanglers) const;
 
+    // ``_approximate_two_qubit_ops(u, max_infidelity, atol, basis, max_entanglers, kak)``：纠缠门更少、
+    // 平均门不保真度不超过 max_infidelity 的近似（ops 与 approximation_error 的两个量），nullopt =
+    // 没有可用的近似。与 Python 参考实现的步骤相同（按纠缠门数升序，先看预测的不保真度，再按
+    // Euler 容差依次合成并以实际门序列的误差为准），全部在确定性数值层上计算。
+    struct Approximation {
+        std::vector<Op> ops;
+        double infidelity = 0.0;
+        double distance = 0.0;
+    };
+    std::optional<Approximation> Approximate(const M4& u, const Kak& kak, double max_infidelity, double atol,
+                                             int max_entanglers, const SynthOptions& opt) const;
+    // ``approximation_error(u, v)``（4×4）：平均门不保真度与相位最优的算子范数距离上界，由 u^† v 的
+    // 特征相位计算；特征分解失败时返回 false。
+    static bool ApproximationError(const M4& u, const M4& v, double* infidelity, double* distance);
+
     // quspect.transpiler._consolidate._verified_euler_ops_uncached：先按 atol 去掉零旋转，误差超出
     // 1e-9 时改用精确角度（atol 取 min(atol, 1e-12)）；都不满足时返回 nullopt（Python 返回 None）。
     std::optional<std::vector<Op>> VerifiedEuler(const M2& u, double atol, int basis) const;
@@ -170,7 +185,10 @@ class KakSynthesizer {
     struct TryResult {
         std::vector<Op> ops;
         double err;
+        M4 rebuilt{};  // ops 的 4×4 酉矩阵
     };
+    // ``_projected_infidelity(v, k)``。
+    double ProjectedInfidelity(const std::array<double, 3>& v, int k) const;
     struct UFactors;  // _try_synthesize 中只取决于 u 的部分（同一次合成中复用）
 
     static M2 Rx(double theta);

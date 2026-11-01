@@ -166,11 +166,23 @@ def test_num_cz_and_approximation_agree_with_python() -> None:
         for budget, max_ent in ((1e-12, 2), (1e-6, 0), (0.0, 2)):
             ref = tq._approximate_two_qubit_ops(u, budget, 1e-9, BASES[0], max_ent)
             got = NATIVE.approximate(u, budget, 1e-9, 1e-9, BASES[0], max_ent, True)
-            if ref is not None:
-                assert got is None  # 存在近似时由 Python 处理
-            elif got is not None:
-                assert got[0] is not None
-                _check_ops(u, got[0], BASES[0], 1e-9)
+            assert got is not None
+            if ref is None:
+                assert not got[0]
+                assert got[1] is not None
+                _check_ops(u, got[1], BASES[0], 1e-9)
+                continue
+            # 同一个近似（纠缠门数相同、误差在预算内且与 Python 的数值一致到舍入）
+            approx, ops, (infidelity, distance) = got
+            assert approx
+            assert ops is not None
+            count = sum(1 for _, q, _ in ops if len(q) == 2)
+            assert count == sum(1 for _, q, _ in ref[0] if len(q) == 2)
+            assert infidelity <= budget
+            assert infidelity == pytest.approx(ref[1].infidelity, rel=1e-6, abs=1e-18)
+            assert distance == pytest.approx(ref[1].distance, rel=1e-6, abs=1e-12)
+            check = tq.approximation_error(u, tq._ops_unitary(ops, BASES[0]))
+            assert check.infidelity <= budget * (1 + 1e-6)
 
 
 def _can(v: np.ndarray) -> np.ndarray:

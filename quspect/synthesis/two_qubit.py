@@ -1916,11 +1916,17 @@ def synthesize_two_qubit_approx(
                 max_entanglers,
                 want_exact,
             )
+            if found is not None and found[0]:
+                # 确定性数值层上的近似（与 _approximate_two_qubit_ops 步骤相同）
+                err = ApproximationError(infidelity=found[2][0], distance=found[2][1])
+                hit = (tuple(found[1] or ()), err)
+                _APPROX_2Q_CACHE.put(key, hit)
+                return list(hit[0]), err
             if found is not None:
                 _APPROX_2Q_CACHE.put(key, False)
-                if found[0] is not None:
-                    ops = tuple(found[0])
-                    flag = _SWAP_FACE_TEMPLATE if found[1] else None
+                if found[1] is not None:
+                    ops = tuple(found[1])
+                    flag = _SWAP_FACE_TEMPLATE if found[2] else None
                     _SYNTH_2Q_CACHE.put((*base, flag), ops)
                     return list(ops), None
                 return list(
@@ -1971,6 +1977,40 @@ def _ops_unitary(ops: list[SynthOp], basis: TwoQubitBasis) -> np.ndarray:
             g = _kron2(m, _I2) if qubits[0] == 0 else _kron2(_I2, m)
         u = g @ u
     return u
+
+
+def _approximate_ops(
+    unitary: np.ndarray,
+    max_infidelity: float,
+    atol: float,
+    basis: TwoQubitBasis,
+    max_entanglers: int = 2,
+) -> tuple[list[SynthOp], ApproximationError] | None:
+    """:func:`_approximate_two_qubit_ops` on the native deterministic layer.
+
+    Falls back to the Python reference without the extension module.
+    """
+    native = _native_kak()
+    if native is not None:
+        found = native.approximate(
+            unitary,
+            max_infidelity,
+            atol,
+            DEFAULT_VERIFY_ATOL,
+            basis,
+            max_entanglers,
+            False,
+        )
+        if found is not None:
+            if not found[0]:
+                return None
+            inf, dist = found[2]
+            return list(found[1] or ()), ApproximationError(
+                infidelity=inf, distance=dist
+            )
+    return _approximate_two_qubit_ops(
+        unitary, max_infidelity, atol, basis, max_entanglers
+    )
 
 
 def _approximate_two_qubit_ops(

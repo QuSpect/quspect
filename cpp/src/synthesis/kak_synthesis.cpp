@@ -10,6 +10,7 @@
 #include "quspect_native/detmath/complex.hpp"
 #include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/detmath/scalar.hpp"
+#include "quspect_native/synthesis/three_qubit.hpp"
 
 namespace quspect::native::synthesis {
 
@@ -787,6 +788,7 @@ KakSynthesizer::TryResult KakSynthesizer::EmitLayers(const M4& u, const std::vec
         result.ops.insert(result.ops.end(), layer_ops.begin(), layer_ops.end());
     }
     result.err = DistanceUpToPhase(u, rebuilt);
+    result.rebuilt = rebuilt;
     return result;
 }
 
@@ -1215,50 +1217,118 @@ std::optional<std::vector<Op>> KakSynthesizer::SynthesizeSwapFace(const M4& u, c
     return std::nullopt;
 }
 
+double KakSynthesizer::ProjectedInfidelity(const std::array<double, 3>& v, int k) const {
+    const double a = v[0];
+    const double b = v[1];
+    const double c = v[2];
+    double delta[3];
+    if (k == 0) {
+        delta[0] = a;
+        delta[1] = b;
+        delta[2] = c;
+    } else if (k == 1) {
+        delta[0] = a - kPi4;
+        delta[1] = b;
+        delta[2] = c;
+    } else {
+        delta[0] = 0.0;
+        delta[1] = 0.0;
+        delta[2] = c;
+    }
+    double phases[4];
+    for (int r = 0; r < 4; ++r) {
+        phases[r] = c_.can_phases[static_cast<std::size_t>(r * 3)] * delta[0]
+                    + c_.can_phases[static_cast<std::size_t>(r * 3 + 1)] * delta[1]
+                    + c_.can_phases[static_cast<std::size_t>(r * 3 + 2)] * delta[2];
+    }
+    double sum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            const double s = dm::Sin(0.5 * (phases[i] - phases[j]));
+            sum += s * s;
+        }
+    }
+    return 4.0 * (2.0 * sum / 16.0) / 5.0;
+}
+
 bool KakSynthesizer::ApproximationImpossible(const Kak& kak, double max_infidelity, double atol,
                                              int max_entanglers) const {
     const int k_exact = CountFromCoords(kak.v, atol);
     const int k_end = std::min(k_exact, max_entanglers + 1);
     const double budget = max_infidelity * (1 + 1e-6);
     for (int k = 0; k < k_end; ++k) {
-        // _projected_infidelity
-        const double a = kak.v[0];
-        const double b = kak.v[1];
-        const double c = kak.v[2];
-        double delta[3];
-        if (k == 0) {
-            delta[0] = a;
-            delta[1] = b;
-            delta[2] = c;
-        } else if (k == 1) {
-            delta[0] = a - kPi4;
-            delta[1] = b;
-            delta[2] = c;
-        } else {
-            delta[0] = 0.0;
-            delta[1] = 0.0;
-            delta[2] = c;
-        }
-        double phases[4];
-        for (int r = 0; r < 4; ++r) {
-            phases[r] = c_.can_phases[static_cast<std::size_t>(r * 3)] * delta[0]
-                        + c_.can_phases[static_cast<std::size_t>(r * 3 + 1)] * delta[1]
-                        + c_.can_phases[static_cast<std::size_t>(r * 3 + 2)] * delta[2];
-        }
-        double sum = 0.0;
-        for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
-                const double s = dm::Sin(0.5 * (phases[i] - phases[j]));
-                sum += s * s;
-            }
-        }
-        const double predicted = 4.0 * (2.0 * sum / 16.0) / 5.0;
         // predicted > budget 时 Python 跳过该 k；否则可能存在近似
-        if (!(predicted > budget)) {
+        if (!(ProjectedInfidelity(kak.v, k) > budget)) {
             return false;
         }
     }
     return true;
+}
+
+bool KakSynthesizer::ApproximationError(const M4& u, const M4& v, double* infidelity, double* distance) {
+    M4 m;
+    dm::MatMulAdjA(4, u.data(), v.data(), m.data());  // u^† v
+    const auto eig = UnitaryEig(m, 1e-9);
+    if (!eig) {
+        return false;
+    }
+    std::array<double, 4> phases;
+    for (int k = 0; k < 4; ++k) {
+        phases[static_cast<std::size_t>(k)] = dm::Arg(eig->second[static_cast<std::size_t>(k)]);
+    }
+    std::sort(phases.begin(), phases.end());
+    // 1 − F_pro = Σ_{j,k} 2 sin²((λ_j − λ_k)/2) / d²（无相消误差），F̄ = (d·F_pro + 1)/(d + 1)
+    double sum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            const double s = dm::Sin(0.5 * (phases[static_cast<std::size_t>(i)] - phases[static_cast<std::size_t>(j)]));
+            sum += s * s;
+        }
+    }
+    const double deficit = 2.0 * sum / 16.0;
+    *infidelity = 4.0 * deficit / 5.0;
+    double max_gap = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const double next = k + 1 < 4 ? phases[static_cast<std::size_t>(k + 1)] : phases[0] + 2.0 * kPi;
+        max_gap = std::max(max_gap, next - phases[static_cast<std::size_t>(k)]);
+    }
+    const double arc = 2.0 * kPi - max_gap;
+    *distance = arc <= kPi ? 2.0 * dm::Sin(arc / 4.0) : 2.0;
+    return true;
+}
+
+std::optional<KakSynthesizer::Approximation> KakSynthesizer::Approximate(const M4& u, const Kak& kak,
+                                                                          double max_infidelity, double atol,
+                                                                          int max_entanglers,
+                                                                          const SynthOptions& opt) const {
+    const int k_exact = CountFromCoords(kak.v, atol);
+    const int k_end = std::min(k_exact, max_entanglers + 1);
+    const double budget = max_infidelity * (1 + 1e-6);
+    std::vector<double> euler_tols{atol};
+    if (atol > kExactEulerAtol) {
+        euler_tols.push_back(kExactEulerAtol);
+    }
+    SynthOptions any = opt;
+    any.verify_atol = std::numeric_limits<double>::infinity();  // _try_synthesize(..., math.inf)
+    std::optional<UFactors> uf;
+    for (int k = 0; k < k_end; ++k) {
+        // 预测值是保留局部因子时的精确不保真度；留一点余量给数值误差，最终以实际门序列的误差为准
+        if (ProjectedInfidelity(kak.v, k) > budget) {
+            continue;
+        }
+        if (!uf) {
+            uf = UFactors{FactorLocal(kak.k1), FactorLocal(kak.k2)};
+        }
+        for (double tol : euler_tols) {
+            TryResult r = TrySynthesize(u, kak, *uf, k, tol, nullptr, any, false);
+            double infidelity = 0.0;
+            double distance = 0.0;
+            if (ApproximationError(u, r.rebuilt, &infidelity, &distance) && infidelity <= max_infidelity) {
+                return Approximation{std::move(r.ops), infidelity, distance};
+            }
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace quspect::native::synthesis

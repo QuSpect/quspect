@@ -135,8 +135,8 @@ class PyKakSynthesizer {
         return py::make_tuple(conv_.Convert(ops, Name(entangler)), uses_flag);
     }
 
-    // synthesize_two_qubit_approx 的前半段：(0, ops | None, uses_flag) = 没有可用的近似（want_exact
-    // 时附上精确合成）；(1, None, False) = 可能有近似（由调用方处理）。
+    // synthesize_two_qubit_approx 的原生部分：(0, ops | None, uses_flag) = 没有可用的近似（want_exact
+    // 时附上精确合成）；(2, ops, (infidelity, distance)) = 近似（_approximate_two_qubit_ops 的结果）。
     py::tuple Approximate(const ComplexArray& u, double max_infidelity, double atol, double verify_atol,
                           int max_entanglers, int entangler, int euler, bool swap_face_template, bool mirrored,
                           bool want_exact) const {
@@ -145,7 +145,11 @@ class PyKakSynthesizer {
         impl_.CheckUnitary(m);
         const Kak kak = impl_.Kak4(m);
         if (!impl_.ApproximationImpossible(kak, max_infidelity, atol, max_entanglers)) {
-            return py::make_tuple(1, py::none(), false);
+            auto found = impl_.Approximate(m, kak, max_infidelity, atol, max_entanglers, opt);
+            if (found) {
+                return py::make_tuple(2, conv_.Convert(found->ops, Name(entangler)),
+                                      py::make_tuple(found->infidelity, found->distance));
+            }
         }
         if (!want_exact) {
             return py::make_tuple(0, py::none(), false);

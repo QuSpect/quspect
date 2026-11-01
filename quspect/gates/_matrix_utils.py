@@ -33,13 +33,13 @@ Z_MATRIX: np.ndarray = np.array([[1, 0], [0, -1]], dtype=complex)
 H_MATRIX: np.ndarray = np.array([[1, 1], [1, -1]], dtype=complex) / math.sqrt(2)
 S_MATRIX: np.ndarray = np.array([[1, 0], [0, 1j]], dtype=complex)
 SDG_MATRIX: np.ndarray = np.array([[1, 0], [0, -1j]], dtype=complex)
-T_MATRIX: np.ndarray = np.array(
-    [[1, 0], [0, math.cos(math.pi / 4) + 1j * math.sin(math.pi / 4)]],
-    dtype=complex,
-)
+# cos(π/4)、sin(π/4)（π/4 取 math.pi / 4）的正确舍入值，写成常数而不调用平台 libm：
+# 与确定性数值层的 p(π/4) 逐位相同，且在所有平台上一致。
+_COS_PI4 = float.fromhex("0x1.6a09e667f3bcdp-1")
+_SIN_PI4 = float.fromhex("0x1.6a09e667f3bccp-1")
+T_MATRIX: np.ndarray = np.array([[1, 0], [0, _COS_PI4 + 1j * _SIN_PI4]], dtype=complex)
 TDG_MATRIX: np.ndarray = np.array(
-    [[1, 0], [0, math.cos(math.pi / 4) - 1j * math.sin(math.pi / 4)]],
-    dtype=complex,
+    [[1, 0], [0, _COS_PI4 - 1j * _SIN_PI4]], dtype=complex
 )
 SX_MATRIX: np.ndarray = (
     np.array([[1 + 1j, 1 - 1j], [1 - 1j, 1 + 1j]], dtype=complex) / 2

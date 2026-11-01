@@ -333,8 +333,10 @@ def synthesize_three_qubit(u: np.ndarray) -> list[_Op] | None:
         # perm @ u @ perm.T：行列置换（精确）
         idx = _local_perm_index(c, t1, t2)
         up = np.ascontiguousarray(u[np.ix_(idx, idx)])
-        off = max(np.max(np.abs(up[:4, 4:])), np.max(np.abs(up[4:, :4])))
-        if off > _MUX_ATOL:
+        # |z|² 而不是 np.abs（平台 hypot）：只用 IEEE 乘加，判定在所有平台上相同
+        corners = np.concatenate([up[:4, 4:].ravel(), up[4:, :4].ravel()])
+        off2 = float(np.max(corners.real * corners.real + corners.imag * corners.imag))
+        if off2 > _MUX_ATOL * _MUX_ATOL:
             continue
         ops = _demultiplex(up[:4, :4], up[4:, 4:], c, t1, t2)
         if ops is None:

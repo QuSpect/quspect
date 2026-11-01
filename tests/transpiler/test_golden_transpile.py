@@ -420,9 +420,83 @@ def test_hash_seed_does_not_change_output() -> None:
         assert proc.stdout.strip().splitlines()[-1] == expected
 
 
+def _platform_math_calls(names: tuple[str, ...] = tuple(CIRCUITS)) -> list[str]:
+    """Call sites of platform math (``math``/``cmath``/numpy) while compiling.
+
+    Diagnostic for a platform whose digests differ: every such call outside
+    module constants is a candidate source of the difference.
+    """
+    import cmath
+    import collections
+
+    import numpy as np
+
+    calls: collections.Counter[str] = collections.Counter()
+    saved = []
+
+    def wrap(mod: object, name: str, label: str) -> None:
+        f = getattr(mod, name)
+
+        def w(*a: object, **k: object) -> object:
+            fr = sys._getframe(1)
+            where = fr.f_code.co_filename.replace("\\", "/")
+            calls[f"{label} {where}:{fr.f_lineno}"] += 1
+            return f(*a, **k)
+
+        saved.append((mod, name, f))
+        setattr(mod, name, w)
+
+    for n in ("sin", "cos", "tan", "atan", "atan2", "acos", "asin", "exp", "log"):
+        wrap(math, n, "math." + n)
+        wrap(np, n if hasattr(np, n) else "arctan2", "np." + n)
+    for n in ("hypot", "pow"):
+        wrap(math, n, "math." + n)
+    for n in ("exp", "phase", "polar", "rect", "log", "sqrt"):
+        wrap(cmath, n, "cmath." + n)
+    for n in ("angle", "arctan2", "abs", "hypot"):
+        wrap(np, n, "np." + n)
+    for n in ("svd", "eig", "eigh", "eigvals", "eigvalsh", "qr", "det", "inv"):
+        wrap(np.linalg, n, "np.linalg." + n)
+    try:
+        for level in LEVELS:
+            digests(level, names)
+    finally:
+        for mod, name, f in reversed(saved):
+            setattr(mod, name, f)
+    return [f"{v:8d} {k}" for k, v in calls.most_common()]
+
+
+def test_compilation_uses_no_platform_math() -> None:
+    """No platform math function or LAPACK routine runs while compiling.
+
+    The only allowed calls are ``np.abs`` threshold checks on exactly
+    computed values (commutators with Pauli matrices, constant gate
+    matrices), where a last-bit difference of ``hypot`` cannot change the
+    decision.
+    """
+    calls = _platform_math_calls(("random_6", "adder_6", "three_qubit_5"))
+    allowed = ("_gauge.py:", "_schedule.py:", "gates/synthesis.py:")
+    bad = [c for c in calls if not (" np.abs " in c and any(a in c for a in allowed))]
+    assert not bad
+
+
 if __name__ == "__main__":
+    # 无参数：摘要（GOLDEN 的格式）；--dump F：全部记录（跨平台逐行 diff）；
+    # --calls：编译中调用平台数学库的位置
     import pprint
 
-    pprint.pprint(
-        {level: digests(level) for level in LEVELS}, sort_dicts=False, width=100
-    )
+    args = sys.argv[1:]
+    if args[:1] == ["--dump"]:
+        with open(args[1], "w") as fh:
+            for level in LEVELS:
+                for name in CIRCUITS:
+                    for kind in TOPOLOGIES:
+                        for basis in BASES:
+                            rec = _record(name, kind, basis, level)
+                            fh.write(f"O{level} {name} {rec}\n")
+    elif args[:1] == ["--calls"]:
+        print("\n".join(_platform_math_calls()))
+    else:
+        pprint.pprint(
+            {level: digests(level) for level in LEVELS}, sort_dicts=False, width=100
+        )
