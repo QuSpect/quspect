@@ -514,3 +514,142 @@ def test_large_benchmark_mirror_identical(name: str) -> None:
         python = _with_backend("python", SABRE(target, **options).solve, logical, **kw)
         assert _signature(native[0]) == _signature(python[0]), (name, kind)
         assert native[1:] == python[1:]
+
+
+# =============================================================================
+# Batched routing chains and native event replay
+# =============================================================================
+
+
+@pytest.mark.parametrize("threads", ["1", "3", "8"])
+def test_route_chains_match_serial_routing(
+    threads: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quspect.transpiler import _mapping
+
+    monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+    for tname, _, qc, options in _cases(6, 900):
+        target = _target(tname)
+        router = SABRE(target, **options)
+        prep = router._prepare(qc, True)
+        n = target.num_qubits
+        rng = random.Random(5)
+        chains = []
+        for k in range(5):
+            layout = list(range(n))
+            rng.shuffle(layout)
+            chains.append((layout, k % 3, rng.getrandbits(70)))
+        got = _routing.route_chains(router, prep.dag, chains)
+        assert got is not None
+        for (layout, iters, seed), item in zip(chains, got, strict=True):
+            r = random.Random(seed)
+            swaps = []
+            for _ in range(iters):
+                fwd = route_dag(router, layout, prep.dag, forward=True, rng=r)
+                swaps.append(fwd.num_swaps)
+                bwd = route_dag(router, fwd.final_pi, prep.dag, forward=False, rng=r)
+                swaps.append(bwd.num_swaps)
+                layout = bwd.final_pi
+            res = route_dag(router, layout, prep.dag, forward=True, rng=r, record=True)
+            swaps.append(res.num_swaps)
+            assert item == (layout, swaps, res)
+        # The candidates are the same with and without the batched chains.
+        kwargs = {"seed": 3, "layout_trials": 4, "swap_trials": 3, "work_limit": 400}
+        batched = router._candidate_plans(qc, **kwargs)  # type: ignore[arg-type]
+        monkeypatch.setattr(_mapping, "route_chains", lambda *a: None)
+        serial = router._candidate_plans(qc, **kwargs)  # type: ignore[arg-type]
+        monkeypatch.undo()
+        monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+        assert [(p.label, p.gates, p.route_events) for p in batched] == [
+            (p.label, p.gates, p.route_events) for p in serial
+        ]
+
+
+def test_route_chains_defer_to_python_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    target = _target("ring8")
+    qc = QuantumCircuit().cx(0, 4).cx(2, 6)
+    router = SABRE(target)
+    prep = router._prepare(qc, False)
+    monkeypatch.setenv(ROUTING_BACKEND_ENV, "python")
+    assert _routing.route_chains(router, prep.dag, [(list(range(8)), 1, 3)]) is None
+
+
+def _python_finish(
+    router: SABRE, prep: Any, events: list[int], layout: list[int]
+) -> Any:
+    from quspect.transpiler import _mapping
+
+    gates, initial, final = _mapping._replay(
+        events, layout, prep.dag, prep.num_logical, router._num_physical
+    )
+    gates = _mapping.expand_toffolis(gates, router._adj_sets, prep.circuit)
+    if prep.elide:
+        gates, initial, final = _mapping._elide_trailing_swaps(
+            gates, initial, prep.num_logical
+        )
+        final = [
+            final[prep.sigma[w]] if w < prep.num_logical else final[w]
+            for w in range(len(final))
+        ]
+    return (
+        gates,
+        initial,
+        final,
+        _mapping.estimate_two_qubit_cost(gates, router._num_physical),
+    )
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_native_replay_matches_python(seed: int) -> None:
+    from quspect.transpiler import _mapping
+
+    rng = random.Random(seed)
+    for tname, _, qc, options in _cases(8, 1000 + seed):
+        qc = qc.copy()
+        if seed % 2 == 0 and qc.num_qubits >= 4:
+            qc.swap(0, 3)
+            qc.swap(1, 2)
+        if seed >= 2:
+            qc.measure_all()
+        target = _target(tname)
+        router = SABRE(target, **options)
+        for elide in (False, True):
+            prep = router._prepare(qc, elide)
+            layout = list(range(target.num_qubits))
+            rng.shuffle(layout)
+            res = router._route(
+                layout, prep.dag, forward=True, rng=random.Random(seed), record=True
+            )
+            fast = _mapping._native_replay(
+                prep, res.events, layout, router._num_physical
+            )
+            assert fast is not None
+            want = _python_finish(router, prep, res.events, layout)
+            assert router._finish_scored(prep, res.events, layout) == want
+            assert router._finish(prep, res.events, layout) == want[:3]
+            # Field-by-field identical objects, attributes in the same order
+            # (a Toffoli DAG is only replayed natively).
+            ref = (
+                want[0]
+                if fast[4]
+                else _mapping._replay(
+                    res.events, layout, prep.dag, prep.num_logical, target.num_qubits
+                )[0]
+            )
+            for a, b in zip(fast[0], ref, strict=True):
+                assert list(vars(a).items()) == list(vars(b).items())
+
+
+def test_native_replay_falls_back_on_bad_input() -> None:
+    from quspect.transpiler import _mapping
+
+    target = _target("ring8")
+    qc = QuantumCircuit().cx(0, 4).cx(2, 6)
+    router = SABRE(target)
+    prep = router._prepare(qc, False)
+    # Events out of range: the Python replay raises its own error.
+    assert _mapping._native_replay(prep, [99], list(range(8)), 8) is None
+    with pytest.raises(IndexError):
+        router._finish(prep, [99], list(range(8)))
+    # Not a permutation of the physical qubits.
+    assert _mapping._native_replay(prep, [], [0] * 8, 8) is None
