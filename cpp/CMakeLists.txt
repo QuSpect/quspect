@@ -313,6 +313,7 @@ set(PYBIND_SRCS
   src/pybind/dag_pass_bindings.cpp
   src/pybind/ir_bindings.cpp
   src/pybind/basis_bindings.cpp
+  src/pybind/circuit_bindings.cpp
   src/pybind/consolidate_bindings.cpp
   src/pybind/gauge_bindings.cpp
   src/pybind/schedule_bindings.cpp

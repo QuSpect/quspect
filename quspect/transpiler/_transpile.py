@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from quspect.circuit._native import instruction_stats
 from quspect.synthesis.two_qubit import swap_face_templates
 from quspect.transpiler._basis import plan_basis, translate_to_target
 from quspect.transpiler._consolidate import SYNTHESIS_BASIS, ConsolidateBlocksPass
@@ -1705,12 +1706,31 @@ def _count_swaps(circuit: QuantumCircuit) -> int:
     )
 
 
+def _stats(circuit: QuantumCircuit) -> tuple[int, int, int, int] | None:
+    """``(two-qubit gates, depth, two-qubit depth, gates)`` in one native pass.
+
+    ``None`` when the native helper does not apply (the callers then count
+    in Python, with the same results).
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+
+    if type(circuit) is not QuantumCircuit:
+        return None
+    return instruction_stats(circuit._instructions)
+
+
 def _count_two_qubit(circuit: QuantumCircuit) -> int:
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[0]
     return sum(1 for i in circuit if i.is_gate and len(i.qubits) == 2)
 
 
 def _depth(circuit: QuantumCircuit, *, two_qubit_only: bool) -> int:
     """Circuit depth; with ``two_qubit_only`` only two-qubit gates count."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[2] if two_qubit_only else stats[1]
     level: dict[int, int] = {}
     deepest = 0
     for instr in circuit:
@@ -1727,6 +1747,9 @@ def _depth(circuit: QuantumCircuit, *, two_qubit_only: bool) -> int:
 
 def _depth_key(circuit: QuantumCircuit) -> tuple[int, int, int]:
     """``(depth, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[1], stats[2], stats[3]
     gates = sum(1 for i in circuit if i.is_gate)
     return (
         _depth(circuit, two_qubit_only=False),
@@ -1737,11 +1760,17 @@ def _depth_key(circuit: QuantumCircuit) -> tuple[int, int, int]:
 
 def _finish_key(circuit: QuantumCircuit) -> tuple[int, int, int, int]:
     """``(two-qubit gates, depth, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats
     return (_count_two_qubit(circuit), *_depth_key(circuit))
 
 
 def _score(circuit: QuantumCircuit) -> tuple[int, int, int]:
     """``(two-qubit gates, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[0], stats[2], stats[3]
     gates = sum(1 for i in circuit if i.is_gate)
     return _count_two_qubit(circuit), _depth(circuit, two_qubit_only=True), gates
 

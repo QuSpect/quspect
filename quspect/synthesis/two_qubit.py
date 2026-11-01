@@ -65,7 +65,7 @@ import cmath
 import functools
 import math
 import sys
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
@@ -2087,6 +2087,36 @@ def _standard_gates() -> dict[str, Gate]:
     return {g.name: g for g in ALL_STANDARD}
 
 
+@functools.cache
+def _native_op_builder() -> Callable[..., list[CircuitInstruction] | None] | None:
+    """Native :func:`ops_to_instructions` (``None`` when not built).
+
+    It builds the same instructions in one call and returns ``None`` for
+    anything but plain ops (the Python code then runs, with its errors).
+    """
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    build = None if core is None else getattr(core, "_synth_op_instructions", None)
+    if build is None:
+        return None
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.gates.gate import Gate
+
+    def builder(
+        ops: list[SynthOp], qubits: tuple[int, int], rz: Gate, fixed: dict[str, Gate]
+    ) -> list[CircuitInstruction] | None:
+        result: list[CircuitInstruction] | None = build(
+            ops, qubits, rz, fixed, CircuitInstruction, InstructionType.GATE, Gate
+        )
+        return result
+
+    return builder
+
+
 def ops_to_instructions(
     ops: list[SynthOp], qubits: tuple[int, int]
 ) -> list[CircuitInstruction]:
@@ -2114,6 +2144,11 @@ def ops_to_instructions(
     from quspect.gates.parameterized import RZ
 
     fixed = _standard_gates()
+    builder = _native_op_builder()
+    if builder is not None:
+        built: list[CircuitInstruction] | None = builder(ops, qubits, RZ, fixed)
+        if built is not None:
+            return built
     return _gate_instructions(
         [
             (
