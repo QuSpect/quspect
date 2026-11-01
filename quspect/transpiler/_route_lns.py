@@ -543,11 +543,10 @@ def refine_plan(
         is strictly cheaper under the merge model, or equally cheap with a
         smaller depth proxy (``depth_ties``), else ``None``.
     """
-    if not _refinable(plan):
+    prep = plan.prep
+    if prep is None or not _refinable(plan):
         return None
-    res = refine_routing(
-        router, plan.prep, plan.route_layout, plan.route_events, **options
-    )
+    res = refine_routing(router, prep, plan.route_layout, plan.route_events, **options)
     return _refined_plan(router, plan, res, prefix)
 
 

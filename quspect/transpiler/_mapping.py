@@ -1859,7 +1859,7 @@ def _native_replay(
         )
     except (TypeError, OverflowError):
         return None
-    return out  # type: ignore[return-value]
+    return out
 
 
 def _build_replay_table(core: Any, dag: _RoutingDag) -> Any:
