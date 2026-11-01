@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -527,6 +528,43 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("adjacency"), py::arg("blocks"), py::arg("layout"), py::arg("width") = 16, py::arg("ext_weight") = 0.5,
         py::arg("exe_bonus") = 0.5, py::arg("layout_iters") = 1, py::arg("seed") = 1, py::arg("depth_tiebreak") = true,
         "Truncated-rollout routing of generic SU(4) blocks; returns (paid, flips, layout, events, depth).");
+
+    // 同一输入、不同 (width, seed) 的多次截断展开路由：互不相关，各自在一个任务中计算（结果与依次
+    // 调用 _route_su4_blocks 相同，按 configs 的顺序返回）
+    m.def(
+        "_route_su4_blocks_many",
+        [](const std::vector<std::vector<int>>& adjacency, const std::vector<std::pair<int, int>>& blocks,
+           const std::vector<int>& layout, const std::vector<std::pair<int, std::uint64_t>>& configs,
+           double ext_weight, double exe_bonus, int layout_iters, bool depth_tiebreak) {
+            std::vector<transpiler::Su4RouteResult> results(configs.size());
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(configs.size());
+                for (std::size_t i = 0; i < configs.size(); ++i) {
+                    tasks.emplace_back([&, i] {
+                        transpiler::Su4RouteOptions options;
+                        options.depth_tiebreak = depth_tiebreak;
+                        options.width = configs[i].first;
+                        options.ext_weight = ext_weight;
+                        options.exe_bonus = exe_bonus;
+                        options.layout_iters = layout_iters;
+                        options.seed = configs[i].second;
+                        results[i] = transpiler::RouteSu4Blocks(adjacency, blocks, layout, options);
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (auto& result : results) {
+                out.append(py::make_tuple(result.paid, result.flips, std::move(result.layout), std::move(result.events),
+                                          result.depth));
+            }
+            return out;
+        },
+        py::arg("adjacency"), py::arg("blocks"), py::arg("layout"), py::arg("configs"), py::arg("ext_weight") = 0.5,
+        py::arg("exe_bonus") = 0.5, py::arg("layout_iters") = 1, py::arg("depth_tiebreak") = true,
+        "_route_su4_blocks for each (width, seed) of configs, computed concurrently; list of its results.");
 
     // 低伸缩初始布局（quspect.transpiler._embedding 的原生实现）
     m.def(
