@@ -57,6 +57,29 @@ int CompileThreads();
 /// 在全部任务结束后按任务顺序重新抛出第一个。
 void RunTasks(const std::vector<std::function<void()>>& tasks, int threads);
 
+/// 常驻的工作线程组：多次 Run 之间线程不退出，适合大量短小的并行批次（每批的创建 / 回收线程
+/// 开销与任务本身相当时）。lanes 个通道，通道 0 是调用 Run 的线程，其余各是一个常驻线程；
+/// 无法创建线程时通道数相应减少（受限环境），lanes <= 1 时 Run 在调用线程中依次执行。
+class WorkerPool {
+ public:
+    explicit WorkerPool(int lanes);
+    ~WorkerPool();
+    WorkerPool(const WorkerPool&) = delete;
+    WorkerPool& operator=(const WorkerPool&) = delete;
+
+    /// 实际的通道数（含调用线程）。
+    int lanes() const;
+
+    /// 对 [0, count) 中的每个 k 调用一次 body(k, lane)，返回时全部完成。任务按下标顺序被空闲通道
+    /// 取走（动态分配）；同一通道的调用不会并发，lane 可用来索引每个通道自己的工作区。
+    /// body 不得抛出异常（需要时自行捕获并记录）。
+    void Run(std::size_t count, const std::function<void(std::size_t, int)>& body);
+
+ private:
+    struct State;
+    State* state_;
+};
+
 /// 把 [0, count) 切成最多 num_threads 段互不重叠的连续区间，并行调用 body(begin, end)。
 ///
 /// 区间划分与 OpenMP 的 schedule(static) 相同（每个线程一段连续区间）。num_threads <= 1、

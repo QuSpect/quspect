@@ -317,6 +317,7 @@ set(PYBIND_SRCS
   src/pybind/consolidate_bindings.cpp
   src/pybind/gauge_bindings.cpp
   src/pybind/phase_fold_bindings.cpp
+  src/pybind/replay_bindings.cpp
   src/pybind/schedule_bindings.cpp
   src/pybind/synthesis_bindings.cpp
 )

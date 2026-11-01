@@ -93,7 +93,6 @@ from quspect.transpiler._mapping import (
     _GATE_CZ_COST,
     _collect_pair_blocks,
     _mirror_cost_arrays,
-    estimate_two_qubit_cost,
 )
 from quspect.transpiler._routing import _native_core, native_handles
 
@@ -436,9 +435,53 @@ def refine_routing(
     core = _native_core()
     if core is None or not hasattr(core, "_refine_routing"):
         return None
+    args = _refine_args(
+        core,
+        router,
+        prep,
+        layout,
+        events,
+        window_swaps=window_swaps,
+        passes=passes,
+        window_expansions=window_expansions,
+        total_expansions=total_expansions,
+        max_window_nodes=max_window_nodes,
+        merge_costs=merge_costs,
+        weight=weight,
+        stop_at_first=stop_at_first,
+        depth_ties=depth_ties,
+        depth_passes=depth_passes,
+        depth_expansions=depth_expansions,
+    )
+    return _refined(core._refine_routing(*args))
+
+
+def _refine_args(
+    core: Any,
+    router: SABRE,
+    prep: _Prepared,
+    layout: list[int],
+    events: list[int],
+    *,
+    window_swaps: tuple[int, ...] = DEFAULT_WINDOW_SWAPS,
+    passes: int = 2,
+    window_expansions: int = DEFAULT_WINDOW_EXPANSIONS,
+    total_expansions: int = 4_000_000,
+    max_window_nodes: int = DEFAULT_MAX_WINDOW_NODES,
+    merge_costs: bool = True,
+    weight: float = 1.0,
+    stop_at_first: bool = False,
+    depth_ties: bool = False,
+    depth_passes: int = 0,
+    depth_expansions: int = 0,
+) -> tuple[Any, ...]:
+    """Positional arguments of the native ``_refine_routing``.
+
+    See :func:`refine_routing` for the options.
+    """
     graph, ndag = native_handles(core, router, prep.dag)
     mirror, measure = node_cost_model(prep)
-    out: tuple[Any, ...] = core._refine_routing(
+    return (
         graph,
         ndag,
         mirror,
@@ -458,6 +501,10 @@ def refine_routing(
         depth_passes,
         depth_expansions,
     )
+
+
+def _refined(out: tuple[Any, ...]) -> RefinedRouting:
+    """:class:`RefinedRouting` from the native result tuple."""
     new_events, old_cost, new_cost, old_swaps, new_swaps, windows, improved, exp = out[
         :8
     ]
@@ -496,25 +543,90 @@ def refine_plan(
         is strictly cheaper under the merge model, or equally cheap with a
         smaller depth proxy (``depth_ties``), else ``None``.
     """
-    prep = plan.prep
-    if prep is None or not plan.route_events or plan.num_swaps == 0:
+    if not _refinable(plan):
         return None
-    res = refine_routing(router, prep, plan.route_layout, plan.route_events, **options)
-    if res is None or res.improved == 0:
+    res = refine_routing(
+        router, plan.prep, plan.route_layout, plan.route_events, **options
+    )
+    return _refined_plan(router, plan, res, prefix)
+
+
+def refine_plans(
+    router: SABRE,
+    requests: list[tuple[_CandidatePlan, str, dict[str, Any]]],
+) -> list[_CandidatePlan | None]:
+    """:func:`refine_plan` for several independent candidates at once.
+
+    The native searches of all requests run concurrently (one native call,
+    ``QUSPECT_COMPILE_THREADS``); the results are then turned into plans in
+    request order, so the output equals
+    ``[refine_plan(router, plan, prefix=prefix, **options) for ...]``.
+
+    Args:
+        router: Router of the target coupling graph.
+        requests: ``(plan, prefix, options)`` per candidate; ``options`` are
+            keyword arguments of :func:`refine_routing`.
+
+    Returns:
+        One refined plan or ``None`` per request.
+    """
+    core = _native_core()
+    if core is None or not hasattr(core, "_refine_routing_many"):
+        return [
+            refine_plan(router, plan, prefix=prefix, **options)
+            for plan, prefix, options in requests
+        ]
+    todo = [i for i, (plan, _, _) in enumerate(requests) if _refinable(plan)]
+    jobs = []
+    for i in todo:
+        plan, _, options = requests[i]
+        assert plan.prep is not None
+        jobs.append(
+            _refine_args(
+                core, router, plan.prep, plan.route_layout, plan.route_events, **options
+            )
+        )
+    outs = core._refine_routing_many(jobs) if jobs else []
+    results: list[_CandidatePlan | None] = [None] * len(requests)
+    for i, out in zip(todo, outs, strict=True):
+        plan, prefix, _ = requests[i]
+        results[i] = _refined_plan(router, plan, _refined(out), prefix)
+    return results
+
+
+def _refinable(plan: _CandidatePlan) -> bool:
+    """Whether :func:`refine_plan` searches ``plan`` (it has SWAPs to refine)."""
+    return plan.prep is not None and bool(plan.route_events) and plan.num_swaps != 0
+
+
+def _refined_plan(
+    router: SABRE,
+    plan: _CandidatePlan,
+    res: RefinedRouting | None,
+    prefix: str,
+) -> _CandidatePlan | None:
+    """The plan of a refinement result.
+
+    ``None`` if the routing is not better (see :func:`refine_plan`).
+    """
+    prep = plan.prep
+    if prep is None or res is None or res.improved == 0:
         return None
     cheaper = res.new_cost < res.old_cost
     if not cheaper and not (
         res.new_cost == res.old_cost and res.new_depth < res.old_depth
     ):
         return None
-    gates, initial, final = router._finish(prep, res.events, plan.route_layout)
+    gates, initial, final, est = router._finish_scored(
+        prep, res.events, plan.route_layout
+    )
     return replace(
         plan,
         gates=gates,
         initial_mapping=initial,
         final_mapping=final,
         num_swaps=res.new_swaps,
-        estimated_two_qubit_gates=estimate_two_qubit_cost(gates, router._num_physical),
+        estimated_two_qubit_gates=est,
         label=f"{prefix}/{plan.label}",
         is_default=False,
         route_events=res.events,
@@ -564,10 +676,31 @@ def deepen_plan(
         router,
         plan,
         prefix="lnsd",
-        window_swaps=window_swaps,
-        passes=0,
-        window_expansions=window_expansions,
-        total_expansions=0,
-        depth_passes=passes,
-        depth_expansions=expansions,
+        **deepen_options(
+            window_swaps=window_swaps,
+            window_expansions=window_expansions,
+            expansions=expansions,
+            passes=passes,
+        ),
     )
+
+
+def deepen_options(
+    *,
+    window_swaps: tuple[int, ...] = DEFAULT_WINDOW_SWAPS,
+    window_expansions: int = DEFAULT_WINDOW_EXPANSIONS,
+    expansions: int = 1_000_000,
+    passes: int = 1,
+) -> dict[str, Any]:
+    """Keyword arguments of :func:`refine_routing` for :func:`deepen_plan`.
+
+    Use with prefix ``"lnsd"`` in :func:`refine_plans` to batch depth sweeps.
+    """
+    return {
+        "window_swaps": window_swaps,
+        "passes": 0,
+        "window_expansions": window_expansions,
+        "total_expansions": 0,
+        "depth_passes": passes,
+        "depth_expansions": expansions,
+    }

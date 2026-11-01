@@ -701,6 +701,27 @@ TEST(CompileTasks, FirstFailingTaskIsRethrownAfterAllFinish) {
     EXPECT_EQ(std::count(done.begin(), done.end(), 1), 6);
 }
 
+TEST(CompileTasks, WorkerPoolRunsEveryTaskOncePerBatch) {
+    for (int lanes : {1, 2, 5}) {
+        quspect::native::common::WorkerPool pool(lanes);
+        EXPECT_GE(pool.lanes(), 1);
+        EXPECT_LE(pool.lanes(), lanes < 1 ? 1 : lanes);
+        for (std::size_t count : {std::size_t{0}, std::size_t{1}, std::size_t{7}, std::size_t{200}}) {
+            std::vector<int> hits(count, 0);
+            std::vector<int> lane_of(count, -1);
+            pool.Run(count, [&](std::size_t k, int lane) {
+                hits[k] += 1;
+                lane_of[k] = lane;
+            });
+            EXPECT_EQ(std::count(hits.begin(), hits.end(), 1), static_cast<long>(count)) << lanes;
+            for (int lane : lane_of) {
+                EXPECT_GE(lane, 0);
+                EXPECT_LT(lane, pool.lanes());
+            }
+        }
+    }
+}
+
 TEST(CompileTasks, ThreadCountFollowsEnvironment) {
     const char* old = std::getenv("QUSPECT_COMPILE_THREADS");
     const std::string saved = old ? old : "";

@@ -68,7 +68,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from quspect.transpiler._mapping import estimate_two_qubit_cost
 from quspect.transpiler._route_lns import node_cost_model
 from quspect.transpiler._routing import _native_core
 
@@ -468,14 +467,14 @@ def _plan_from(
     """A candidate plan from a routing ``(layout, events, paid)`` of ``base``."""
     assert base.prep is not None
     layout, events, _ = out
-    gates, initial, final = router._finish(base.prep, events, layout)
+    gates, initial, final, est = router._finish_scored(base.prep, events, layout)
     return replace(
         base,
         gates=gates,
         initial_mapping=initial,
         final_mapping=final,
         num_swaps=sum(1 for e in events if e < 0),
-        estimated_two_qubit_gates=estimate_two_qubit_cost(gates, router._num_physical),
+        estimated_two_qubit_gates=est,
         label=f"{label}/{base.label}",
         is_default=False,
         embedded=False,

@@ -11,12 +11,14 @@ import pytest
 from quspect import QuantumCircuit
 from quspect.transpiler import SABRE, CompilationTarget, transpile
 from quspect.transpiler._route_lns import (
+    deepen_options,
     deepen_plan,
     exact_route,
     lns_available,
     node_cost_model,
     node_weights,
     refine_plan,
+    refine_plans,
     refine_routing,
     routing_cost,
 )
@@ -261,3 +263,66 @@ def test_node_weights_cap_blocks_at_three() -> None:
     assert len(weights) == len(prep.dag.nodes)
     assert all(w >= 0 for w in weights)
     assert node_weights(prep) is weights
+
+
+@pytest.mark.parametrize("threads", ["1", "2", "8"])
+def test_refine_routing_does_not_depend_on_threads(
+    threads: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _grid(3, 4)
+    router = SABRE(target, block_nodes=True, mirror_gates=True)
+    qc = _random_circuit(12, 90, 7)
+    prep = router._prepare(qc, True)
+    layout = list(range(12))
+    sabre = router._route(
+        layout, prep.dag, forward=True, rng=random.Random(7), record=True
+    )
+    variants = [
+        {},
+        {"total_expansions": 2500, "window_expansions": 300},
+        {"depth_ties": True},
+        {"passes": 1, "depth_passes": 2, "depth_expansions": 4000},
+    ]
+    monkeypatch.setenv("QUSPECT_COMPILE_THREADS", "1")
+    serial = [refine_routing(router, prep, layout, sabre.events, **v) for v in variants]
+    monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+    again = [refine_routing(router, prep, layout, sabre.events, **v) for v in variants]
+    assert again == serial
+
+
+@pytest.mark.parametrize("threads", ["1", "3", "8"])
+def test_refine_plans_match_refine_plan(
+    threads: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import quspect.transpiler._route_lns as lns
+
+    monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+    target = _grid(3, 3)
+    router = SABRE(target, block_nodes=True, mirror_gates=True, swap_fusion_bonus=0.2)
+    requests = []
+    for seed in range(3):
+        qc = _random_circuit(9, 45, seed)
+        for plan in router._candidate_plans(qc, seed=seed, layout_trials=2):
+            requests.append((plan, "lns", {"total_expansions": 50_000}))
+            requests.append((plan, "lnsd", deepen_options(expansions=20_000)))
+    batch = refine_plans(router, requests)
+    single = [refine_plan(router, p, prefix=x, **o) for p, x, o in requests]
+    assert len(batch) == len(requests)
+    assert any(b is not None for b in batch)
+    assert batch == single
+    # Without the batched native entry point the requests run one by one.
+    core = lns._native_core()
+    monkeypatch.setattr(lns, "_native_core", lambda: _NoBatch(core))
+    assert refine_plans(router, requests) == single
+
+
+class _NoBatch:
+    """Native module proxy without ``_refine_routing_many``."""
+
+    def __init__(self, core: object) -> None:
+        self._core = core
+
+    def __getattr__(self, name: str) -> object:
+        if name == "_refine_routing_many":
+            raise AttributeError(name)
+        return getattr(self._core, name)

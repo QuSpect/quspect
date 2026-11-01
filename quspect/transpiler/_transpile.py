@@ -81,7 +81,12 @@ from quspect.transpiler._mapping import (
 )
 from quspect.transpiler._passes import DecomposePass, OptimizePass
 from quspect.transpiler._phase_fold import PhaseFoldingPass
-from quspect.transpiler._route_lns import deepen_plan, refine_plan
+from quspect.transpiler._route_lns import (
+    deepen_options,
+    deepen_plan,
+    refine_plan,
+    refine_plans,
+)
 from quspect.transpiler._schedule import schedule_for_depth
 from quspect.transpiler._swap_face import resynthesize_swap_face_blocks
 from quspect.transpiler._three_qubit import ThreeQubitBlockPass
@@ -1353,6 +1358,20 @@ def _deepen(sabre: SABRE, plan: _CandidatePlan) -> _CandidatePlan | None:
     )
 
 
+def _deepen_request(plan: _CandidatePlan) -> tuple[_CandidatePlan, str, dict[str, Any]]:
+    """:func:`refine_plans` request equivalent to :func:`_deepen`."""
+    opts = _lns_options(plan, _LNS_LIGHT_WINDOWS)
+    return (
+        plan,
+        "lnsd",
+        deepen_options(
+            window_swaps=_LNS_LIGHT_WINDOWS,
+            window_expansions=opts["window_expansions"],
+            expansions=int(_LNS_DEPTH_SHARE * opts["total_expansions"]),
+        ),
+    )
+
+
 def _lns_refinements(
     sabre: SABRE, plans: list[_CandidatePlan]
 ) -> list[_CandidatePlan | None]:
@@ -1363,18 +1382,24 @@ def _lns_refinements(
     :mod:`quspect.transpiler._route_lns`); the ``_LNS_HEAVY_TOP`` routings
     with the lowest estimate after it get a second sweep with larger windows.
     """
-    out = [
-        refine_plan(sabre, plan, **_lns_options(plan, _LNS_LIGHT_WINDOWS))
-        for plan in plans
-    ]
+    # 各候选的精炼互不相关：一次原生调用并行计算，按候选顺序取用
+    out = refine_plans(
+        sabre, [(plan, "lns", _lns_options(plan, _LNS_LIGHT_WINDOWS)) for plan in plans]
+    )
     cur = [r if r is not None else p for r, p in zip(out, plans, strict=True)]
     order = sorted(
         range(len(plans)), key=lambda i: (cur[i].estimated_two_qubit_gates, i)
     )
     extra: list[_CandidatePlan] = []
-    for i in _top_with_layered(order, plans, _LNS_HEAVY_TOP):
-        heavy = _lns_options(cur[i], _LNS_HEAVY_WINDOWS, heavy=True)
-        again = refine_plan(sabre, cur[i], **heavy)
+    picked = _top_with_layered(order, plans, _LNS_HEAVY_TOP)
+    heavy_out = refine_plans(
+        sabre,
+        [
+            (cur[i], "lns", _lns_options(cur[i], _LNS_HEAVY_WINDOWS, heavy=True))
+            for i in picked
+        ],
+    )
+    for i, again in zip(picked, heavy_out, strict=True):
         if again is not None:
             light = out[i]
             out[i] = replace(again, label=f"lns2/{plans[i].label}")
@@ -1397,12 +1422,9 @@ def _depth_refinements(
     order = sorted(
         range(len(plans)), key=lambda i: (plans[i].estimated_two_qubit_gates, i)
     )
-    out = []
-    for i in _top_with_layered(order, plans, _LNS_DEPTH_TOP):
-        deep = _deepen(sabre, plans[i])
-        if deep is not None:
-            out.append(deep)
-    return out
+    picked = _top_with_layered(order, plans, _LNS_DEPTH_TOP)
+    deep = refine_plans(sabre, [_deepen_request(plans[i]) for i in picked])
+    return [d for d in deep if d is not None]
 
 
 def _top_with_layered(

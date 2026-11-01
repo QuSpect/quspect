@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstdlib>
 #include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <system_error>
 #include <thread>
@@ -112,6 +114,104 @@ void RunTasks(const std::vector<std::function<void()>>& tasks, int threads) {
             std::rethrow_exception(e);
         }
     }
+}
+
+struct WorkerPool::State {
+    std::mutex mutex;
+    std::condition_variable start;
+    std::condition_variable done;
+    std::vector<std::thread> threads;
+    // 每次 Run 加一；工作线程据此判断是否有新批次
+    std::uint64_t generation = 0;
+    bool stop = false;
+    const std::function<void(std::size_t, int)>* body = nullptr;
+    std::size_t count = 0;
+    std::atomic<std::size_t> next{0};
+    // 本批次尚未结束的工作线程数
+    int active = 0;
+
+    void Drain(int lane) {
+        for (;;) {
+            const std::size_t k = next.fetch_add(1, std::memory_order_relaxed);
+            if (k >= count) {
+                return;
+            }
+            (*body)(k, lane);
+        }
+    }
+
+    void Work(int lane) {
+        std::uint64_t seen = 0;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                start.wait(lock, [&] { return stop || generation != seen; });
+                if (stop) {
+                    return;
+                }
+                seen = generation;
+            }
+            Drain(lane);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (--active == 0) {
+                    done.notify_one();
+                }
+            }
+        }
+    }
+};
+
+WorkerPool::WorkerPool(int lanes) : state_(new State) {
+    for (int lane = 1; lane < lanes; ++lane) {
+        try {
+            state_->threads.emplace_back([this, lane] { state_->Work(lane); });
+        } catch (const std::system_error&) {
+            // 不能再创建线程：用已有的通道
+            break;
+        }
+    }
+}
+
+WorkerPool::~WorkerPool() {
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->stop = true;
+    }
+    state_->start.notify_all();
+    for (auto& t : state_->threads) {
+        t.join();
+    }
+    delete state_;
+}
+
+int WorkerPool::lanes() const {
+    return static_cast<int>(state_->threads.size()) + 1;
+}
+
+void WorkerPool::Run(std::size_t count, const std::function<void(std::size_t, int)>& body) {
+    if (count == 0) {
+        return;
+    }
+    if (state_->threads.empty() || count == 1) {
+        for (std::size_t k = 0; k < count; ++k) {
+            body(k, 0);
+        }
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->body = &body;
+        state_->count = count;
+        state_->next.store(0, std::memory_order_relaxed);
+        state_->active = static_cast<int>(state_->threads.size());
+        ++state_->generation;
+    }
+    state_->start.notify_all();
+    state_->Drain(0);
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    state_->done.wait(lock, [&] { return state_->active == 0; });
+    state_->body = nullptr;
 }
 
 }  // namespace quspect::native::common

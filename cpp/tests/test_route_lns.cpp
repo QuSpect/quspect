@@ -414,4 +414,53 @@ TEST(RefineRouting, DepthSweepPrefersParallelSwaps) {
     EXPECT_EQ(res.old_depth, 4);
 }
 
+TEST(RefineRouting, ResultDoesNotDependOnThreadCount) {
+    // 窗口投机并行：任意线程数下结果（事件、计数、展开数）与串行逐项相同；包括总预算在扫描中途用完
+    // （单个窗口的上限比投机时小，需按串行上限重算）与深度扫描
+    std::mt19937 gen(23);
+    const RoutingGraph graph = Line(9);
+    for (int trial = 0; trial < 6; ++trial) {
+        std::vector<std::pair<int, int>> gates;
+        std::uniform_int_distribution<int> pick(0, 8);
+        for (int g = 0; g < 80; ++g) {
+            int a = pick(gen);
+            int b = pick(gen);
+            while (b == a) {
+                b = pick(gen);
+            }
+            gates.emplace_back(a, b);
+        }
+        const RoutingDag dag = SequentialDag(gates, 9);
+        RouteCostModel model;
+        for (std::size_t i = 0; i < gates.size(); ++i) {
+            model.mirror_cost.push_back(static_cast<int>(gen() % 4) - 1);
+            model.node_weight.push_back(1 + static_cast<int>(gen() % 3));
+        }
+        const std::vector<int> layout = Identity(9);
+        const auto events = SabreEvents(graph, dag, layout, 41 + trial);
+        std::vector<RefineOptions> variants(4);
+        variants[1].total_expansions = 900 + 300 * trial;
+        variants[1].window_expansions = 200;
+        variants[2].depth_ties = true;
+        variants[3].passes = 1;
+        variants[3].depth_passes = 2;
+        variants[3].depth_expansions = 1500;
+        variants[3].window_expansions = 300;
+        for (const RefineOptions& base : variants) {
+            const auto serial = RefineRouting(graph, dag, model, layout, events, base);
+            for (int threads : {2, 3, 8, 16}) {
+                RefineOptions options = base;
+                options.threads = threads;
+                const auto res = RefineRouting(graph, dag, model, layout, events, options);
+                EXPECT_EQ(res.events, serial.events) << trial << " " << threads;
+                EXPECT_EQ(res.new_cost, serial.new_cost);
+                EXPECT_EQ(res.windows, serial.windows);
+                EXPECT_EQ(res.improved, serial.improved);
+                EXPECT_EQ(res.expansions, serial.expansions);
+                EXPECT_EQ(res.new_depth, serial.new_depth);
+            }
+        }
+    }
+}
+
 }  // namespace
