@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from quspect.circuit._native import instruction_stats
 from quspect.synthesis.two_qubit import swap_face_templates
 from quspect.transpiler._basis import plan_basis, translate_to_target
 from quspect.transpiler._consolidate import SYNTHESIS_BASIS, ConsolidateBlocksPass
@@ -80,7 +81,12 @@ from quspect.transpiler._mapping import (
 )
 from quspect.transpiler._passes import DecomposePass, OptimizePass
 from quspect.transpiler._phase_fold import PhaseFoldingPass
-from quspect.transpiler._route_lns import deepen_plan, refine_plan
+from quspect.transpiler._route_lns import (
+    deepen_options,
+    deepen_plan,
+    refine_plan,
+    refine_plans,
+)
 from quspect.transpiler._schedule import schedule_for_depth
 from quspect.transpiler._swap_face import resynthesize_swap_face_blocks
 from quspect.transpiler._three_qubit import ThreeQubitBlockPass
@@ -1352,6 +1358,20 @@ def _deepen(sabre: SABRE, plan: _CandidatePlan) -> _CandidatePlan | None:
     )
 
 
+def _deepen_request(plan: _CandidatePlan) -> tuple[_CandidatePlan, str, dict[str, Any]]:
+    """:func:`refine_plans` request equivalent to :func:`_deepen`."""
+    opts = _lns_options(plan, _LNS_LIGHT_WINDOWS)
+    return (
+        plan,
+        "lnsd",
+        deepen_options(
+            window_swaps=_LNS_LIGHT_WINDOWS,
+            window_expansions=opts["window_expansions"],
+            expansions=int(_LNS_DEPTH_SHARE * opts["total_expansions"]),
+        ),
+    )
+
+
 def _lns_refinements(
     sabre: SABRE, plans: list[_CandidatePlan]
 ) -> list[_CandidatePlan | None]:
@@ -1362,18 +1382,24 @@ def _lns_refinements(
     :mod:`quspect.transpiler._route_lns`); the ``_LNS_HEAVY_TOP`` routings
     with the lowest estimate after it get a second sweep with larger windows.
     """
-    out = [
-        refine_plan(sabre, plan, **_lns_options(plan, _LNS_LIGHT_WINDOWS))
-        for plan in plans
-    ]
+    # 各候选的精炼互不相关：一次原生调用并行计算，按候选顺序取用
+    out = refine_plans(
+        sabre, [(plan, "lns", _lns_options(plan, _LNS_LIGHT_WINDOWS)) for plan in plans]
+    )
     cur = [r if r is not None else p for r, p in zip(out, plans, strict=True)]
     order = sorted(
         range(len(plans)), key=lambda i: (cur[i].estimated_two_qubit_gates, i)
     )
     extra: list[_CandidatePlan] = []
-    for i in _top_with_layered(order, plans, _LNS_HEAVY_TOP):
-        heavy = _lns_options(cur[i], _LNS_HEAVY_WINDOWS, heavy=True)
-        again = refine_plan(sabre, cur[i], **heavy)
+    picked = _top_with_layered(order, plans, _LNS_HEAVY_TOP)
+    heavy_out = refine_plans(
+        sabre,
+        [
+            (cur[i], "lns", _lns_options(cur[i], _LNS_HEAVY_WINDOWS, heavy=True))
+            for i in picked
+        ],
+    )
+    for i, again in zip(picked, heavy_out, strict=True):
         if again is not None:
             light = out[i]
             out[i] = replace(again, label=f"lns2/{plans[i].label}")
@@ -1396,12 +1422,9 @@ def _depth_refinements(
     order = sorted(
         range(len(plans)), key=lambda i: (plans[i].estimated_two_qubit_gates, i)
     )
-    out = []
-    for i in _top_with_layered(order, plans, _LNS_DEPTH_TOP):
-        deep = _deepen(sabre, plans[i])
-        if deep is not None:
-            out.append(deep)
-    return out
+    picked = _top_with_layered(order, plans, _LNS_DEPTH_TOP)
+    deep = refine_plans(sabre, [_deepen_request(plans[i]) for i in picked])
+    return [d for d in deep if d is not None]
 
 
 def _top_with_layered(
@@ -1705,12 +1728,31 @@ def _count_swaps(circuit: QuantumCircuit) -> int:
     )
 
 
+def _stats(circuit: QuantumCircuit) -> tuple[int, int, int, int] | None:
+    """``(two-qubit gates, depth, two-qubit depth, gates)`` in one native pass.
+
+    ``None`` when the native helper does not apply (the callers then count
+    in Python, with the same results).
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+
+    if type(circuit) is not QuantumCircuit:
+        return None
+    return instruction_stats(circuit._instructions)
+
+
 def _count_two_qubit(circuit: QuantumCircuit) -> int:
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[0]
     return sum(1 for i in circuit if i.is_gate and len(i.qubits) == 2)
 
 
 def _depth(circuit: QuantumCircuit, *, two_qubit_only: bool) -> int:
     """Circuit depth; with ``two_qubit_only`` only two-qubit gates count."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[2] if two_qubit_only else stats[1]
     level: dict[int, int] = {}
     deepest = 0
     for instr in circuit:
@@ -1727,6 +1769,9 @@ def _depth(circuit: QuantumCircuit, *, two_qubit_only: bool) -> int:
 
 def _depth_key(circuit: QuantumCircuit) -> tuple[int, int, int]:
     """``(depth, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[1], stats[2], stats[3]
     gates = sum(1 for i in circuit if i.is_gate)
     return (
         _depth(circuit, two_qubit_only=False),
@@ -1737,11 +1782,17 @@ def _depth_key(circuit: QuantumCircuit) -> tuple[int, int, int]:
 
 def _finish_key(circuit: QuantumCircuit) -> tuple[int, int, int, int]:
     """``(two-qubit gates, depth, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats
     return (_count_two_qubit(circuit), *_depth_key(circuit))
 
 
 def _score(circuit: QuantumCircuit) -> tuple[int, int, int]:
     """``(two-qubit gates, two-qubit depth, total gates)`` of a circuit."""
+    stats = _stats(circuit)
+    if stats is not None:
+        return stats[0], stats[2], stats[3]
     gates = sum(1 for i in circuit if i.is_gate)
     return _count_two_qubit(circuit), _depth(circuit, two_qubit_only=True), gates
 

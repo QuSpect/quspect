@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "quspect_native/ir/small_vector.hpp"
+
 namespace quspect::native::transpiler {
 
 // 单比特门最小化（quspect.transpiler._gauge）的标量内核。
@@ -34,6 +36,20 @@ struct LengthModel {
     bool sxdg = false;
     std::vector<Matrix2> named;
 };
+
+// 内核中各类复数运算的语义。mul 取值同 synthesis::MulMode（0 普通，1 fma(ar, br, −ai·bi) 形式，
+// 2 fma(−ai, bi, ar·br) 形式），div 为 Smith 算法是否收缩成 FMA。默认值是 arm64 上 clang 编译的
+// CPython / numpy 的形式；其他平台由 Python 端按 numpy / CPython 的实际行为（原生 KAK 后端的
+// 探测结果）设置，随后的自检确认内核与 Python 参考一致。进程级设置，只应在使用内核之前调用。
+struct GaugeArithmetic {
+    int py_mul = 1;          // CPython complex * complex（_LengthModel、_zyz）
+    int np_scalar_mul = 1;   // numpy 复数标量乘法（_leading_angles、euler_ops）
+    int scalar_arr_mul = 1;  // numpy：标量 * 数组（_rot）
+    bool py_div_fma = true;  // CPython 复数除法
+    bool np_div_fma = true;  // numpy 复数除法
+};
+void SetGaugeArithmetic(const GaugeArithmetic& arith);
+GaugeArithmetic GetGaugeArithmetic();
 
 // ``_LengthModel._fast(m)``：rz 系门集下 ``synthesize_one_qubit`` 的门数（CPython 复数语义）。
 std::optional<int> FastLength(const Matrix2& m, const LengthModel& model);
@@ -94,10 +110,11 @@ class GaugeBeamSearch {
         }
     };
 
+    // 选项最多 5 个（0 与 4 个前导角），存放在对象内部，memo 项不做堆分配。
     struct MemoOptions {
         double phi_in;  // 首次写入时的 phi_in（同键的选项由它算出）
-        std::vector<double> phis;
-        std::vector<int> costs;
+        ir::SmallVector<double, 5> phis;
+        ir::SmallVector<int, 5> costs;
     };
 
     GaugeBeamSearch(int num_slots, int beam, int gate_weight, int run_weight, LengthModel model);
@@ -164,6 +181,8 @@ class GaugeBeamSearch {
     // Python 端顺序求值使用的 memo 接口（与上面共用同一张表；Put 只在键缺失时写入）。
     const MemoOptions* MemoGet(const MemoKey& key) const;
     void MemoPut(const MemoKey& key, MemoOptions options);
+    // 把 other 的 memo 项并入本对象（已有的键保持不变），other 的 memo 随后为空。
+    void AbsorbMemo(GaugeBeamSearch& other);
 
  private:
     struct MemoKeyHash {
@@ -192,7 +211,8 @@ class GaugeBeamSearch {
     std::vector<double> phi_fixed_;
     std::vector<int> run_length_;
     std::vector<std::uint8_t> base_changed_;
-    std::vector<std::vector<int>> entry_unique_;  // 每行：束条目 → 唯一条目
+    std::vector<int> entry_unique_;               // 每行的束条目 → 唯一条目（entry_begin_ 为每行起点）
+    std::vector<int> entry_begin_;
     std::vector<Unique> unique_;
     std::vector<int> compute_row_;
     std::vector<int> compute_unique_;

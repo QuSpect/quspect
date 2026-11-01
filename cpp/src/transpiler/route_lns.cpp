@@ -16,10 +16,14 @@
 
 #include "quspect_native/transpiler/route_lns.hpp"
 
+#include "quspect_native/common/parallel.hpp"
+
 #include <algorithm>
 #include <cstddef>
 #include <functional>
+#include <exception>
 #include <limits>
+#include <memory>
 #include <queue>
 #include <stdexcept>
 #include <string>
@@ -1674,139 +1678,281 @@ RefineResult RefineRouting(const RoutingGraph& graph, const RoutingDag& dag, con
     // 深度代理：每个事件起的最长路径（与 ev 对齐；替换窗口时只更新窗口段，窗口之前的值本次扫描不再用到）
     std::vector<std::int32_t> tails;
 
+    // 扫描位置：事件下标 p、p 之前的事件推进出的状态，以及末尾窗口是否已处理过
+    struct Cursor {
+        std::size_t p = 0;
+        ScanState st;
+        bool tail_done = false;
+    };
+
+    // 从 c.p 起的窗口 [c.p, e)：从 p 起的 k 个 SWAP 以及直到下一个 SWAP 之前的所有节点。返回是否要搜索它，
+    // 是则填好 spec（上界留给调用方）；同时更新 c.tail_done。
+    auto build_window = [&](Cursor& c, int k, bool timed, std::int64_t cap, WindowSpec& spec,
+                            std::size_t& e) -> bool {
+        const std::size_t p = c.p;
+        const ScanState& st = c.st;
+        e = p;
+        int swaps = 0;
+        bool has3 = false;
+        int nodes = 0;
+        while (e < ev.size()) {
+            if (ev[e] < 0) {
+                if (swaps == k) {
+                    break;
+                }
+                ++swaps;
+            } else {
+                ++nodes;
+                if (KindOf(dag, static_cast<int>(ev[e])) == NodeKind::kThree) {
+                    has3 = true;
+                }
+            }
+            ++e;
+        }
+        const bool tail = e == ev.size();
+        const bool eligible = swaps > 0 && !has3 && nodes <= options.max_window_nodes
+                              && (swaps == k || (tail && !c.tail_done));
+        if (tail) {
+            c.tail_done = true;
+        }
+        if (!eligible) {
+            return false;
+        }
+        spec.entry_layout = st.pi;
+        spec.entry_items = st.items;
+        spec.merge = merge;
+        spec.weight = options.weight;
+        spec.stop_at_first = options.stop_at_first;
+        spec.max_expansions = cap;
+        spec.depth = timed;
+        if (timed) {
+            spec.entry_times = st.t;
+            spec.tail.assign(n, 0);
+        }
+        std::fill(wcount.begin(), wcount.end(), 0);
+        std::vector<int> exit_pi = st.pi;
+        std::vector<int> exit_rpi = st.rpi;
+        for (std::size_t j = p; j < e; ++j) {
+            const std::int64_t x = ev[j];
+            if (x >= 0) {
+                const int node = static_cast<int>(x);
+                spec.nodes.push_back(node);
+                if (KindOf(dag, node) == NodeKind::kTwo) {
+                    ++wcount[dag.nq1()[node]];
+                    ++wcount[dag.nq2()[node]];
+                }
+            } else {
+                int a = 0;
+                int b = 0;
+                DecodeSwap(x, n, a, b);
+                const int ta = exit_rpi[a];
+                const int tb = exit_rpi[b];
+                exit_pi[ta] = b;
+                exit_pi[tb] = a;
+                exit_rpi[a] = tb;
+                exit_rpi[b] = ta;
+            }
+        }
+        // 窗口节点要按拓扑序排列：事件顺序就是一个拓扑序，但求解器要求前驱下标更小
+        spec.exit_pos.assign(n, -1);
+        for (int t = 0; t < n; ++t) {
+            if (st.used[t] + wcount[t] < total_uses[t]) {
+                spec.exit_pos[t] = exit_pi[t];
+            }
+        }
+        // 出口之后每个物理比特上的首个操作
+        if (e < ev.size()) {
+            ScanPost(graph, dag, model, ev, e, exit_pi, exit_rpi, merge, options.lookahead_events, spec);
+            if (timed) {
+                for (int q = 0; q < n; ++q) {
+                    if (spec.post[q].kind != 0) {
+                        spec.tail[q] = tails[static_cast<std::size_t>(spec.post[q].id)];
+                    }
+                }
+            }
+        }
+        return true;
+    };
+
+    // 旧事件段的代价作为上界（equal：同代价时次级键须更小）
+    auto bound_window = [&](WindowSolver& ws, WindowSpec& spec, std::size_t p, std::size_t e, bool equal,
+                            std::int64_t& old_cost, std::int64_t& old_sec) {
+        old_sec = 0;
+        old_cost = ws.EvaluateEvents(spec, ev, p, e, &old_sec);
+        spec.upper_bound = old_cost;
+        spec.upper_secondary = equal ? old_sec : kNoSecondary;
+    };
+
+    auto better = [](const WindowSolution& sol, bool equal, std::int64_t old_cost, std::int64_t old_sec) {
+        return sol.found && (sol.cost < old_cost || (equal && sol.cost == old_cost && sol.secondary < old_sec));
+    };
+
+    // 用窗口解替换 [c.p, e)（c 是窗口入口处的扫描位置）
+    auto splice = [&](const Cursor& c, const WindowSpec& spec, const WindowSolution& sol, std::size_t e, bool timed) {
+        const std::size_t p = c.p;
+        if (timed) {
+            // 新窗口段的尾长：从出口后的尾长倒推
+            ScanState sc = c.st;
+            std::vector<EventSpan> spans(sol.events.size());
+            for (std::size_t j = 0; j < sol.events.size(); ++j) {
+                ScanApply(graph, dag, model, sc, sol.events[j], merge, nullptr, &spans[j]);
+            }
+            std::vector<std::int32_t> next(spec.tail);
+            std::vector<std::int32_t> seg(sol.events.size(), 0);
+            BackwardTails(spans, next, seg);
+            tails.erase(tails.begin() + static_cast<std::ptrdiff_t>(p), tails.begin() + static_cast<std::ptrdiff_t>(e));
+            tails.insert(tails.begin() + static_cast<std::ptrdiff_t>(p), seg.begin(), seg.end());
+        }
+        ev.erase(ev.begin() + static_cast<std::ptrdiff_t>(p), ev.begin() + static_cast<std::ptrdiff_t>(e));
+        ev.insert(ev.begin() + static_cast<std::ptrdiff_t>(p), sol.events.begin(), sol.events.end());
+    };
+
+    // 前进到下一个 SWAP 之后；没有下一个 SWAP 时返回 false
+    auto advance = [&](Cursor& c) {
+        while (c.p < ev.size()) {
+            const std::int64_t x = ev[c.p];
+            ScanApply(graph, dag, model, c.st, x, merge, nullptr);
+            ++c.p;
+            if (x < 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 窗口的投机并行：常驻线程组与每个通道自己的求解器（通道 0 即本线程，用 solver）
+    std::unique_ptr<common::WorkerPool> pool;
+    std::vector<std::unique_ptr<WindowSolver>> lane_solvers;
+    if (options.threads > 1) {
+        pool = std::make_unique<common::WorkerPool>(options.threads);
+        lane_solvers.resize(static_cast<std::size_t>(pool->lanes()));
+    }
+
+    struct WindowJob {
+        Cursor entry;  // 窗口入口（build_window 之后）
+        std::size_t e = 0;
+        bool advanced = false;  // 窗口无改进时，入口之后能否前进到下一个 SWAP
+        WindowSpec spec;
+        std::int64_t old_cost = 0;
+        std::int64_t old_sec = 0;
+        WindowSolution sol;
+        std::exception_ptr error;
+    };
+    std::vector<WindowJob> jobs;
+
     // 一次窗口大小为 k 的扫描；equal：代价相同而次级键更小也替换。返回是否有改进。
     auto sweep = [&](int k, bool equal, std::int64_t& used_exp, std::int64_t budget) {
         bool any = false;
         const bool timed = depth_main || equal;
-        ScanState st;
-        st.Init(layout, timed);
+        Cursor c;
+        c.st.Init(layout, timed);
         if (timed) {
             tails = EventTails(graph, dag, model, layout, ev, merge);
         }
-        std::size_t p = 0;
-        bool tail_done = false;
-        while (p < ev.size() && used_exp < budget) {
-            // 窗口 [p, e)：从 p 起的 k 个 SWAP 以及直到下一个 SWAP 之前的所有节点
-            std::size_t e = p;
-            int swaps = 0;
-            bool has3 = false;
-            int nodes = 0;
-            while (e < ev.size()) {
-                if (ev[e] < 0) {
-                    if (swaps == k) {
-                        break;
-                    }
-                    ++swaps;
-                } else {
-                    ++nodes;
-                    if (KindOf(dag, static_cast<int>(ev[e])) == NodeKind::kThree) {
-                        has3 = true;
-                    }
-                }
-                ++e;
-            }
-            const bool tail = e == ev.size();
-            const bool eligible = swaps > 0 && !has3 && nodes <= options.max_window_nodes
-                                  && (swaps == k || (tail && !tail_done));
-            if (tail) {
-                tail_done = true;
-            }
-            if (eligible) {
-                ++res.windows;
+        if (!pool) {
+            while (c.p < ev.size() && used_exp < budget) {
                 WindowSpec spec;
-                spec.entry_layout = st.pi;
-                spec.entry_items = st.items;
-                spec.merge = merge;
-                spec.weight = options.weight;
-                spec.stop_at_first = options.stop_at_first;
-                spec.max_expansions = std::min(options.window_expansions, budget - used_exp);
-                spec.depth = timed;
-                if (timed) {
-                    spec.entry_times = st.t;
-                    spec.tail.assign(n, 0);
-                }
-                std::fill(wcount.begin(), wcount.end(), 0);
-                std::vector<int> exit_pi = st.pi;
-                std::vector<int> exit_rpi = st.rpi;
-                for (std::size_t j = p; j < e; ++j) {
-                    const std::int64_t x = ev[j];
-                    if (x >= 0) {
-                        const int node = static_cast<int>(x);
-                        spec.nodes.push_back(node);
-                        if (KindOf(dag, node) == NodeKind::kTwo) {
-                            ++wcount[dag.nq1()[node]];
-                            ++wcount[dag.nq2()[node]];
-                        }
-                    } else {
-                        int a = 0;
-                        int b = 0;
-                        DecodeSwap(x, n, a, b);
-                        const int ta = exit_rpi[a];
-                        const int tb = exit_rpi[b];
-                        exit_pi[ta] = b;
-                        exit_pi[tb] = a;
-                        exit_rpi[a] = tb;
-                        exit_rpi[b] = ta;
+                std::size_t e = 0;
+                if (build_window(c, k, timed, std::min(options.window_expansions, budget - used_exp), spec, e)) {
+                    ++res.windows;
+                    std::int64_t old_cost = 0;
+                    std::int64_t old_sec = 0;
+                    bound_window(solver, spec, c.p, e, equal, old_cost, old_sec);
+                    WindowSolution sol = solver.Solve(spec);
+                    used_exp += sol.expansions;
+                    if (better(sol, equal, old_cost, old_sec)) {
+                        splice(c, spec, sol, e, timed);
+                        ++res.improved;
+                        any = true;
                     }
                 }
-                // 窗口节点要按拓扑序排列：事件顺序就是一个拓扑序，但求解器要求前驱下标更小
-                spec.exit_pos.assign(n, -1);
-                for (int t = 0; t < n; ++t) {
-                    if (st.used[t] + wcount[t] < total_uses[t]) {
-                        spec.exit_pos[t] = exit_pi[t];
-                    }
-                }
-                // 出口之后每个物理比特上的首个操作
-                if (e < ev.size()) {
-                    ScanPost(graph, dag, model, ev, e, exit_pi, exit_rpi, merge, options.lookahead_events, spec);
-                    if (timed) {
-                        for (int q = 0; q < n; ++q) {
-                            if (spec.post[q].kind != 0) {
-                                spec.tail[q] = tails[static_cast<std::size_t>(spec.post[q].id)];
-                            }
-                        }
-                    }
-                }
-                std::int64_t old_sec = 0;
-                const std::int64_t old_cost = solver.EvaluateEvents(spec, ev, p, e, &old_sec);
-                spec.upper_bound = old_cost;
-                spec.upper_secondary = equal ? old_sec : kNoSecondary;
-                WindowSolution sol = solver.Solve(spec);
-                used_exp += sol.expansions;
-                if (sol.found && (sol.cost < old_cost || (equal && sol.cost == old_cost && sol.secondary < old_sec))) {
-                    if (timed) {
-                        // 新窗口段的尾长：从出口后的尾长倒推
-                        ScanState sc = st;
-                        std::vector<EventSpan> spans(sol.events.size());
-                        for (std::size_t j = 0; j < sol.events.size(); ++j) {
-                            ScanApply(graph, dag, model, sc, sol.events[j], merge, nullptr, &spans[j]);
-                        }
-                        std::vector<std::int32_t> next(spec.tail);
-                        std::vector<std::int32_t> seg(sol.events.size(), 0);
-                        BackwardTails(spans, next, seg);
-                        tails.erase(tails.begin() + static_cast<std::ptrdiff_t>(p),
-                                    tails.begin() + static_cast<std::ptrdiff_t>(e));
-                        tails.insert(tails.begin() + static_cast<std::ptrdiff_t>(p), seg.begin(), seg.end());
-                    }
-                    ev.erase(ev.begin() + static_cast<std::ptrdiff_t>(p), ev.begin() + static_cast<std::ptrdiff_t>(e));
-                    ev.insert(ev.begin() + static_cast<std::ptrdiff_t>(p), sol.events.begin(), sol.events.end());
-                    ++res.improved;
-                    any = true;
-                }
-            }
-            // 前进到下一个 SWAP 之后
-            bool advanced = false;
-            while (p < ev.size()) {
-                const std::int64_t x = ev[p];
-                ScanApply(graph, dag, model, st, x, merge, nullptr);
-                ++p;
-                if (x < 0) {
-                    advanced = true;
+                if (!advance(c)) {
                     break;
                 }
             }
-            if (!advanced) {
-                break;
+            return any;
+        }
+        // 投机：假定前面的窗口都没有改进，一次取后面的若干个待搜索窗口并行求解，再按顺序取用。
+        // 某个窗口有改进时事件序列变了，其后的结果作废、从替换处重新开始；预算接近用完时单个窗口的
+        // 展开上限可能比投机时小，此时按串行时的上限重算。
+        const std::size_t batch = static_cast<std::size_t>(4 * pool->lanes());
+        while (c.p < ev.size() && used_exp < budget) {
+            const std::int64_t cap = std::min(options.window_expansions, budget - used_exp);
+            jobs.clear();
+            Cursor w = c;
+            bool finished = false;
+            while (jobs.size() < batch) {
+                if (w.p >= ev.size()) {
+                    finished = true;
+                    break;
+                }
+                WindowJob job;
+                const bool eligible = build_window(w, k, timed, cap, job.spec, job.e);
+                if (eligible) {
+                    job.entry = w;
+                }
+                const bool adv = advance(w);
+                if (eligible) {
+                    job.advanced = adv;
+                    jobs.push_back(std::move(job));
+                }
+                if (!adv) {
+                    finished = true;
+                    break;
+                }
+            }
+            pool->Run(jobs.size(), [&](std::size_t i, int lane) {
+                WindowJob& job = jobs[i];
+                try {
+                    WindowSolver* ws = &solver;
+                    if (lane != 0) {
+                        auto& own = lane_solvers[static_cast<std::size_t>(lane)];
+                        if (!own) {
+                            own = std::make_unique<WindowSolver>(graph, dag, model);
+                        }
+                        ws = own.get();
+                    }
+                    bound_window(*ws, job.spec, job.entry.p, job.e, equal, job.old_cost, job.old_sec);
+                    job.sol = ws->Solve(job.spec);
+                } catch (...) {
+                    job.error = std::current_exception();
+                }
+            });
+            bool restart = false;
+            for (WindowJob& job : jobs) {
+                if (used_exp >= budget) {
+                    return any;
+                }
+                if (job.error) {
+                    std::rethrow_exception(job.error);
+                }
+                ++res.windows;
+                const std::int64_t own_cap = std::min(options.window_expansions, budget - used_exp);
+                if (own_cap != job.spec.max_expansions) {
+                    job.spec.max_expansions = own_cap;
+                    job.sol = solver.Solve(job.spec);
+                }
+                used_exp += job.sol.expansions;
+                if (better(job.sol, equal, job.old_cost, job.old_sec)) {
+                    splice(job.entry, job.spec, job.sol, job.e, timed);
+                    ++res.improved;
+                    any = true;
+                    c = std::move(job.entry);
+                    if (!advance(c)) {
+                        return any;
+                    }
+                    restart = true;
+                    break;
+                }
+                if (!job.advanced) {
+                    return any;
+                }
+            }
+            if (!restart) {
+                if (finished && jobs.empty()) {
+                    return any;
+                }
+                c = std::move(w);
             }
         }
         return any;

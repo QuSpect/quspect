@@ -234,3 +234,30 @@ def test_refinement_top_keeps_sabre_candidates() -> None:
     assert _top_with_layered([0, 1, 2, 3], plans, 1) == [0, 1]
     assert _top_with_layered([0, 2, 1, 3], plans, 2) == [0, 2, 1, 3]
     assert _top_with_layered([1, 0, 3], plans, 1) == [1]
+
+
+@pytest.mark.parametrize("threads", ["1", "3", "8"])
+def test_batched_rollouts_match_single_calls(
+    threads: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quspect.transpiler import _layer_route
+
+    monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+    target = _grid(3, 4)
+    router, prep = _prepared(target, _qv(12, 6, 5))
+    layout = list(range(target.num_qubits))
+    configs = [(w, 1 + 7919 * k) for w in (16, 1) for k in range(3)]
+    batch = _layer_route._su4_route_many(router, prep, layout, configs)  # type: ignore[arg-type]
+    assert batch is not None
+    single = [
+        _layer_route._su4_route(router, prep, layout, s, w, None)  # type: ignore[arg-type]
+        for w, s in configs
+    ]
+    assert batch == single
+    # The plan picks the same routing with and without the batch entry point.
+    base = router._solve_plan(_qv(12, 6, 5), seed=1)
+    plan = layer_route_plan(router, base)
+    monkeypatch.setattr(_layer_route, "_su4_route_many", lambda *a: None)
+    again = layer_route_plan(router, base)
+    assert plan is not None and again is not None
+    assert plan.gates == again.gates and plan.label == again.label

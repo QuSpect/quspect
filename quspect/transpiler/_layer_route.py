@@ -68,7 +68,6 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from quspect.transpiler._mapping import estimate_two_qubit_cost
 from quspect.transpiler._route_lns import node_cost_model
 from quspect.transpiler._routing import _native_core
 
@@ -384,6 +383,48 @@ def _su4_route(
     core = _native_core()
     if core is None or not hasattr(core, "_route_su4_blocks"):
         return None
+    inputs = _su4_inputs(router, prep, layout)
+    if inputs is None:
+        return None
+    nodes, adjacency, blocks = inputs
+    if layout_iters is None:
+        layout_iters = ROLLOUT_LAYOUT_ITERS
+    out = core._route_su4_blocks(
+        adjacency, blocks, list(layout), width, 0.5, 0.5, layout_iters, seed
+    )
+    return _su4_result(prep, nodes, out)
+
+
+def _su4_route_many(
+    router: SABRE,
+    prep: _Prepared,
+    layout: list[int],
+    configs: list[tuple[int, int]],
+) -> list[tuple[list[int], list[int], int, int] | None] | None:
+    """:func:`_su4_route` for every ``(width, seed)`` of ``configs``.
+
+    The routings are independent and run concurrently in the native core;
+    the list holds what the corresponding :func:`_su4_route` calls return.
+    ``None`` when the batch entry point is not available (the caller then
+    makes the calls one by one).
+    """
+    core = _native_core()
+    if core is None or not hasattr(core, "_route_su4_blocks_many"):
+        return None
+    inputs = _su4_inputs(router, prep, layout)
+    if inputs is None:
+        return [None] * len(configs)
+    nodes, adjacency, blocks = inputs
+    outs = core._route_su4_blocks_many(
+        adjacency, blocks, list(layout), configs, 0.5, 0.5, ROLLOUT_LAYOUT_ITERS
+    )
+    return [_su4_result(prep, nodes, out) for out in outs]
+
+
+def _su4_inputs(
+    router: SABRE, prep: _Prepared, layout: list[int]
+) -> tuple[list[int], list[list[int]], list[tuple[int, int]]] | None:
+    """Block nodes, adjacency and block qubits of an SU(4)-block routing input."""
     dag = prep.dag
     if not _topological(dag) or block_layers(prep) is None:
         return None
@@ -393,13 +434,16 @@ def _su4_route(
     n = router._num_physical
     if len(layout) != n:
         return None
-    if layout_iters is None:
-        layout_iters = ROLLOUT_LAYOUT_ITERS
     adjacency = [sorted(a) for a in router._adj_sets]
     blocks = [(dag.nq1[v], dag.nq2[v]) for v in nodes]
-    paid, _, start, codes, depth = core._route_su4_blocks(
-        adjacency, blocks, list(layout), width, 0.5, 0.5, layout_iters, seed
-    )
+    return nodes, adjacency, blocks
+
+
+def _su4_result(
+    prep: _Prepared, nodes: list[int], out: tuple[Any, ...]
+) -> tuple[list[int], list[int], int, int] | None:
+    """``(layout, events, paid, depth)`` from a native rollout result."""
+    paid, _, start, codes, depth = out
     steps: list[tuple[int, list[int]]] = []
     for code in codes:
         if code >= 0:
@@ -408,7 +452,7 @@ def _su4_route(
             steps[-1][1].append(int(code))
         else:
             steps.append((-1, [int(code)]))
-    events = _interleave(dag, steps)
+    events = _interleave(prep.dag, steps)
     if events is None:
         return None
     return list(start), events, int(paid), int(depth)
@@ -423,14 +467,14 @@ def _plan_from(
     """A candidate plan from a routing ``(layout, events, paid)`` of ``base``."""
     assert base.prep is not None
     layout, events, _ = out
-    gates, initial, final = router._finish(base.prep, events, layout)
+    gates, initial, final, est = router._finish_scored(base.prep, events, layout)
     return replace(
         base,
         gates=gates,
         initial_mapping=initial,
         final_mapping=final,
         num_swaps=sum(1 for e in events if e < 0),
-        estimated_two_qubit_gates=estimate_two_qubit_cost(gates, router._num_physical),
+        estimated_two_qubit_gates=est,
         label=f"{label}/{base.label}",
         is_default=False,
         embedded=False,
@@ -479,10 +523,17 @@ def layer_route_plan(
         seeds = max(1, min(ROLLOUT_MAX_SEEDS, ROLLOUT_WORK // max(1, num_blocks)))
         best: tuple[list[int], list[int], int] | None = None
         best_key = (0.0, 0)
-        for width in ROLLOUT_WIDTHS:
+        configs = [(w, seed + 7919 * k) for w in ROLLOUT_WIDTHS for k in range(seeds)]
+        # 各 (宽度, 种子) 的展开互不相关：一次并行算完，再按原来的顺序取用
+        batch = _su4_route_many(router, prep, base.route_layout, configs)
+        for i, width in enumerate(ROLLOUT_WIDTHS):
             for k in range(seeds):
-                rolled = _su4_route(
-                    router, prep, base.route_layout, seed + 7919 * k, width, None
+                rolled = (
+                    _su4_route(
+                        router, prep, base.route_layout, seed + 7919 * k, width, None
+                    )
+                    if batch is None
+                    else batch[i * seeds + k]
                 )
                 if rolled is None:
                     break

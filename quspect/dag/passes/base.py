@@ -19,7 +19,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from quspect.dag.dag_circuit import DAGCircuit
@@ -184,7 +184,12 @@ def _wire_sequences(
 
     Two DAGs have equal :func:`dag_signature` iff these dicts are equal;
     the pass manager compares them directly (no wire names, no sorting).
+    The DAG storage core provides the same computation natively.
     """
+    native = getattr(dag, "_wire_sequences", None)
+    if native is not None:
+        result: dict[int, list[str]] = native(cache)
+        return result
     wires: dict[int, list[str]] = {}
     for node in dag.operation_nodes():
         instr = node.instruction
@@ -209,6 +214,59 @@ def _wire_sequences(
                 wires[w] = seq = []
             seq.append(key)
     return wires
+
+
+def _signature(
+    dag: DAGCircuit, cache: dict[int, tuple[object, str]], native: Any
+) -> Any:
+    """Wire signature for the PassManager convergence check.
+
+    With the native storage core this is an opaque per-wire sequence of
+    interned instruction reprs (``native`` is its repr cache); it compares
+    exactly like the :func:`_wire_sequences` dict of the same DAG.
+    """
+    if native is not None:
+        compute = getattr(dag, "_wire_signature", None)
+        if compute is not None:
+            sig = compute(native)
+            if sig is not None:
+                return sig
+    return _wire_sequences(dag, cache)
+
+
+def _signatures_differ(a: Any, b: Any) -> bool:
+    """Compare two signatures from :func:`_signature` (either representation)."""
+    if type(a) is type(b):
+        return bool(a != b)
+    if not isinstance(a, dict):
+        a = a.to_dict()
+    if not isinstance(b, dict):
+        b = b.to_dict()
+    return bool(a != b)
+
+
+def _trusts_native_cache(passes: list[BasePass], dag: DAGCircuit) -> bool:
+    """Whether the native node cache may skip re-validation between passes.
+
+    True when every pass is one of the library passes (no other code can
+    assign ``node.instruction`` directly between two passes) and ``dag``
+    is a plain native :class:`DAGCircuit`.
+    """
+    from quspect.dag.dag_circuit import DAGCircuit
+    from quspect.dag.passes._native import trusted_pass_types
+
+    if type(dag) is not DAGCircuit:
+        return False
+    allowed = trusted_pass_types()
+    return all(type(p) in allowed for p in passes)
+
+
+def _native_repr_cache() -> Any:
+    """Return a native repr cache when the native passes are available."""
+    from quspect.dag.passes._native import enabled, native_core
+
+    core = native_core()
+    return core._ReprCache() if core is not None and enabled() else None
 
 
 # =========================================================================
@@ -274,9 +332,27 @@ class PassManager:
                 ``max_iterations``.
         """
         self.stats_history.clear()
-        current = dag
         repr_cache: dict[int, tuple[object, str]] = {}
-        signature = _wire_sequences(current, repr_cache)
+        native_cache = _native_repr_cache()
+        trusted = native_cache is not None and _trusts_native_cache(self._passes, dag)
+        if trusted:
+            dag._set_pass_trust(True)  # type: ignore[attr-defined]
+        try:
+            return self._run(dag, max_iterations, repr_cache, native_cache)
+        finally:
+            if trusted:
+                dag._set_pass_trust(False)  # type: ignore[attr-defined]
+
+    def _run(
+        self,
+        dag: DAGCircuit,
+        max_iterations: int,
+        repr_cache: dict[int, tuple[object, str]],
+        native_cache: Any,
+    ) -> DAGCircuit:
+        """Body of :meth:`run`."""
+        current = dag
+        signature = _signature(current, repr_cache, native_cache)
 
         for iteration in range(max_iterations):
             initial_nodes = current.num_nodes()
@@ -304,14 +380,14 @@ class PassManager:
                     and current is dag_before
                     and current.modification_count == version_before
                 ):
-                    signature = _wire_sequences(current, repr_cache)
+                    signature = _signature(current, repr_cache, native_cache)
 
                 stats = PassStats(
                     pass_name=p.name,
                     nodes_before=nodes_before,
                     nodes_after=nodes_after,
                     elapsed_ms=(t1 - t0) * 1000,
-                    structure_changed=signature != signature_before,
+                    structure_changed=_signatures_differ(signature, signature_before),
                 )
                 self.stats_history.append(stats)
 

@@ -17,13 +17,16 @@ it does not depend on :class:`~quspect.dag.DAGCircuit` internals.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+import quspect.synthesis.two_qubit as _two_qubit
+from quspect.circuit._native import flatten_slots
 from quspect.circuit.circuit import QuantumCircuit
-from quspect.circuit.instruction import CircuitInstruction
+from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.synthesis._memo import BoundedCache, matrix_key
 from quspect.synthesis.two_qubit import (
     DEFAULT_ATOL,
@@ -83,7 +86,12 @@ def _verified_euler_ops(
     cached = _EULER_CACHE.get(key)
     if cached is not None:
         return list(cached) if isinstance(cached, tuple) else None
-    ops = _verified_euler_ops_uncached(u, atol, euler)
+    native = _two_qubit._native_kak()
+    found = None if native is None else native.verified_euler(u, atol, euler)
+    if found is None:
+        ops = _verified_euler_ops_uncached(u, atol, euler)
+    else:
+        ops = list(found) if isinstance(found, list) else None
     _EULER_CACHE.put(key, False if ops is None else tuple(ops))
     return ops
 
@@ -384,6 +392,20 @@ class ConsolidateBlocksPass:
         self.stats = ConsolidationStats()
         instrs = circuit.instructions
         slots: list[list[CircuitInstruction] | CircuitInstruction | None] = list(instrs)
+        swept = self._native_sweep(instrs)
+        if swept is not None:
+            # 原生扫描给出与下面的循环相同的矩阵与块（按关闭顺序）；逐块重综合不变。
+            native_mats, closed = swept
+            for qubits, members, first_2q, cost, num_2q in closed:
+                block = _Block(
+                    qubits=qubits,
+                    members=members,
+                    first_2q=first_2q,
+                    cost=cost,
+                    num_2q=num_2q,
+                )
+                self._finalize(block, instrs, native_mats, slots)
+            return self._assemble(circuit, slots)
         mats: list[np.ndarray | None] = [None] * len(instrs)
         open_block: dict[int, _Block] = {}
         pending: dict[int, list[int]] = {}
@@ -446,15 +468,35 @@ class ConsolidateBlocksPass:
 
         for blk in list({id(b): b for b in open_block.values()}.values()):
             close(blk)
+        return self._assemble(circuit, slots)
 
-        flat: list[CircuitInstruction] = []
-        for slot in slots:
-            if slot is None:
-                continue
-            if isinstance(slot, list):
-                flat.extend(slot)
-            else:
-                flat.append(slot)
+    def _native_sweep(
+        self, instrs: tuple[CircuitInstruction, ...]
+    ) -> tuple[list[np.ndarray | None], list[tuple[Any, ...]]] | None:
+        """Block sweep of :meth:`run` on the native core (``None``: unavailable)."""
+        core = _sweep_core()
+        if core is None or type(self) is not ConsolidateBlocksPass:
+            return None
+        result: tuple[list[np.ndarray | None], list[tuple[Any, ...]]] | None
+        result = core._consolidate_blocks(
+            instrs,
+            CircuitInstruction,
+            InstructionType.GATE,
+            InstructionType.BARRIER,
+            self._matrix_cache,
+            self._matrix,
+            _KNOWN_2Q_COST,
+            self._cost,
+        )
+        return result
+
+    def _assemble(
+        self,
+        circuit: QuantumCircuit,
+        slots: list[list[CircuitInstruction] | CircuitInstruction | None],
+    ) -> QuantumCircuit:
+        """Flatten the slots, fuse single-qubit runs and build the circuit."""
+        flat: list[CircuitInstruction] = flatten_slots(slots)
         if self._fuse_1q:
             flat = self._fuse_single_qubit_runs(flat)
         logger.debug(
@@ -477,31 +519,7 @@ class ConsolidateBlocksPass:
             return
         self.stats.blocks_examined += 1
         self.stats.two_qubit_before += block.cost
-        qa, _ = block.qubits
-        u = np.eye(4, dtype=complex)
-        lifted = self._lifted_cache
-        for m in block.members:
-            mat = mats[m]
-            assert mat is not None
-            qs = instrs[m].qubits
-            if len(qs) == 2 and qs[0] == qa:
-                full = mat
-            else:
-                # 4×4 形式只取决于矩阵本身与它作用的位置：按矩阵对象缓存
-                # （矩阵来自按门缓存的 _matrix，同一个门总是同一个对象）。
-                slot = 0 if len(qs) == 2 else (1 if qs[0] == qa else 2)
-                hit = lifted.get((id(mat), slot))
-                if hit is not None and hit[0] is mat:
-                    full = hit[1]
-                else:
-                    if slot == 0:
-                        full = mat[np.ix_(_REV, _REV)]
-                    elif slot == 1:
-                        full = np.kron(mat, _I2)
-                    else:
-                        full = np.kron(_I2, mat)
-                    lifted[(id(mat), slot)] = (mat, full)
-            u = full @ u
+        u = self._block_unitary(block, instrs, mats)
         err = None
         try:
             if self._max_infidelity > 0:
@@ -543,6 +561,57 @@ class ConsolidateBlocksPass:
         else:
             self.stats.two_qubit_after += block.cost
 
+    def _block_unitary(
+        self,
+        block: _Block,
+        instrs: tuple[CircuitInstruction, ...],
+        mats: list[np.ndarray | None],
+    ) -> np.ndarray:
+        """The block's ``4×4`` unitary (its first qubit most significant)."""
+        qa, _ = block.qubits
+        native = _two_qubit._native_kak()
+        if native is not None:
+            # 与下面的循环逐位相同（同样的 numpy 乘法、kron 与置换）
+            block_mats: list[np.ndarray] = []
+            places: list[int] = []
+            for m in block.members:
+                mat = mats[m]
+                assert mat is not None
+                qs = instrs[m].qubits
+                block_mats.append(mat)
+                if len(qs) == 2:
+                    places.append(0 if qs[0] == qa else 3)
+                else:
+                    places.append(1 if qs[0] == qa else 2)
+            found = native.block_unitary(block_mats, places, _two_qubit._SWAP4)
+            if found is not None:
+                return found
+        u = np.eye(4, dtype=complex)
+        lifted = self._lifted_cache
+        for m in block.members:
+            mat = mats[m]
+            assert mat is not None
+            qs = instrs[m].qubits
+            if len(qs) == 2 and qs[0] == qa:
+                full = mat
+            else:
+                # 4×4 形式只取决于矩阵本身与它作用的位置：按矩阵对象缓存
+                # （矩阵来自按门缓存的 _matrix，同一个门总是同一个对象）。
+                slot = 0 if len(qs) == 2 else (1 if qs[0] == qa else 2)
+                hit = lifted.get((id(mat), slot))
+                if hit is not None and hit[0] is mat:
+                    full = hit[1]
+                else:
+                    if slot == 0:
+                        full = mat[np.ix_(_REV, _REV)]
+                    elif slot == 1:
+                        full = np.kron(mat, _I2)
+                    else:
+                        full = np.kron(_I2, mat)
+                    lifted[(id(mat), slot)] = (mat, full)
+            u = full @ u
+        return u
+
     def _fuse_single_qubit_runs(
         self, instrs: list[CircuitInstruction]
     ) -> list[CircuitInstruction]:
@@ -554,13 +623,22 @@ class ConsolidateBlocksPass:
             run = runs.pop(q, None)
             if run is None or len(run) < 2:
                 return
-            u = np.eye(2, dtype=complex)
+            resynthesize(q, run)
+
+        def resynthesize(q: int, run: list[int]) -> None:
+            run_mats: list[np.ndarray] = []
             for i in run:
                 gate = instrs[i].gate
                 assert gate is not None
                 mat = self._matrix(gate)
                 assert mat is not None
-                u = mat @ u
+                run_mats.append(mat)
+            native = _two_qubit._native_kak()
+            u = None if native is None else native.run_unitary(run_mats)
+            if u is None:  # 原生结果与下面的乘法逐位相同
+                u = np.eye(2, dtype=complex)
+                for mat in run_mats:
+                    u = mat @ u
             ops = _verified_euler_ops(u, self._atol, self._basis.euler)
             if ops is None or len(ops) >= len(run):
                 return
@@ -568,31 +646,61 @@ class ConsolidateBlocksPass:
                 slots[i] = None
             slots[run[0]] = ops_to_instructions(ops, (q, q))
 
-        for idx, ins in enumerate(instrs):
-            gate = ins.gate
-            if (
-                ins.is_gate
-                and gate is not None
-                and len(ins.qubits) == 1
-                and self._matrix(gate) is not None
-            ):
-                runs.setdefault(ins.qubits[0], []).append(idx)
-                continue
-            if not ins.qubits and ins.is_barrier:
-                for q in list(runs):
+        core = _sweep_core()
+        found = (
+            None
+            if core is None or type(self) is not ConsolidateBlocksPass
+            else core._single_qubit_runs(
+                instrs,
+                CircuitInstruction,
+                InstructionType.GATE,
+                InstructionType.BARRIER,
+                self._matrix_cache,
+                self._matrix,
+            )
+        )
+        if found is not None:
+            # 与下面的扫描相同的单比特串（按 flush 顺序，只含长度 >= 2 的串）
+            for q, run in found:
+                resynthesize(q, run)
+        else:
+            for idx, ins in enumerate(instrs):
+                gate = ins.gate
+                if (
+                    ins.is_gate
+                    and gate is not None
+                    and len(ins.qubits) == 1
+                    and self._matrix(gate) is not None
+                ):
+                    runs.setdefault(ins.qubits[0], []).append(idx)
+                    continue
+                if not ins.qubits and ins.is_barrier:
+                    for q in list(runs):
+                        flush(q)
+                    continue
+                for q in ins.qubits:
                     flush(q)
-                continue
-            for q in ins.qubits:
+            for q in list(runs):
                 flush(q)
-        for q in list(runs):
-            flush(q)
 
-        flat: list[CircuitInstruction] = []
-        for slot in slots:
-            if slot is None:
-                continue
-            if isinstance(slot, list):
-                flat.extend(slot)
-            else:
-                flat.append(slot)
+        flat: list[CircuitInstruction] = flatten_slots(slots)
         return flat
+
+
+def _sweep_core() -> Any | None:
+    """The extension module if it provides the native consolidation sweeps."""
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    if core is None or not hasattr(core, "_consolidate_blocks"):
+        return None
+    if os.environ.get(CONSOLIDATE_SWEEP_ENV) == "python":
+        return None
+    return core
+
+
+#: ``python`` keeps the consolidation sweeps in Python (reference / tests).
+CONSOLIDATE_SWEEP_ENV = "QUSPECT_CONSOLIDATE_SWEEP"

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -39,6 +40,17 @@
 #include "quspect_native/transpiler/route_lns.hpp"
 #include "quspect_native/transpiler/sabre_routing.hpp"
 #include "quspect_native/transpiler/su4_routing.hpp"
+
+#include "dag_bindings.hpp"
+#include "ir_bindings.hpp"
+#include "consolidate_bindings.hpp"
+#include "gauge_bindings.hpp"
+#include "basis_bindings.hpp"
+#include "circuit_bindings.hpp"
+#include "phase_fold_bindings.hpp"
+#include "replay_bindings.hpp"
+#include "schedule_bindings.hpp"
+#include "synthesis_bindings.hpp"
 
 namespace py = pybind11;
 using namespace quspect::native;
@@ -264,6 +276,18 @@ py::array_t<double> IsingEnergiesToArray(const optimization::IsingSolverResult& 
 PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
     m.doc() = "QuSpect C++ native simulation backend";
 
+    // ---- 线路 IR：连续存储的线路（隐式 DAG）、QASM 快速路径与 DAGCircuit 的图存储内核 ----
+    quspect::native::pybind::BindIr(m);
+    quspect::native::pybind::BindDagCore(m);
+    quspect::native::pybind::BindSynthesis(m);
+    quspect::native::pybind::BindSchedule(m);
+    quspect::native::pybind::BindConsolidate(m);
+    quspect::native::pybind::BindGauge(m);
+    quspect::native::pybind::BindBasis(m);
+    quspect::native::pybind::BindCircuitHelpers(m);
+    quspect::native::pybind::BindPhaseFold(m);
+    quspect::native::pybind::BindReplay(m);
+
     // ---- CPU 特性探测（供 Python 加载器决定是否导入 AVX2 模块）----
     m.def("cpu_supports_avx2", &kernels::CpuSupportsAVX2,
           "Return True if the CPU and OS support AVX2 + FMA (required by the AVX2 kernels)");
@@ -366,6 +390,86 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         "Run one SABRE routing pass; returns (num_swaps, final_pi, events, depth, swap_cost, num_mirrors, "
         "rng_state or None).");
 
+    // 多条互不相关的路由链（SABRE 候选的各次试验）：每项 (layout, iters, rng_state) 先做 iters 次
+    // "正向 + 反向"的布局精炼（不记录事件），再从精炼后的布局正向路由一次（记录事件），整条链用同一个
+    // 随机源，与依次调用 _route_dag 相同。各项在一个任务中计算，按输入顺序返回
+    // (精炼后的布局, 每次路由的 SWAP 数, num_swaps, final_pi, events, depth, swap_cost, num_mirrors)；
+    // 出错（例如不连通）的项返回 None，由调用方按原路径重算以得到同样的异常。
+    m.def(
+        "_route_dag_chains",
+        [](const transpiler::RoutingGraph& graph, const transpiler::RoutingDag& dag, const py::list& jobs,
+           double lookahead_weight, int extended_set_size, double decay_delta, int decay_reset_interval,
+           int release_valve_threshold, double swap_fusion_bonus, bool mirror_gates, double mirror_threshold,
+           double mirror_cz_penalty) {
+            transpiler::RouteOptions options;
+            options.lookahead_weight = lookahead_weight;
+            options.extended_set_size = extended_set_size;
+            options.decay_delta = decay_delta;
+            options.decay_reset_interval = decay_reset_interval;
+            options.release_valve_threshold = release_valve_threshold;
+            options.swap_fusion_bonus = swap_fusion_bonus;
+            options.mirror_gates = mirror_gates;
+            options.mirror_threshold = mirror_threshold;
+            options.mirror_cz_penalty = mirror_cz_penalty;
+            struct Chain {
+                std::vector<int> layout;
+                int iters = 0;
+                std::vector<std::uint32_t> state;
+                std::vector<int> swaps;
+                transpiler::RouteResult result;
+                bool ok = false;
+            };
+            std::vector<Chain> chains(jobs.size());
+            for (std::size_t i = 0; i < chains.size(); ++i) {
+                const py::tuple job = jobs[i].cast<py::tuple>();
+                chains[i].layout = job[0].cast<std::vector<int>>();
+                chains[i].iters = job[1].cast<int>();
+                chains[i].state = job[2].cast<std::vector<std::uint32_t>>();
+            }
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(chains.size());
+                for (Chain& chain : chains) {
+                    tasks.emplace_back([&graph, &dag, &options, &chain] {
+                        try {
+                            auto rng = transpiler::CPythonRandom::FromState(chain.state);
+                            for (int it = 0; it < chain.iters; ++it) {
+                                const auto fwd = transpiler::RouteDag(graph, dag, options, chain.layout, true, false, rng);
+                                chain.swaps.push_back(fwd.num_swaps);
+                                const auto bwd = transpiler::RouteDag(graph, dag, options, fwd.final_pi, false, false, rng);
+                                chain.swaps.push_back(bwd.num_swaps);
+                                chain.layout = bwd.final_pi;
+                            }
+                            chain.result = transpiler::RouteDag(graph, dag, options, chain.layout, true, true, rng);
+                            chain.swaps.push_back(chain.result.num_swaps);
+                            chain.ok = true;
+                        } catch (const std::exception&) {
+                            chain.ok = false;
+                        }
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (Chain& chain : chains) {
+                if (!chain.ok) {
+                    out.append(py::none());
+                    continue;
+                }
+                transpiler::RouteResult& r = chain.result;
+                out.append(py::make_tuple(std::move(chain.layout), std::move(chain.swaps), r.num_swaps,
+                                          std::move(r.final_pi), std::move(r.events), r.depth, r.swap_cost,
+                                          r.num_mirrors));
+            }
+            return out;
+        },
+        py::arg("graph"), py::arg("dag"), py::arg("jobs"), py::arg("lookahead_weight"), py::arg("extended_set_size"),
+        py::arg("decay_delta"), py::arg("decay_reset_interval"), py::arg("release_valve_threshold"),
+        py::arg("swap_fusion_bonus"), py::arg("mirror_gates"), py::arg("mirror_threshold"),
+        py::arg("mirror_cz_penalty"),
+        "Independent routing chains (layout refinement + recorded forward pass), computed concurrently.");
+
     // 路由的精确窗口搜索与大邻域搜索（quspect.transpiler._route_lns 的原生核心）
     m.def(
         "_route_swap_cost",
@@ -422,6 +526,7 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
             options.depth_ties = depth_ties;
             options.depth_passes = depth_passes;
             options.depth_expansions = depth_expansions;
+            options.threads = common::CompileThreads();
             transpiler::RefineResult result;
             {
                 py::gil_scoped_release release;
@@ -438,6 +543,79 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("depth_passes") = 0, py::arg("depth_expansions") = 0,
         "Large-neighbourhood search over routing windows; returns (events, old_cost, new_cost, old_swaps, "
         "new_swaps, windows, improved, expansions, old_depth, new_depth).");
+
+    // 多个互不相关的 _refine_routing（各候选路由的精炼）：每项的参数元组与 _refine_routing 的位置参数相同，
+    // 各自在一个任务中计算，按输入顺序返回与依次调用相同的结果
+    m.def(
+        "_refine_routing_many",
+        [](const py::list& jobs) {
+            struct Job {
+                const transpiler::RoutingGraph* graph;
+                const transpiler::RoutingDag* dag;
+                std::vector<int> mirror_cost;
+                std::vector<int> measure_token;
+                std::vector<int> node_weight;
+                std::vector<int> layout;
+                std::vector<std::int64_t> events;
+                transpiler::RefineOptions options;
+                transpiler::RefineResult result;
+            };
+            std::vector<Job> work(jobs.size());
+            for (std::size_t i = 0; i < work.size(); ++i) {
+                const py::tuple args = jobs[i].cast<py::tuple>();
+                if (args.size() != 18) {
+                    throw py::value_error("_refine_routing_many: every job takes the 18 arguments of _refine_routing");
+                }
+                Job& job = work[i];
+                job.graph = &args[0].cast<const transpiler::RoutingGraph&>();
+                job.dag = &args[1].cast<const transpiler::RoutingDag&>();
+                job.mirror_cost = args[2].cast<std::vector<int>>();
+                job.measure_token = args[3].cast<std::vector<int>>();
+                job.layout = args[4].cast<std::vector<int>>();
+                job.events = args[5].cast<std::vector<std::int64_t>>();
+                transpiler::RefineOptions& options = job.options;
+                options.window_swaps = args[6].cast<std::vector<int>>();
+                options.passes = args[7].cast<int>();
+                options.window_expansions = args[8].cast<std::int64_t>();
+                options.total_expansions = args[9].cast<std::int64_t>();
+                options.max_window_nodes = args[10].cast<int>();
+                options.merge_costs = args[11].cast<bool>();
+                options.weight = args[12].cast<double>();
+                options.stop_at_first = args[13].cast<bool>();
+                job.node_weight = args[14].cast<std::vector<int>>();
+                options.depth_ties = args[15].cast<bool>();
+                options.depth_passes = args[16].cast<int>();
+                options.depth_expansions = args[17].cast<std::int64_t>();
+            }
+            {
+                py::gil_scoped_release release;
+                // 线程分给各项：任务之间并行，每项内部再用分到的线程做窗口投机（结果与线程数无关）
+                const int threads = common::CompileThreads();
+                const int count = static_cast<int>(std::max<std::size_t>(work.size(), 1));
+                const int inner = std::max(1, threads / count);
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(work.size());
+                for (Job& job : work) {
+                    job.options.threads = inner;
+                    tasks.emplace_back([&job] {
+                        transpiler::RouteCostModel model{job.mirror_cost, job.measure_token, job.node_weight};
+                        job.result = transpiler::RefineRouting(*job.graph, *job.dag, model, job.layout, job.events,
+                                                               job.options);
+                    });
+                }
+                common::RunTasks(tasks, threads);
+            }
+            py::list out;
+            for (Job& job : work) {
+                transpiler::RefineResult& result = job.result;
+                out.append(py::make_tuple(std::move(result.events), result.old_cost, result.new_cost,
+                                          result.old_swaps, result.new_swaps, result.windows, result.improved,
+                                          result.expansions, result.old_depth, result.new_depth));
+            }
+            return out;
+        },
+        py::arg("jobs"),
+        "_refine_routing for each argument tuple of jobs, computed concurrently; list of its results.");
 
     // 逐层匹配线路在路径上的路由（quspect.transpiler._layer_route 的原生核心）
     m.def(
@@ -506,6 +684,43 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("adjacency"), py::arg("blocks"), py::arg("layout"), py::arg("width") = 16, py::arg("ext_weight") = 0.5,
         py::arg("exe_bonus") = 0.5, py::arg("layout_iters") = 1, py::arg("seed") = 1, py::arg("depth_tiebreak") = true,
         "Truncated-rollout routing of generic SU(4) blocks; returns (paid, flips, layout, events, depth).");
+
+    // 同一输入、不同 (width, seed) 的多次截断展开路由：互不相关，各自在一个任务中计算（结果与依次
+    // 调用 _route_su4_blocks 相同，按 configs 的顺序返回）
+    m.def(
+        "_route_su4_blocks_many",
+        [](const std::vector<std::vector<int>>& adjacency, const std::vector<std::pair<int, int>>& blocks,
+           const std::vector<int>& layout, const std::vector<std::pair<int, std::uint64_t>>& configs,
+           double ext_weight, double exe_bonus, int layout_iters, bool depth_tiebreak) {
+            std::vector<transpiler::Su4RouteResult> results(configs.size());
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(configs.size());
+                for (std::size_t i = 0; i < configs.size(); ++i) {
+                    tasks.emplace_back([&, i] {
+                        transpiler::Su4RouteOptions options;
+                        options.depth_tiebreak = depth_tiebreak;
+                        options.width = configs[i].first;
+                        options.ext_weight = ext_weight;
+                        options.exe_bonus = exe_bonus;
+                        options.layout_iters = layout_iters;
+                        options.seed = configs[i].second;
+                        results[i] = transpiler::RouteSu4Blocks(adjacency, blocks, layout, options);
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (auto& result : results) {
+                out.append(py::make_tuple(result.paid, result.flips, std::move(result.layout), std::move(result.events),
+                                          result.depth));
+            }
+            return out;
+        },
+        py::arg("adjacency"), py::arg("blocks"), py::arg("layout"), py::arg("configs"), py::arg("ext_weight") = 0.5,
+        py::arg("exe_bonus") = 0.5, py::arg("layout_iters") = 1, py::arg("depth_tiebreak") = true,
+        "_route_su4_blocks for each (width, seed) of configs, computed concurrently; list of its results.");
 
     // 低伸缩初始布局（quspect.transpiler._embedding 的原生实现）
     m.def(

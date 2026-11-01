@@ -6,9 +6,10 @@ a gate application, a measurement, a barrier, or a noise channel.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -32,6 +33,14 @@ class InstructionType(Enum):
     MEASURE = auto()
     BARRIER = auto()
     CHANNEL = auto()
+
+
+# Module-level aliases: enum members are singletons, so identity tests are
+# exact and avoid the class attribute lookup on hot paths.
+_GATE = InstructionType.GATE
+_MEASURE = InstructionType.MEASURE
+_BARRIER = InstructionType.BARRIER
+_CHANNEL = InstructionType.CHANNEL
 
 
 @dataclass(frozen=True)
@@ -87,42 +96,55 @@ class CircuitInstruction:
 
     def __post_init__(self) -> None:
         """Validate instruction consistency."""
-        _validate_bit_indices(self.qubits, "qubit")
-        _validate_bit_indices(self.clbits, "clbit")
+        qubits = self.qubits
+        # Fast path for the common case (plain non-negative ints); anything
+        # else goes through the full check, which raises the precise error.
+        for index in qubits:
+            if type(index) is not int or index < 0:
+                _validate_bit_indices(qubits, "qubit")
+                break
+        for index in self.clbits:
+            if type(index) is not int or index < 0:
+                _validate_bit_indices(self.clbits, "clbit")
+                break
 
-        if self.type == InstructionType.GATE:
-            if self.gate is None:
+        kind = self.type
+        if kind is _GATE:
+            gate = self.gate
+            if gate is None:
                 raise ValueError("GATE instruction must have a non-None gate.")
-            if len(self.qubits) != self.gate.num_qubits:
+            if len(qubits) != gate.num_qubits:
                 raise ValueError(
-                    f"Gate {self.gate.name} requires {self.gate.num_qubits} "
-                    f"qubits, but {len(self.qubits)} were given."
+                    f"Gate {gate.name} requires {gate.num_qubits} "
+                    f"qubits, but {len(qubits)} were given."
                 )
             if self.channel is not None:
                 raise ValueError("GATE instruction should not have a channel.")
-            _validate_distinct_qubits(self.qubits, f"Gate {self.gate.name}")
-        elif self.type == InstructionType.MEASURE:
+            n = len(qubits)
+            if n > 2 or (n == 2 and qubits[0] == qubits[1]):
+                _validate_distinct_qubits(qubits, f"Gate {gate.name}")
+        elif kind is _MEASURE:
             if self.gate is not None:
                 raise ValueError("MEASURE instruction should not have a gate.")
             if self.channel is not None:
                 raise ValueError("MEASURE instruction should not have a channel.")
-            if len(self.qubits) != len(self.clbits):
+            if len(qubits) != len(self.clbits):
                 raise ValueError(
                     f"MEASURE requires equal number of qubits and clbits, "
-                    f"got {len(self.qubits)} qubits and {len(self.clbits)} clbits."
+                    f"got {len(qubits)} qubits and {len(self.clbits)} clbits."
                 )
-        elif self.type == InstructionType.BARRIER:
+        elif kind is _BARRIER:
             if self.gate is not None:
                 raise ValueError("BARRIER instruction should not have a gate.")
             if self.channel is not None:
                 raise ValueError("BARRIER instruction should not have a channel.")
             # Barrier with empty qubits means "all active qubits" — valid.
-        elif self.type == InstructionType.CHANNEL:
+        elif kind is _CHANNEL:
             if self.channel is None:
                 raise ValueError("CHANNEL instruction must have a non-None channel.")
             if self.gate is not None:
                 raise ValueError("CHANNEL instruction should not have a gate.")
-            _validate_distinct_qubits(self.qubits, f"Channel {self.channel.name}")
+            _validate_distinct_qubits(qubits, f"Channel {self.channel.name}")
 
     def matrix(self) -> np.ndarray | None:
         """Return the unitary matrix of this instruction, if applicable.
@@ -157,22 +179,22 @@ class CircuitInstruction:
     @property
     def is_gate(self) -> bool:
         """Return True if this is a gate instruction."""
-        return self.type == InstructionType.GATE
+        return self.type is _GATE
 
     @property
     def is_measure(self) -> bool:
         """Return True if this is a measurement instruction."""
-        return self.type == InstructionType.MEASURE
+        return self.type is _MEASURE
 
     @property
     def is_barrier(self) -> bool:
         """Return True if this is a barrier instruction."""
-        return self.type == InstructionType.BARRIER
+        return self.type is _BARRIER
 
     @property
     def is_channel(self) -> bool:
         """Return True if this instruction is a noise channel."""
-        return self.type == InstructionType.CHANNEL
+        return self.type is _CHANNEL
 
 
 def _validate_bit_indices(indices: tuple[int, ...], kind: str) -> None:
@@ -209,3 +231,46 @@ def _validate_distinct_qubits(qubits: tuple[int, ...], what: str) -> None:
         return
     if len(set(qubits)) != n:
         raise ValueError(f"{what} requires distinct qubits, got duplicate {qubits}.")
+
+
+_GATE_BUILDER: Any = None
+
+
+def _gate_instructions(
+    items: Sequence[tuple[Gate, tuple[int, ...]]], label: str = ""
+) -> list[CircuitInstruction]:
+    """Gate instructions ``(gate, qubits)`` with an optional ``label``.
+
+    The same as ``[CircuitInstruction(type=GATE, gate=g, qubits=qs,
+    label=label) for g, qs in items]``.
+
+    With the C++ extension the plain cases (a :class:`Gate` on one or two
+    distinct non-negative ``int`` qubits) are built field by field, exactly
+    as the dataclass ``__init__`` would set them (its validation cannot fail
+    for them); every other item goes through the constructor.
+    """
+    global _GATE_BUILDER
+    if _GATE_BUILDER is None:
+        from quspect._native_loader import load_core
+
+        try:
+            core = load_core()
+        except ImportError:  # pragma: no cover - broken build
+            core = None
+        builder = None if core is None else getattr(core, "_gate_instructions", None)
+        if builder is None:
+            _GATE_BUILDER = False
+        else:
+
+            def native_builder(
+                items: Sequence[tuple[Gate, tuple[int, ...]]], label: str
+            ) -> list[CircuitInstruction]:
+                return builder(CircuitInstruction, _GATE, Gate, items, label)  # type: ignore[no-any-return]
+
+            _GATE_BUILDER = native_builder
+    if _GATE_BUILDER is False:
+        return [
+            CircuitInstruction(type=_GATE, gate=g, qubits=qs, clbits=(), label=label)
+            for g, qs in items
+        ]
+    return _GATE_BUILDER(items, label)  # type: ignore[no-any-return]

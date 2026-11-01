@@ -16,6 +16,7 @@ CZ-target result; single-qubit runs stay at most one Euler sequence long.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Collection
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -218,6 +219,9 @@ def translate_to_target(circuit: QuantumCircuit, plan: BasisPlan) -> QuantumCirc
 
     if not plan.needs_translation:
         return circuit
+    done = _translate_native(circuit, plan)
+    if done is not None:
+        return done
     native = plan.native
     one_q = plan.one_qubit
     ent: Entangler | None = (
@@ -387,6 +391,100 @@ def translate_to_target(circuit: QuantumCircuit, plan: BasisPlan) -> QuantumCirc
         out.append(ins)
     for q in sorted(runs):
         flush(q)
+    return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
+#: Environment variable selecting the implementation of
+#: :func:`translate_to_target`: ``"auto"`` (default: the C++ implementation
+#: when the native KAK backend provides numpy's BLAS to it) or ``"python"``.
+#: Both give identical circuits.
+TRANSLATE_DRIVER_ENV = "QUSPECT_TRANSLATE_DRIVER"
+
+
+def _translate_native(
+    circuit: QuantumCircuit, plan: BasisPlan
+) -> QuantumCircuit | None:
+    """:func:`translate_to_target` in C++, or ``None`` (use the Python body).
+
+    The C++ implementation repeats the Python body step by step (same runs,
+    orientation choice, lookahead and emission order; the 2×2 products are
+    numpy's BLAS calls through the native KAK backend) and calls
+    :func:`~quspect.gates.synthesis.synthesize_one_qubit` for the runs it
+    resynthesizes.  Inputs it does not reproduce, and every case in which
+    the Python body raises, are left to the Python body.
+    """
+    driver = os.environ.get(TRANSLATE_DRIVER_ENV, "auto") or "auto"
+    if driver not in ("auto", "python"):
+        raise ValueError(
+            f"{TRANSLATE_DRIVER_ENV} must be auto or python; got {driver!r}"
+        )
+    if driver == "python":
+        return None
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    if core is None or not hasattr(core, "_translate_to_target"):
+        return None
+    from quspect.synthesis.two_qubit import _native_kak
+
+    kak = _native_kak()
+    if kak is None:
+        return None
+    from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.gates._matrix_utils import gate_matrix
+    from quspect.gates.gate import Gate
+    from quspect.gates.synthesis import synthesize_one_qubit
+
+    one_q = plan.one_qubit
+    mat_cache: dict[Gate, np.ndarray | None] = {}
+
+    def matrix_of(gate: Gate) -> np.ndarray | None:
+        try:
+            return mat_cache[gate]
+        except KeyError:
+            pass
+        except TypeError:
+            return None
+        try:
+            m: np.ndarray | None = np.asarray(gate_matrix(gate), dtype=complex)
+        except (KeyError, ValueError, TypeError):
+            m = None
+        mat_cache[gate] = m
+        return m
+
+    ent_info = None
+    if plan.entangler is not None:
+        ent = entangler(plan.entangler)
+        dressings = []
+        for rev in (False, True):
+            _, dress = ent.oriented(rev)
+            dressings.append(
+                (
+                    *dress.before,
+                    *dress.after,
+                    tuple(_is_identity(m) for m in (*dress.before, *dress.after)),
+                )
+            )
+        far_ends = [d for d in ent.before if not _is_identity(d)]
+        ent_info = (ent.symmetric, _gate_named(ent.name), dressings, far_ends)
+    done, out = core._translate_to_target(
+        circuit.instructions,
+        kak._synth,
+        plan.native,
+        matrix_of,
+        lambda m: synthesize_one_qubit(m, one_q),
+        CircuitInstruction,
+        InstructionType.GATE,
+        InstructionType.BARRIER,
+        Gate,
+        ent_info,
+    )
+    if not done:
+        return None
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
 
 

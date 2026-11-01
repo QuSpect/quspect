@@ -378,6 +378,81 @@ def _route_dag_native(
     )
 
 
+def route_chains(
+    router: SABRE,
+    dag: _RoutingDag,
+    chains: list[tuple[list[int], int, int]],
+) -> list[tuple[list[int], list[int], _RouteResult] | None] | None:
+    """Independent routing chains computed concurrently on the native core.
+
+    Chain ``(layout, iters, seed)`` is what a caller would do one by one with
+    ``rng = random.Random(seed)``: ``iters`` times a forward and a backward
+    :func:`route_dag` pass (not recorded) to refine the layout, then a
+    recorded forward pass from the refined layout, all drawing from ``rng``.
+    The results are bit-identical to those calls.
+
+    Args:
+        router: Configured router.
+        dag: Routing DAG.
+        chains: ``(layout, iters, seed)`` per chain (full permutations).
+
+    Returns:
+        Per chain ``(refined layout, SWAP count of every pass, recorded
+        result)``, or ``None`` for a chain that failed (the one-by-one calls
+        raise the error); ``None`` overall when :func:`route_dag` would not use
+        the native core.
+    """
+    backend = os.environ.get(ROUTING_BACKEND_ENV, "auto") or "auto"
+    if backend not in _BACKENDS or backend == "python":
+        return None
+    core = _native_core()
+    if core is None or not hasattr(core, "_route_dag_chains"):
+        return None
+    n = router._num_physical
+    if any(len(layout) != n for layout, _, _ in chains):
+        return None
+    graph, native_dag = native_handles(core, router, dag)
+    jobs = [
+        (layout, iters, random.Random(seed).getstate()[1])
+        for layout, iters, seed in chains
+    ]
+    outs = core._route_dag_chains(
+        graph,
+        native_dag,
+        jobs,
+        router.lookahead_weight,
+        min(router.extended_set_size, 2**31 - 1),
+        router.decay_delta,
+        min(router.decay_reset_interval, 2**31 - 1),
+        min(router.release_valve_threshold or 0, 2**31 - 1),
+        router.swap_fusion_bonus,
+        router.mirror_gates,
+        router.mirror_threshold,
+        router.mirror_cz_penalty,
+    )
+    results: list[tuple[list[int], list[int], _RouteResult] | None] = []
+    for out in outs:
+        if out is None:
+            results.append(None)
+            continue
+        layout, swaps, num_swaps, final_pi, events, depth, swap_cost, mirrors = out
+        results.append(
+            (
+                layout,
+                swaps,
+                _RouteResult(
+                    num_swaps=num_swaps,
+                    final_pi=final_pi,
+                    events=events,
+                    depth=depth,
+                    swap_cost=swap_cost,
+                    num_mirrors=mirrors,
+                ),
+            )
+        )
+    return results
+
+
 def native_handles(core: Any, router: SABRE, dag: _RoutingDag) -> tuple[Any, Any]:
     """Native copies ``(graph, dag)`` of the coupling graph and the routing DAG.
 

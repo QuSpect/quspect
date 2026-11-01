@@ -77,6 +77,10 @@ struct RefineOptions {
     // 主扫描之后再做的"代价相同、深度更小也替换"的扫描轮数及其 A* 展开总预算（与 depth_ties 无关）。
     int depth_passes = 0;
     std::int64_t depth_expansions = 0;
+    // 窗口求解的并行线程数（含调用线程）。> 1 时按扫描顺序投机地并行求解后面的若干窗口，再按顺序
+    // 取用（前面的窗口有改进时丢弃其后的投机结果，单个窗口的展开上限与串行时不同则重算），结果与
+    // 线程数无关。
+    int threads = 1;
 };
 
 struct RefineResult {

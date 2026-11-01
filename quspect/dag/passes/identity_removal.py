@@ -14,6 +14,7 @@ import math
 import numpy as np
 
 from quspect.dag.dag_circuit import DAGCircuit
+from quspect.dag.passes._native import use_native
 from quspect.dag.passes.base import BasePass
 from quspect.gates.gate import Gate
 
@@ -96,6 +97,12 @@ class RemoveIdentityGates(BasePass):
         Returns:
             The optimized DAG (modified in place).
         """
+        if (
+            type(self) is RemoveIdentityGates
+            and use_native(dag, logger)
+            and dag._native_identity_removal(is_identity_gate)  # type: ignore[attr-defined]
+        ):
+            return dag
         doomed: list[int] = []
         for wire_idx in range(dag.num_qubits):
             for nid in dag.nodes_on_wire(f"q{wire_idx}"):

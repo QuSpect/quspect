@@ -8,8 +8,10 @@
 // 未启用 OpenMP 时 SetNumThreads 为空操作，测试依然成立。
 
 #include <cmath>
+#include <cstdlib>
 
 #include <algorithm>
+#include <functional>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -662,6 +664,92 @@ TEST(ParallelExecutorTest, IsingAnnealingIsIndependentOfThreadCount) {
         EXPECT_EQ(serial.samples[i].spins, parallel.samples[i].spins);
         EXPECT_EQ(serial.samples[i].energy, parallel.samples[i].energy);
     }
+}
+
+// ---- 编译阶段的任务并行（std::thread，与 OpenMP 无关） ----
+
+TEST(CompileTasks, AllTasksRunOnceWhateverTheThreadCount) {
+    for (int threads : {1, 2, 3, 8, 64}) {
+        std::vector<int> hits(37, 0);
+        std::vector<std::function<void()>> tasks;
+        for (std::size_t k = 0; k < hits.size(); ++k) {
+            tasks.emplace_back([&hits, k] { hits[k] += 1; });
+        }
+        quspect::native::common::RunTasks(tasks, threads);
+        EXPECT_EQ(std::count(hits.begin(), hits.end(), 1), static_cast<long>(hits.size())) << threads;
+    }
+    quspect::native::common::RunTasks({}, 4);  // 没有任务
+}
+
+TEST(CompileTasks, FirstFailingTaskIsRethrownAfterAllFinish) {
+    std::vector<int> done(6, 0);
+    std::vector<std::function<void()>> tasks;
+    for (std::size_t k = 0; k < done.size(); ++k) {
+        tasks.emplace_back([&done, k] {
+            done[k] = 1;
+            if (k == 2 || k == 4) {
+                throw std::runtime_error("task " + std::to_string(k));
+            }
+        });
+    }
+    try {
+        quspect::native::common::RunTasks(tasks, 3);
+        FAIL() << "expected an exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "task 2");
+    }
+    EXPECT_EQ(std::count(done.begin(), done.end(), 1), 6);
+}
+
+TEST(CompileTasks, WorkerPoolRunsEveryTaskOncePerBatch) {
+    for (int lanes : {1, 2, 5}) {
+        quspect::native::common::WorkerPool pool(lanes);
+        EXPECT_GE(pool.lanes(), 1);
+        EXPECT_LE(pool.lanes(), lanes < 1 ? 1 : lanes);
+        for (std::size_t count : {std::size_t{0}, std::size_t{1}, std::size_t{7}, std::size_t{200}}) {
+            std::vector<int> hits(count, 0);
+            std::vector<int> lane_of(count, -1);
+            pool.Run(count, [&](std::size_t k, int lane) {
+                hits[k] += 1;
+                lane_of[k] = lane;
+            });
+            EXPECT_EQ(std::count(hits.begin(), hits.end(), 1), static_cast<long>(count)) << lanes;
+            for (int lane : lane_of) {
+                EXPECT_GE(lane, 0);
+                EXPECT_LT(lane, pool.lanes());
+            }
+        }
+    }
+}
+
+TEST(CompileTasks, ThreadCountFollowsEnvironment) {
+    const char* old = std::getenv("QUSPECT_COMPILE_THREADS");
+    const std::string saved = old ? old : "";
+    auto set = [](const char* v) {
+#ifdef _WIN32
+        _putenv_s("QUSPECT_COMPILE_THREADS", v);
+#else
+        setenv("QUSPECT_COMPILE_THREADS", v, 1);
+#endif
+    };
+    set("3");
+    EXPECT_EQ(quspect::native::common::CompileThreads(), 3);
+    set("1000");
+    EXPECT_EQ(quspect::native::common::CompileThreads(), 64);
+    set("zero");
+    EXPECT_EQ(quspect::native::common::CompileThreads(), 1);
+    set("0");
+    EXPECT_EQ(quspect::native::common::CompileThreads(), 1);
+    if (old) {
+        set(saved.c_str());
+    } else {
+#ifdef _WIN32
+        _putenv_s("QUSPECT_COMPILE_THREADS", "");
+#else
+        unsetenv("QUSPECT_COMPILE_THREADS");
+#endif
+    }
+    EXPECT_GE(quspect::native::common::CompileThreads(), 1);
 }
 
 }  // namespace

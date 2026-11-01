@@ -64,7 +64,12 @@ import numpy as np
 
 from quspect.synthesis.two_qubit import SynthOp, ops_to_instructions
 from quspect.transpiler._embedding import dilation_layouts
-from quspect.transpiler._routing import _RouteResult, incident_edges, route_dag
+from quspect.transpiler._routing import (
+    _RouteResult,
+    incident_edges,
+    route_chains,
+    route_dag,
+)
 from quspect.transpiler._target import CompilationTarget
 from quspect.transpiler._toffoli import ROUTABLE_THREE_QUBIT_GATES, expand_toffolis
 from quspect.transpiler._vf2 import DEFAULT_VF2_MAX_STATES, find_subgraph_monomorphism
@@ -76,6 +81,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _INF = 10**9
+#: Routing chains of SABRE candidates computed per native batch (speculatively:
+#: chains past the work budget are discarded; the choice does not depend on it).
+_CHAIN_BATCH = 8
 _TIE_EPS = 1e-10
 
 DEFAULT_LAYOUT_TRIALS = 6
@@ -147,6 +155,8 @@ class _RoutingDag:
     # 原生路由核心的 DAG 副本 (core 模块, 对象)，首次原生路由时创建；
     # DAG 建好后不再修改。
     native: Any = field(default=None, repr=False, compare=False)
+    # 原生事件回放的源门表 (core 模块, 表)，首次回放时创建（False：不能用原生回放）
+    replay: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -832,7 +842,9 @@ class SABRE:
                     master_rng,
                 )
 
-        physical_gates, initial, final = self._finish(prep, best.events, layout)
+        physical_gates, initial, final, est = self._finish_scored(
+            prep, best.events, layout
+        )
         return _CandidatePlan(
             source=circuit,
             num_logical=num_logical,
@@ -841,9 +853,7 @@ class SABRE:
             final_mapping=final,
             num_swaps=best.num_swaps,
             depth=best.depth,
-            estimated_two_qubit_gates=estimate_two_qubit_cost(
-                physical_gates, self._num_physical
-            ),
+            estimated_two_qubit_gates=est,
             label="default",
             is_default=True,
             prep=prep,
@@ -1036,7 +1046,6 @@ class SABRE:
 
         prep = self._prepare(circuit, elide_permutations)
         dag = prep.dag
-        n_phys = self._num_physical
 
         if exact_layout and initial_mapping is None:
             exact = self._exact_layout(
@@ -1044,7 +1053,9 @@ class SABRE:
             )
             if exact is not None:
                 layout, result = exact
-                gates, initial, final = self._finish(prep, result.events, layout)
+                gates, initial, final, est = self._finish_scored(
+                    prep, result.events, layout
+                )
                 return [
                     _CandidatePlan(
                         source=circuit,
@@ -1054,9 +1065,7 @@ class SABRE:
                         final_mapping=final,
                         num_swaps=0,
                         depth=result.depth,
-                        estimated_two_qubit_gates=estimate_two_qubit_cost(
-                            gates, n_phys
-                        ),
+                        estimated_two_qubit_gates=est,
                         label="exact",
                         is_default=True,
                         prep=prep,
@@ -1116,8 +1125,9 @@ class SABRE:
             embedded.append(starts[trial][2] >= _DILATION_SEED_INDEX)
             # 回放 + 估计（含 Toffoli 按落点综合）比一次原生路由贵得多，也计入预算
             work += score_work + result.num_swaps
-            gates, initial, final = self._finish(prep, result.events, layout)
-            est = estimate_two_qubit_cost(gates, n_phys)
+            gates, initial, final, est = self._finish_scored(
+                prep, result.events, layout
+            )
             pos = len(found)
             found.append(((est, result.swap_cost, result.depth, pos), label, result))
             finished.append((gates, initial, final))
@@ -1145,18 +1155,64 @@ class SABRE:
         n_reference = len(starts) - (layout_trials - reference_trials)
         if initial_mapping is not None:
             n_reference = 1
+        # 各次试验 / 各次重路由的路由彼此独立（各有自己的种子）：在原生核心上
+        # 按顺序成批地并行算出（投机：预算在批内用完时多算的几条不用），下面
+        # 按原来的顺序与预算规则取用，结果与逐次路由相同
+        speculate = deadline is None
+        pending: dict[tuple[int, int], tuple[list[int], list[int], _RouteResult]] = {}
+
+        def batched(
+            key: tuple[int, int],
+            chains: list[tuple[tuple[int, int], list[int], int, int]],
+        ) -> tuple[list[int], _RouteResult] | None:
+            """Precomputed (refined layout, result) of chain ``key``.
+
+            ``None``: route it serially.
+            """
+            nonlocal work, speculate
+            if not speculate:
+                return None
+            if key not in pending:
+                got = route_chains(self, dag, [c[1:] for c in chains])
+                if got is None:
+                    speculate = False
+                    return None
+                for (k, _, _, _), item in zip(chains, got, strict=True):
+                    if item is not None:
+                        pending[k] = item
+            item = pending.pop(key, None)
+            if item is None:
+                return None
+            layout, swaps, result = item
+            work += sum(nodes + s for s in swaps)
+            return layout, result
+
         routed_layouts: list[tuple[int, int, list[int], int]] = []
         for trial, (layout, refine, _) in enumerate(starts):
             if trial >= n_reference and out_of_budget(phase1_limit):
                 logger.debug("SABRE candidates: budget spent after %d trials", trial)
                 break
             base_seed = base_seeds[trial]
-            rng = random.Random(base_seed)
-            if refine:
-                for _ in range(iter_num):
-                    forward = route(layout, True, rng, record=False)
-                    layout = route(forward.final_pi, False, rng, record=False).final_pi
-            result = route(layout, True, rng)
+            got = batched(
+                (0, trial),
+                [
+                    ((0, t), lay, iter_num if ref else 0, base_seeds[t])
+                    for t, (lay, ref, _) in enumerate(
+                        starts[trial : trial + _CHAIN_BATCH], start=trial
+                    )
+                ],
+            )
+            if got is not None:
+                layout, result = got
+            else:
+                rng = random.Random(base_seed)
+                if refine:
+                    for _ in range(iter_num):
+                        forward = route(layout, True, rng, record=False)
+                        layout = route(
+                            forward.final_pi, False, rng, record=False
+                        ).final_pi
+                result = route(layout, True, rng)
             pos = add(result, layout, trial, 0)
             key = (result.swap_cost, result.depth, trial)
             if (
@@ -1181,12 +1237,33 @@ class SABRE:
         kept: list[list[tuple[tuple[int, int, int], _RouteResult]]] = [
             [] for _ in routed_layouts
         ]
+        grid = [
+            (s_idx, j)
+            for s_idx in range(1, swap_trials)
+            for j in range(len(routed_layouts))
+        ]
         for s_idx in range(1, swap_trials):
             for j, (_, trial, layout, base_seed) in enumerate(routed_layouts):
                 if out_of_budget(work_limit):
                     break
-                swap_rng = random.Random(base_seed * 1_000_003 + s_idx)
-                result = route(layout, True, swap_rng)
+                at = (s_idx - 1) * len(routed_layouts) + j
+                got = batched(
+                    (s_idx, j),
+                    [
+                        (
+                            (si, jj),
+                            routed_layouts[jj][2],
+                            0,
+                            routed_layouts[jj][3] * 1_000_003 + si,
+                        )
+                        for si, jj in grid[at : at + _CHAIN_BATCH]
+                    ],
+                )
+                if got is not None:
+                    result = got[1]
+                else:
+                    swap_rng = random.Random(base_seed * 1_000_003 + s_idx)
+                    result = route(layout, True, swap_rng)
                 if swap_keep is None:
                     add(result, layout, trial, s_idx)
                     continue
@@ -1278,10 +1355,31 @@ class SABRE:
         self, prep: _Prepared, events: list[int], layout: list[int]
     ) -> tuple[list[_MappingGate], list[int], list[int]]:
         """Replay routing events (Toffolis synthesized) into gates and wire mappings."""
+        return self._finish_scored(prep, events, layout, score=False)[:3]
+
+    def _finish_scored(
+        self,
+        prep: _Prepared,
+        events: list[int],
+        layout: list[int],
+        *,
+        score: bool = True,
+    ) -> tuple[list[_MappingGate], list[int], list[int], int]:
+        """:meth:`_finish` and :func:`estimate_two_qubit_cost` of its gates.
+
+        Uses the native replay when available (same gates, mappings and
+        estimate); ``score=False`` skips the estimate (``-1``).
+        """
         num_logical = prep.num_logical
-        physical_gates, initial, final = _replay(
-            events, layout, prep.dag, num_logical, self._num_physical
-        )
+        fast = _native_replay(prep, events, layout, self._num_physical)
+        if fast is not None and fast[4]:
+            return fast[0], fast[1], fast[2], fast[3] if score else -1
+        if fast is not None:
+            physical_gates, initial, final = fast[0], fast[1], fast[2]
+        else:
+            physical_gates, initial, final = _replay(
+                events, layout, prep.dag, num_logical, self._num_physical
+            )
         physical_gates = expand_toffolis(physical_gates, self._adj_sets, prep.circuit)
         if prep.elide:
             physical_gates, initial, final = _elide_trailing_swaps(
@@ -1292,7 +1390,10 @@ class SABRE:
                 final[sigma[w]] if w < num_logical else final[w]
                 for w in range(len(final))
             ]
-        return physical_gates, initial, final
+        est = (
+            estimate_two_qubit_cost(physical_gates, self._num_physical) if score else -1
+        )
+        return physical_gates, initial, final, est
 
     # ------------------------------------------------------------------
     # Internal: layout search
@@ -1721,6 +1822,88 @@ def estimate_two_qubit_cost(gates: Sequence[_MappingGate], num_physical: int) ->
 # =============================================================================
 
 
+def _native_replay(
+    prep: _Prepared, events: list[int], layout: list[int], num_physical: int
+) -> tuple[list[_MappingGate], list[int], list[int], int, bool] | None:
+    """Native :meth:`SABRE._finish` (+ estimate), ``None`` if not applicable.
+
+    Returns ``(gates, initial, final, estimate, finished)``; with
+    ``finished`` false (a DAG with three-qubit nodes) only :func:`_replay`
+    was done and the caller continues with the Toffoli expansion.
+    """
+    from quspect.transpiler._routing import _native_core
+
+    core = _native_core()
+    if core is None or not hasattr(core, "_replay_finish"):
+        return None
+    dag = prep.dag
+    table = dag.replay
+    if table is None or (table is not False and table[0] is not core):
+        try:
+            table = (core, _build_replay_table(core, dag))
+        except (TypeError, ValueError, OverflowError, RuntimeError):
+            table = False
+        dag.replay = table
+    if table is False:
+        return None
+    try:
+        out: tuple[Any, ...] | None = core._replay_finish(
+            table[1],
+            events,
+            layout,
+            prep.num_logical,
+            num_physical,
+            prep.elide,
+            prep.sigma,
+            _MappingGate,
+        )
+    except (TypeError, OverflowError):
+        return None
+    return out
+
+
+def _build_replay_table(core: Any, dag: _RoutingDag) -> Any:
+    """Native source-gate table of ``dag`` for :func:`_native_replay`."""
+    sources: list[tuple[Any, ...]] = []
+
+    def add(g: _MappingGate) -> int:
+        name = g.name
+        if (
+            type(g) is not _MappingGate
+            or type(g.index) is not int
+            or type(g.q1) is not int
+            or type(g.q2) is not int
+            or type(g.q3) is not int
+            or type(name) is not str
+        ):
+            raise TypeError("unsupported gate")
+        sources.append(
+            (
+                bool(g.is_two_qubit),
+                g.q1,
+                g.q2,
+                g.q3,
+                g.index,
+                name,
+                g.clbit,
+                g.gate,
+                3 if name == "swap" else _GATE_CZ_COST.get(name, 1),
+                name == "swap",
+                name == "measure",
+            )
+        )
+        return len(sources) - 1
+
+    node_src = [add(g) for g in dag.nodes]
+    prefix = [[add(g) for g in pre] for pre in dag.prefix]
+    extra = [
+        [([add(g) for g in pre], add(g2)) for pre, g2 in members]
+        for members in dag.extra
+    ]
+    trailing = [add(g) for g in dag.trailing]
+    return core._ReplayTable(sources, node_src, prefix, extra, trailing)
+
+
 def _replay(
     events: list[int],
     layout: list[int],
@@ -1987,7 +2170,29 @@ def _block_unitary(
     Returns ``None`` if a gate of the block has no numeric matrix.
     """
     from quspect.gates._matrix_utils import gate_matrix
+    from quspect.synthesis import two_qubit
 
+    native = two_qubit._native_kak()
+    if native is not None:
+        # 与下面的循环逐位相同（同样的 numpy 乘法与 kron）
+        mats: list[np.ndarray] = []
+        places: list[int] = []
+        for i in block:
+            g = gates[i]
+            gate = g.gate if g.gate is not None else circuit[g.index].gate
+            if gate is None:
+                return None
+            try:
+                mats.append(np.asarray(gate_matrix(gate), dtype=complex))
+            except (KeyError, TypeError, ValueError):
+                return None
+            if g.is_two_qubit:
+                places.append(0 if g.q1 == a else 4)
+            else:
+                places.append(1 if g.q1 == a else 2)
+        found = native.block_unitary(mats, places, _SWAP_4)
+        if found is not None:
+            return found
     u = np.eye(4, dtype=complex)
     for i in block:
         g = gates[i]
@@ -2412,18 +2617,25 @@ def _build_output_circuit(
         if physical >= 0:
             p2l[physical] = logical
 
+    from quspect.circuit.instruction import _gate_instructions
+    from quspect.gates.standard import SWAP
+
     out = QuantumCircuit(name=original.name)
+    # 连续的门（out.append / out.swap 的指令）成批构造
+    pending: list[tuple[Gate, tuple[int, ...]]] = []
 
     for pg in physical_gates:
         if pg.name == "swap":
-            out.swap(p2l[pg.q1], p2l[pg.q2])
+            pending.append((SWAP, (p2l[pg.q1], p2l[pg.q2])))
         elif pg.name == "measure":
             if pg.clbit is None:
                 raise ValueError("Routed measurement is missing its classical bit.")
+            out._instructions.extend(_gate_instructions(pending))
+            pending.clear()
             out.measure([p2l[pg.q1]], [pg.clbit])
         elif pg.gate is not None:
             operands = (pg.q1, pg.q2) if pg.is_two_qubit else (pg.q1,)
-            out.append(pg.gate, tuple(p2l[p] for p in operands))
+            pending.append((pg.gate, tuple(p2l[p] for p in operands)))
         else:
             if pg.index >= 0:
                 orig_instr = original[pg.index]
@@ -2433,6 +2645,7 @@ def _build_output_circuit(
                         p2l[physical]
                         for physical in physical_operands[: len(orig_instr.qubits)]
                     )
-                    out.append(orig_instr.gate, routed_operands)
+                    pending.append((orig_instr.gate, routed_operands))
+    out._instructions.extend(_gate_instructions(pending))
 
     return out

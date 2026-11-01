@@ -208,3 +208,64 @@ def test_block_partition_is_a_valid_order(seed: int) -> None:
         [instrs[i] for n in nodes for i in n]
     )
     np.testing.assert_allclose(_unitary(flat, 4), _unitary(qc, 4), atol=1e-10)
+
+
+def _mixed_circuit(seed: int) -> QuantumCircuit:
+    """Gates with and without table axes, measurements, barriers, symbols."""
+    from quspect import Parameter
+
+    rng = random.Random(seed)
+    qc = _random_circuit(seed, n=5, size=80)
+    theta = Parameter("theta")
+    for _ in range(40):
+        a, b = rng.sample(range(5), 2)
+        r = rng.randrange(8)
+        if r == 0:
+            qc.u3(rng.uniform(-3, 3), 0.2, -0.4, a)
+        elif r == 1:
+            qc.swap(a, b)
+        elif r == 2:
+            qc.rz(theta, a)
+        elif r == 3:
+            qc.barrier()
+        elif r == 4:
+            qc.barrier(a, b)
+        elif r == 5:
+            qc.measure([a], [b])
+        elif r == 6:
+            qc.ry(rng.uniform(-3, 3), a)
+        else:
+            qc.crx(rng.uniform(-3, 3), a, b)
+    return qc
+
+
+class _WithoutInputPrep:
+    """Native core without the C++ input preparation (reference path)."""
+
+    def __init__(self, core: Any) -> None:
+        self._core = core
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("_schedule_info", "_block_schedule_inputs"):
+            raise AttributeError(name)
+        return getattr(self._core, name)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_native_input_preparation_matches_python(
+    seed: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quspect.transpiler import _schedule
+
+    core = _schedule._native_core()
+    if core is None or not hasattr(core, "_schedule_info"):
+        pytest.skip("native scheduler not available")
+    instrs = _mixed_circuit(seed).instructions
+    native = _schedule._Info(instrs)
+    native_blocks = _schedule._block_order_native(core, instrs, native)
+    reference = _WithoutInputPrep(core)
+    monkeypatch.setattr(_schedule, "_native_core", lambda: reference)
+    python = _schedule._Info(instrs)
+    assert vars(native) == vars(python)
+    assert all(type(x) is bool for x in native.two + native.counted)
+    assert native_blocks == _schedule._block_order_native(reference, instrs, python)

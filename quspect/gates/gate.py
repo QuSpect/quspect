@@ -45,10 +45,17 @@ class Gate:
     def __post_init__(self) -> None:
         if self.num_qubits < 1:
             raise ValueError(f"Gate num_qubits must be >= 1, got {self.num_qubits}")
+        params = self.params
+        if type(params) is tuple:
+            for param in params:
+                if type(param) is not float:
+                    break
+            else:
+                return  # already a tuple of Python floats (the common case)
         # Normalize real numeric scalars (including numpy scalars) to Python
         # floats. Symbolic parameters are kept unchanged.
         normalized = tuple(
-            float(param) if isinstance(param, Real) else param for param in self.params
+            float(param) if isinstance(param, Real) else param for param in params
         )
         object.__setattr__(self, "params", normalized)
 

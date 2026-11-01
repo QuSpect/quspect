@@ -223,6 +223,7 @@ def test_native_fallback_on_unreproducible_input(
 
     monkeypatch.setattr(gauge._Native, "lengths", refuse)
     monkeypatch.setattr(native.core, "_GaugeBeamSearch", no_search)
+    monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's kernels
     qc = _random_circuit(5, "cx", False, 4)
     expected = _signature(legacy_minimize_single_qubit_gates(qc, CZ_ONE))
     assert _signature(minimize_single_qubit_gates(qc, CZ_ONE)) == expected
@@ -250,6 +251,7 @@ def test_speculative_sweep_fallbacks_match_round_12(
 
     monkeypatch.setattr(native.core, "_GaugeBeamSearch", Flaky)
     monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, "native")
+    monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's sweep
     for ibm in (False, True):
         basis = IBM_ONE if ibm else CZ_ONE
         qc = _random_circuit(100 + seed, "cx", ibm, 5)

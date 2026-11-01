@@ -28,6 +28,12 @@ class DAGNodeType(Enum):
     OPERATION = auto()
 
 
+# Enum members are singletons: identity tests are exact and cheaper.
+_INPUT = DAGNodeType.INPUT
+_OUTPUT = DAGNodeType.OUTPUT
+_OPERATION = DAGNodeType.OPERATION
+
+
 @dataclass
 class DAGNode:
     """A node in the DAG representation of a quantum circuit.
@@ -59,43 +65,46 @@ class DAGNode:
     @property
     def is_input(self) -> bool:
         """Return True if this is an input boundary node."""
-        return self.node_type == DAGNodeType.INPUT
+        return self.node_type is _INPUT
 
     @property
     def is_output(self) -> bool:
         """Return True if this is an output boundary node."""
-        return self.node_type == DAGNodeType.OUTPUT
+        return self.node_type is _OUTPUT
 
     @property
     def is_operation(self) -> bool:
         """Return True if this is an operation node."""
-        return self.node_type == DAGNodeType.OPERATION
+        return self.node_type is _OPERATION
 
     @property
     def is_gate(self) -> bool:
         """Return True if this is a gate operation node."""
+        instruction = self.instruction
         return (
-            self.node_type == DAGNodeType.OPERATION
-            and self.instruction is not None
-            and self.instruction.is_gate
+            self.node_type is _OPERATION
+            and instruction is not None
+            and instruction.is_gate
         )
 
     @property
     def is_measure(self) -> bool:
         """Return True if this is a measurement operation node."""
+        instruction = self.instruction
         return (
-            self.node_type == DAGNodeType.OPERATION
-            and self.instruction is not None
-            and self.instruction.is_measure
+            self.node_type is _OPERATION
+            and instruction is not None
+            and instruction.is_measure
         )
 
     @property
     def is_barrier(self) -> bool:
         """Return True if this is a barrier operation node."""
+        instruction = self.instruction
         return (
-            self.node_type == DAGNodeType.OPERATION
-            and self.instruction is not None
-            and self.instruction.is_barrier
+            self.node_type is _OPERATION
+            and instruction is not None
+            and instruction.is_barrier
         )
 
     def __repr__(self) -> str:

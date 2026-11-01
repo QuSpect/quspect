@@ -11,7 +11,14 @@ from __future__ import annotations
 import logging
 
 from quspect.circuit.circuit import QuantumCircuit
-from quspect.circuit.instruction import InstructionType
+from quspect.circuit.instruction import (
+    _BARRIER,
+    _CHANNEL,
+    _GATE,
+    _MEASURE,
+    CircuitInstruction,
+    InstructionType,
+)
 from quspect.dag.dag_circuit import DAGCircuit
 
 logger = logging.getLogger(__name__)
@@ -64,6 +71,19 @@ class DAGToCircuitCompiler:
         circuit_name = name if name else ""
         circuit = QuantumCircuit(name=circuit_name)
 
+        if type(dag) is DAGCircuit:
+            # Native core: when every instruction takes the reuse fast path
+            # below, the list comes straight from the node records (no node
+            # objects are created).
+            fast = dag._operation_instructions()
+            if fast is not None:
+                logger.debug(
+                    "DAGToCircuit: reconstructing circuit from %d operation nodes",
+                    len(fast),
+                )
+                circuit._instructions = fast
+                return circuit
+
         # Collect OPERATION nodes in topological order
         op_nodes = dag.operation_nodes()
         logger.debug(
@@ -71,6 +91,7 @@ class DAGToCircuitCompiler:
             len(op_nodes),
         )
 
+        instructions = circuit._instructions
         for node in op_nodes:
             if node.instruction is None:
                 logger.warning(
@@ -80,6 +101,29 @@ class DAGToCircuitCompiler:
                 continue
 
             instr = node.instruction
+
+            # Fast path: the instruction the circuit methods below would build
+            # is equal to ``instr`` itself (unlabelled, tuple operands, and not
+            # a qubit-less barrier), so the immutable value is reused as is.
+            if (
+                type(instr) is CircuitInstruction
+                and instr.label == ""
+                and type(instr.qubits) is tuple
+                and type(instr.clbits) is tuple
+            ):
+                kind = instr.type
+                if (
+                    (kind is _GATE and instr.gate is not None)
+                    or kind is _MEASURE
+                    or (kind is _BARRIER and instr.qubits and not instr.clbits)
+                    or (
+                        kind is _CHANNEL
+                        and instr.channel is not None
+                        and not instr.clbits
+                    )
+                ):
+                    instructions.append(instr)
+                    continue
 
             if instr.type == InstructionType.GATE:
                 if instr.gate is None:

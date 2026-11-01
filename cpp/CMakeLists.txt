@@ -254,6 +254,10 @@ set(RUNTIME_SRCS
 
 # IR bridge layer
 set(IR_SRCS
+  src/ir/circuit.cpp
+  src/ir/dag_store.cpp
+  src/ir/dag_passes.cpp
+  src/ir/qasm2_parser.cpp
   src/ir/qsal_decoder.cpp
   src/ir/program_builder.cpp
   src/ir/validation.cpp
@@ -284,16 +288,38 @@ set(TRANSPILER_SRCS
   src/transpiler/sabre_routing.cpp
   src/transpiler/su4_routing.cpp
 )
+
+# Two-qubit KAK synthesis (numpy-exact small-matrix linear algebra)
+set(SYNTHESIS_SRCS
+  src/synthesis/numpy_compat.cpp
+  src/synthesis/kak_synthesis.cpp
+  src/synthesis/one_qubit_synthesis.cpp
+)
 # 路由计分必须与 Python 参考实现逐位一致：禁止把 a + b * c 合并成 FMA（arm64 上 clang 默认会合并）。
+# QASM 参数表达式求值同理（结果必须与 Python 的 float 运算逐位一致）。
+# 两比特合成必须与 numpy / CPython 的运算顺序逐位一致（FMA 一律显式写出）。
+set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} src/ir/qasm2_parser.cpp src/ir/dag_passes.cpp
+    src/pybind/basis_bindings.cpp src/pybind/gauge_bindings.cpp src/pybind/phase_fold_bindings.cpp)
 if(NOT MSVC)
-  set_source_files_properties(${TRANSPILER_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
-  set_source_files_properties(${TRANSPILER_SRCS} PROPERTIES COMPILE_OPTIONS "/fp:precise")
+  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
 # pybind11 module
 set(PYBIND_SRCS
   src/pybind/module.cpp
+  src/pybind/dag_bindings.cpp
+  src/pybind/dag_pass_bindings.cpp
+  src/pybind/ir_bindings.cpp
+  src/pybind/basis_bindings.cpp
+  src/pybind/circuit_bindings.cpp
+  src/pybind/consolidate_bindings.cpp
+  src/pybind/gauge_bindings.cpp
+  src/pybind/phase_fold_bindings.cpp
+  src/pybind/replay_bindings.cpp
+  src/pybind/schedule_bindings.cpp
+  src/pybind/synthesis_bindings.cpp
 )
 
 # ============================================================
@@ -323,12 +349,17 @@ set(QSPECT_CORE_SRCS
   ${IR_SRCS}
   ${OPTIMIZATION_SRCS}
   ${TRANSPILER_SRCS}
+  ${SYNTHESIS_SRCS}
 )
+
+# 编译阶段的任务并行（common/parallel.cpp 的 RunTasks）使用 std::thread
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # ── 与 dispatch 无关的公共部分 ──
 add_library(qspect_core_obj OBJECT ${QSPECT_CORE_SRCS})
 target_include_directories(qspect_core_obj PUBLIC ${NATIVE_INCLUDE_DIR})
-target_link_libraries(qspect_core_obj PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(qspect_core_obj PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
 qspect_use_openmp(qspect_core_obj PUBLIC)
 
 # ── dispatch: scalar 变体 ──
@@ -341,6 +372,7 @@ add_library(qspect_native_scalar_static STATIC
   $<TARGET_OBJECTS:qspect_dispatch_scalar>
 )
 target_include_directories(qspect_native_scalar_static PUBLIC ${NATIVE_INCLUDE_DIR})
+target_link_libraries(qspect_native_scalar_static PUBLIC Threads::Threads)
 qspect_use_openmp(qspect_native_scalar_static PUBLIC)
 
 if(QSPECT_AVX2_ACTIVE)
@@ -363,6 +395,7 @@ if(QSPECT_AVX2_ACTIVE)
     $<TARGET_OBJECTS:qspect_kernels_avx2_obj>
   )
   target_include_directories(qspect_native_avx2_static PUBLIC ${NATIVE_INCLUDE_DIR})
+  target_link_libraries(qspect_native_avx2_static PUBLIC Threads::Threads)
   qspect_use_openmp(qspect_native_avx2_static PUBLIC)
 endif()
 
@@ -485,6 +518,12 @@ if(QSPECT_BUILD_TESTS)
     tests/test_dilation_layout.cpp
     tests/test_one_qubit_gauge.cpp
     tests/test_cx_orientation.cpp
+    tests/test_small_vector.cpp
+    tests/test_dag_store.cpp
+    tests/test_dag_passes.cpp
+    tests/test_ir_circuit.cpp
+    tests/test_qasm2_parser.cpp
+    tests/test_kak_synthesis.cpp
   )
 
   foreach(test_src ${TEST_SRCS})

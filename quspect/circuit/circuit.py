@@ -14,6 +14,8 @@ from collections.abc import Iterator, Sequence
 from numbers import Real
 from typing import TYPE_CHECKING, Any
 
+from quspect.circuit._native import bit_counts as _bit_counts
+from quspect.circuit._native import remap_qubits as _remap_qubits
 from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.circuit.parameter import Parameter, ParameterExpression, ParamValue
 from quspect.gates.gate import Gate
@@ -103,6 +105,9 @@ class QuantumCircuit:
         Computed as ``max(qubit_index) + 1`` across all instructions.
         Returns 0 for an empty circuit.
         """
+        counts = _bit_counts(self._instructions)
+        if counts is not None:
+            return counts[0]
         max_q = -1
         for instr in self._instructions:
             if instr.qubits:
@@ -118,6 +123,9 @@ class QuantumCircuit:
         Computed as ``max(clbit_index) + 1`` across all measurement
         instructions. Returns 0 if there are no measurements.
         """
+        counts = _bit_counts(self._instructions)
+        if counts is not None:
+            return counts[1]
         max_c = -1
         for instr in self._instructions:
             if instr.clbits:
@@ -933,6 +941,14 @@ class QuantumCircuit:
             clbits_list = list(clbits)
             clbit_map = dict(enumerate(clbits_list))
 
+        if clbit_map is None:
+            # Bulk form of the loop below (None whenever the loop would do
+            # anything but rebuild every instruction with renamed qubits).
+            remapped = _remap_qubits(other._instructions, qubits_list)
+            if remapped is not None:
+                target._instructions.extend(remapped)
+                return target
+
         for instr in other._instructions:
             # Remap qubit indices
             new_qubits = tuple(qubit_map[q] for q in instr.qubits)
@@ -988,10 +1004,35 @@ class QuantumCircuit:
         circuit. Public code should normally use the fluent circuit methods.
         """
         snapshot = tuple(instructions)
-        if not all(isinstance(item, CircuitInstruction) for item in snapshot):
+        if set(map(type, snapshot)) - {CircuitInstruction} and not all(
+            isinstance(item, CircuitInstruction) for item in snapshot
+        ):
             raise TypeError("Instruction snapshot contains a non-instruction value.")
         circuit = cls(name=name)
         circuit._instructions = list(snapshot)
+        return circuit
+
+    def _to_native(self) -> Any:
+        """Return this circuit as a native C++ circuit, or ``None``.
+
+        The native circuit (``_Circuit``) stores the instructions
+        contiguously with their per-wire predecessors (an implicit DAG) and
+        keeps the original instruction objects, so
+        :meth:`_from_native` returns an equal circuit.  ``None`` is returned
+        when the native extension is not built.
+        """
+        from quspect.circuit._native import native_ir
+
+        core = native_ir()
+        if core is None:
+            return None
+        return core._Circuit.from_instructions(self._instructions)
+
+    @classmethod
+    def _from_native(cls, native: Any, *, name: str = "") -> QuantumCircuit:
+        """Build a circuit from a native C++ circuit (see :meth:`_to_native`)."""
+        circuit = cls(name=name)
+        circuit._instructions = native.to_instructions()
         return circuit
 
     def dagger(self) -> QuantumCircuit:

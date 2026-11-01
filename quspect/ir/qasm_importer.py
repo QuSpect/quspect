@@ -31,6 +31,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from quspect.circuit._native import native_ir
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.gates.gate import Gate
 
@@ -954,6 +955,14 @@ class QASM2Importer:
             >>> circ[0].gate.params
             (1.5707963267948966,)
         """
+        native = native_ir()
+        if native is not None:
+            # C++ fast path: same semantics; inputs that the reference parser
+            # rejects (or that the fast path does not handle) come back as
+            # None and are parsed below, so errors are unchanged.
+            parsed = native._qasm2_parse(source, _QELIB1_DEFINITIONS)
+            if parsed is not None:
+                return QuantumCircuit._from_native(parsed)
         return _Parser(source, _library()).parse_program()
 
 

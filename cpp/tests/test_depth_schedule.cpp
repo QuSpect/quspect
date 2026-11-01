@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <complex>
 #include <cstdint>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -183,6 +184,59 @@ TEST(DepthScheduleTest, BlockOrderWithoutCommutingBlocksIsEmpty) {
     EXPECT_TRUE(BlockOrder(Build(ops), in).empty());
     in.kind[0] = 1;  // 与比特数不符
     EXPECT_THROW(BlockOrder(Build(ops), in), std::invalid_argument);
+}
+
+// 宽线路上的长对易组（大量对角门与 CZ 混排）：调度中会出现成段已占用的时隙。结果必须是排列、
+// 保持非对易对的先后、两比特门深度不增，且对同一输入确定。
+TEST(DepthScheduleTest, WideCommutingGroupsKeepPrecedence) {
+    std::mt19937 rng(7);
+    std::vector<Op> ops;
+    const int width = 24;
+    for (int k = 0; k < 3000; ++k) {
+        const int r = static_cast<int>(rng() % 10);
+        const int a = static_cast<int>(rng() % width);
+        int b = static_cast<int>(rng() % (width - 1));
+        b += b >= a ? 1 : 0;
+        if (r < 4) {
+            ops.push_back(Cz(a, b));
+        } else if (r < 6) {
+            ops.push_back(Cx(a, b));
+        } else if (r < 9) {
+            ops.push_back(Rz(a));
+        } else {
+            ops.push_back(H(a));
+        }
+    }
+    const ScheduleProblem p = Build(ops);
+    const std::vector<int> order = BestDepthOrder(p);
+    ASSERT_EQ(order.size(), ops.size());
+    std::vector<int> pos(ops.size(), -1);
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        ASSERT_EQ(pos[order[k]], -1);
+        pos[order[k]] = static_cast<int>(k);
+    }
+    // 同一比特上：轴不同（或无轴）的两条指令保持原来的先后
+    for (int q = 0; q < width; ++q) {
+        std::vector<std::pair<int, int>> on;  // (指令, 轴)
+        for (int g = 0; g < static_cast<int>(ops.size()); ++g) {
+            for (std::size_t s = 0; s < ops[g].qubits.size(); ++s) {
+                if (ops[g].qubits[s] == q) {
+                    on.emplace_back(g, ops[g].axes[s]);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < on.size(); ++i) {
+            for (std::size_t j = i + 1; j < on.size(); ++j) {
+                if (on[i].second == kNone || on[i].second != on[j].second) {
+                    EXPECT_LT(pos[on[i].first], pos[on[j].first]);
+                    break;  // 之后的指令由传递性保证
+                }
+            }
+        }
+    }
+    EXPECT_LE(Depth(ops, order, true), Depth(ops, Identity(static_cast<int>(ops.size())), true));
+    EXPECT_LE(Depth(ops, order, false), Depth(ops, Identity(static_cast<int>(ops.size())), false));
+    EXPECT_EQ(order, BestDepthOrder(p));
 }
 
 }  // namespace

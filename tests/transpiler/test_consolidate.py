@@ -318,3 +318,54 @@ def test_approximate_gates_replaces_only_weak_gates() -> None:
 def test_negative_max_infidelity_rejected() -> None:
     with pytest.raises(ValueError, match="max_infidelity"):
         ConsolidateBlocksPass(max_infidelity=-1e-3)
+
+
+def _sweep_circuit(seed: int) -> QuantumCircuit:
+    """Random circuit with blocks, opaque gates, barriers and measurements."""
+    import random
+
+    from quspect import Parameter
+
+    rng = random.Random(seed)
+    qc = QuantumCircuit()
+    theta = Parameter("t")
+    for _ in range(200):
+        a, b = rng.sample(range(5), 2)
+        r = rng.randrange(12)
+        if r < 3:
+            qc.cz(a, b)
+        elif r < 5:
+            qc.cx(a, b)
+        elif r == 5:
+            qc.rz(rng.uniform(-3, 3), a)
+        elif r == 6:
+            qc.h(a)
+        elif r == 7:
+            qc.swap(a, b)
+        elif r == 8:
+            qc.cp(rng.uniform(-3, 3), a, b)
+        elif r == 9:
+            qc.rz(theta, a)
+        elif r == 10 and rng.random() < 0.5:
+            qc.barrier()
+        elif r == 10:
+            qc.barrier(a)
+        else:
+            qc.measure([a], [b])
+    return qc
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_native_sweeps_match_python(seed: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    from quspect.transpiler import _consolidate
+
+    if _consolidate._sweep_core() is None:
+        pytest.skip("native consolidation sweeps not available")
+    qc = _sweep_circuit(seed)
+    native_pass = ConsolidateBlocksPass()
+    native = native_pass.run(qc)
+    monkeypatch.setenv(_consolidate.CONSOLIDATE_SWEEP_ENV, "python")
+    python_pass = ConsolidateBlocksPass()
+    python = python_pass.run(qc)
+    assert list(native) == list(python)
+    assert vars(native_pass.stats) == vars(python_pass.stats)

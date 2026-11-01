@@ -192,6 +192,54 @@ def test_unmerged_rotations_kept_verbatim() -> None:
     assert [(i.gate, i.qubits) for i in out] == [(i.gate, i.qubits) for i in qc]
 
 
+def _python_fold(qc: QuantumCircuit) -> tuple[QuantumCircuit, tuple[int, int]]:
+    from quspect.transpiler import _phase_fold
+
+    saved = _phase_fold._native_fold
+    _phase_fold._native_fold = lambda circuit: None  # type: ignore[assignment]
+    try:
+        p = PhaseFoldingPass()
+        out = p.run(qc)
+    finally:
+        _phase_fold._native_fold = saved  # type: ignore[assignment]
+    return out, (p.stats.rotations_in, p.stats.rotations_out)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_native_sweep_matches_python(seed: int) -> None:
+    from quspect.transpiler import _phase_fold
+
+    rng = random.Random(1000 + seed)
+    qc = _random_circuit(6, 150, seed)
+    # Hard boundaries, integer / bool parameters, an identity, a long chain.
+    qc.t(0).cx(0, 1).t(1).measure([2], [0]).rz(1, 3).rz(True, 3).barrier(1, 4)
+    for _ in range(40):
+        a, b = rng.sample(range(6), 2)
+        qc.cx(a, b).t(b)
+    qc.id(5).rz(4 * math.pi, 5)
+    if _phase_fold._native_fold(qc) is None:
+        pytest.skip("native extension not built")
+    p = PhaseFoldingPass()
+    out = p.run(qc)
+    ref, stats = _python_fold(qc)
+    assert [vars(i) for i in out] == [vars(i) for i in ref]
+    assert (p.stats.rotations_in, p.stats.rotations_out) == stats
+
+
+def test_native_sweep_declines_unusual_input() -> None:
+    from quspect.circuit.parameter import Parameter
+    from quspect.transpiler import _phase_fold
+
+    theta = Parameter("theta")
+    qc = QuantumCircuit().rz(theta, 0).t(0).rz(theta, 0).t(0).cp(theta, 0, 1)
+    ref, _ = _python_fold(qc)
+    assert [vars(i) for i in PhaseFoldingPass().run(qc)] == [vars(i) for i in ref]
+    big = QuantumCircuit().rz(float("inf"), 0).rz(1.0, 0)
+    assert _phase_fold._native_fold(big) is None
+    with pytest.raises(ValueError):
+        PhaseFoldingPass().run(big)
+
+
 def _clbit_distribution(circuit: QuantumCircuit, n: int) -> np.ndarray:
     """Distribution of the classical register when ``circuit`` runs on |0…0⟩.
 

@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #include <cstring>
 #include <stdexcept>
@@ -30,9 +31,39 @@ bool Finite(const Complex& z) {
 
 // ---- 两边共用的运算 -----------------------------------------------------------
 
-// CPython ``_Py_c_prod`` 与 numpy 复数乘法：clang 把 a·b − c·d 收缩为 fma(a, b, −(c·d))。
-Complex Mul(const Complex& a, const Complex& b) {
+// 各类运算的语义（见 GaugeArithmetic）；只在使用内核之前设置，之后只读。
+std::atomic<int> g_py_mul{1};
+std::atomic<int> g_np_scalar_mul{1};
+std::atomic<int> g_scalar_arr_mul{1};
+std::atomic<bool> g_py_div_fma{true};
+std::atomic<bool> g_np_div_fma{true};
+
+// 复数乘法的三种运算顺序（与 synthesis::MulMode 相同）。
+Complex MulIn(int mode, const Complex& a, const Complex& b) {
+    if (mode == 0) {
+        const double rr = a.re * b.re;
+        const double ii = a.im * b.im;
+        const double ri = a.re * b.im;
+        const double ir = a.im * b.re;
+        return {rr - ii, ri + ir};
+    }
+    if (mode == 2) {
+        return {std::fma(-a.im, b.im, a.re * b.re), std::fma(a.im, b.re, a.re * b.im)};
+    }
     return {std::fma(a.re, b.re, -(a.im * b.im)), std::fma(a.re, b.im, a.im * b.re)};
+}
+
+// CPython ``_Py_c_prod``（arm64 上 clang 把 a·b − c·d 收缩为 fma(a, b, −(c·d))）。
+Complex Mul(const Complex& a, const Complex& b) {
+    return MulIn(g_py_mul.load(std::memory_order_relaxed), a, b);
+}
+// numpy 复数标量乘法。
+Complex MulNp(const Complex& a, const Complex& b) {
+    return MulIn(g_np_scalar_mul.load(std::memory_order_relaxed), a, b);
+}
+// numpy：复数标量 * 数组。
+Complex MulScalarArr(const Complex& a, const Complex& b) {
+    return MulIn(g_scalar_arr_mul.load(std::memory_order_relaxed), a, b);
 }
 
 Complex Sub(const Complex& a, const Complex& b) {
@@ -89,18 +120,27 @@ double PyMod(double x, double w) {
 std::optional<Complex> PyDiv(const Complex& a, const Complex& b) {
     const double abs_br = b.re < 0 ? -b.re : b.re;
     const double abs_bi = b.im < 0 ? -b.im : b.im;
+    const bool fma = g_py_div_fma.load(std::memory_order_relaxed);
+    // x·y + z：收缩成 FMA 或分开舍入
+    auto madd = [fma](double x, double y, double z) {
+        if (fma) {
+            return std::fma(x, y, z);
+        }
+        const double p = x * y;
+        return p + z;
+    };
     if (abs_br >= abs_bi) {
         if (abs_br == 0.0) {
             return std::nullopt;
         }
         const double ratio = b.im / b.re;
-        const double denom = std::fma(b.im, ratio, b.re);
-        return Complex{std::fma(a.im, ratio, a.re) / denom, std::fma(-a.re, ratio, a.im) / denom};
+        const double denom = madd(b.im, ratio, b.re);
+        return Complex{madd(a.im, ratio, a.re) / denom, madd(-a.re, ratio, a.im) / denom};
     }
     if (abs_bi >= abs_br) {
         const double ratio = b.re / b.im;
-        const double denom = std::fma(b.re, ratio, b.im);
-        return Complex{std::fma(a.re, ratio, a.im) / denom, std::fma(a.im, ratio, -a.re) / denom};
+        const double denom = madd(b.re, ratio, b.im);
+        return Complex{madd(a.re, ratio, a.im) / denom, madd(a.im, ratio, -a.re) / denom};
     }
     return std::nullopt;  // NaN
 }
@@ -211,21 +251,32 @@ std::optional<bool> Named(const Matrix2& a, const LengthModel& model) {
 
 // ---- numpy 复数语义 -----------------------------------------------------------
 
-// numpy ``CDOUBLE_divide``（Smith 算法，乘以倒数，FMA 收缩）。
-std::optional<Complex> NpDiv(const Complex& a, const Complex& b) {
+// numpy ``CDOUBLE_divide``（Smith 算法，乘以倒数；fma：是否收缩成 FMA）。
+std::optional<Complex> NpDivIn(bool fma, const Complex& a, const Complex& b) {
     const double abs_br = std::fabs(b.re);
     const double abs_bi = std::fabs(b.im);
+    auto madd = [fma](double x, double y, double z) {
+        if (fma) {
+            return std::fma(x, y, z);
+        }
+        const double p = x * y;
+        return p + z;
+    };
     if (abs_br >= abs_bi) {
         if (abs_br == 0.0) {
             return std::nullopt;
         }
         const double rat = b.im / b.re;
-        const double scl = 1.0 / std::fma(b.im, rat, b.re);
-        return Complex{std::fma(a.im, rat, a.re) * scl, std::fma(-a.re, rat, a.im) * scl};
+        const double scl = 1.0 / madd(b.im, rat, b.re);
+        return Complex{madd(a.im, rat, a.re) * scl, madd(-a.re, rat, a.im) * scl};
     }
     const double rat = b.re / b.im;
-    const double scl = 1.0 / std::fma(b.re, rat, b.im);
-    return Complex{std::fma(a.re, rat, a.im) * scl, std::fma(a.im, rat, -a.re) * scl};
+    const double scl = 1.0 / madd(b.re, rat, b.im);
+    return Complex{madd(a.re, rat, a.im) * scl, madd(a.im, rat, -a.re) * scl};
+}
+
+std::optional<Complex> NpDiv(const Complex& a, const Complex& b) {
+    return NpDivIn(g_np_div_fma.load(std::memory_order_relaxed), a, b);
 }
 
 // ``np.exp`` 的复数版本即 C99 cexp。
@@ -385,10 +436,10 @@ std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z) {
         if (!corr) {
             return std::nullopt;
         }
-        u00 = Mul(u00, *corr);
-        u01 = Mul(u01, *corr);
-        u10 = Mul(u10, *corr);
-        u11 = Mul(u11, *corr);
+        u00 = MulNp(u00, *corr);
+        u01 = MulNp(u01, *corr);
+        u10 = MulNp(u10, *corr);
+        u11 = MulNp(u11, *corr);
     }
     double phi;
     if (theta < kEps) {
@@ -397,13 +448,13 @@ std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z) {
         phi = Phase(u10);
     } else if (c >= s) {
         const double total = Phase(u11);
-        const double diff = Phase(Mul(u10, Conj(Neg(u01))));
+        const double diff = Phase(MulNp(u10, Conj(Neg(u01))));
         phi = 0.5 * (total + diff);
         const auto e = NpExp(MinusIMul(phi));
         if (!e) {
             return std::nullopt;
         }
-        if (Mul(*e, u10).re < 0.0) {
+        if (MulNp(*e, u10).re < 0.0) {
             phi += kPi;
         }
     } else {
@@ -431,7 +482,7 @@ Matrix2 AxisRotation(int axis, double phi) {
     const Complex is = Mul(Complex{0.0, 1.0}, Complex{s, 0.0});
     Matrix2 out;
     for (int i = 0; i < 4; ++i) {
-        out[i] = Sub(Mul(cc, kIdentity[i]), Mul(is, p[i]));
+        out[i] = Sub(MulScalarArr(cc, kIdentity[i]), MulScalarArr(is, p[i]));
     }
     return out;
 }
@@ -443,13 +494,13 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
         }
     }
     // _zxz_angles: m / cmath.sqrt(complex(m00·m11 − m01·m10))（numpy 标量乘法、数组除以标量）
-    const Complex det = Sub(Mul(m[0], m[3]), Mul(m[1], m[2]));
+    const Complex det = Sub(MulIn(1, m[0], m[3]), MulIn(1, m[1], m[2]));
     const auto root = PySqrt(det);
     if (!root) {
         return std::nullopt;
     }
-    const auto m00 = NpDiv(m[0], *root);
-    const auto m10 = NpDiv(m[2], *root);
+    const auto m00 = NpDivIn(true, m[0], *root);
+    const auto m10 = NpDivIn(true, m[2], *root);
     if (!m00 || !m10 || !Finite(*m00) || !Finite(*m10)) {
         return std::nullopt;
     }
@@ -495,6 +546,29 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
         return std::nullopt;
     }
     return length;
+}
+
+void SetGaugeArithmetic(const GaugeArithmetic& arith) {
+    for (int m : {arith.py_mul, arith.np_scalar_mul, arith.scalar_arr_mul}) {
+        if (m < 0 || m > 2) {
+            throw std::invalid_argument("SetGaugeArithmetic: multiplication modes are 0, 1 or 2");
+        }
+    }
+    g_py_mul.store(arith.py_mul);
+    g_np_scalar_mul.store(arith.np_scalar_mul);
+    g_scalar_arr_mul.store(arith.scalar_arr_mul);
+    g_py_div_fma.store(arith.py_div_fma);
+    g_np_div_fma.store(arith.np_div_fma);
+}
+
+GaugeArithmetic GetGaugeArithmetic() {
+    GaugeArithmetic a;
+    a.py_mul = g_py_mul.load();
+    a.np_scalar_mul = g_np_scalar_mul.load();
+    a.scalar_arr_mul = g_scalar_arr_mul.load();
+    a.py_div_fma = g_py_div_fma.load();
+    a.np_div_fma = g_np_div_fma.load();
+    return a;
 }
 
 std::int64_t PyRound(double x) {
@@ -562,7 +636,8 @@ int GaugeBeamSearch::Prepare(const std::vector<int>& slots, const std::vector<in
     phi_fixed_ = phi_fixed;
     run_length_ = run_length;
     base_changed_ = base_changed;
-    entry_unique_.assign(n, {});
+    entry_unique_.clear();
+    entry_begin_.assign(1, 0);
     unique_.clear();
     compute_row_.clear();
     compute_unique_.clear();
@@ -607,8 +682,9 @@ int GaugeBeamSearch::Prepare(const std::vector<int>& slots, const std::vector<in
                 }
                 unique_.push_back(Unique{static_cast<int>(r), e.phi, key, hit, compute});
             }
-            entry_unique_[r].push_back(found);
+            entry_unique_.push_back(found);
         }
+        entry_begin_.push_back(static_cast<int>(entry_unique_.size()));
     }
     return static_cast<int>(compute_row_.size());
 }
@@ -732,7 +808,7 @@ void GaugeBeamSearch::Finish(const std::vector<Matrix2>& m, const std::vector<Ma
         nxt.clear();
         for (std::size_t pi = 0; pi < prev.size(); ++pi) {
             const std::int64_t total = prev[pi].total;
-            const Unique& u = unique_[static_cast<std::size_t>(entry_unique_[r][pi])];
+            const Unique& u = unique_[static_cast<std::size_t>(entry_unique_[static_cast<std::size_t>(entry_begin_[r]) + pi])];
             const MemoOptions& opts = u.hit != nullptr ? *u.hit : computed[static_cast<std::size_t>(u.compute)];
             for (std::size_t j = 0; j < opts.phis.size(); ++j) {
                 const double phi = opts.phis[j];
@@ -805,6 +881,18 @@ const GaugeBeamSearch::MemoOptions* GaugeBeamSearch::MemoGet(const MemoKey& key)
 
 void GaugeBeamSearch::MemoPut(const MemoKey& key, MemoOptions options) {
     memo_.emplace(key, std::move(options));  // 已有的键保持不变（首次写入为准）
+}
+
+void GaugeBeamSearch::AbsorbMemo(GaugeBeamSearch& other) {
+    if (memo_.empty()) {
+        memo_.swap(other.memo_);
+        return;
+    }
+    memo_.reserve(memo_.size() + other.memo_.size());
+    for (auto& kv : other.memo_) {
+        memo_.emplace(kv.first, std::move(kv.second));
+    }
+    other.memo_.clear();
 }
 
 std::int64_t GaugeBeamSearch::Backtrack(int slot, std::vector<double>* angles, std::vector<int>* costs) const {

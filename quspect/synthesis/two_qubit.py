@@ -64,7 +64,8 @@ from __future__ import annotations
 import cmath
 import functools
 import math
-from collections.abc import Collection, Iterator
+import sys
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction
     from quspect.gates.gate import Gate
+    from quspect.synthesis._native_kak import NativeKak
 
 __all__ = [
     "EULER_BASES",
@@ -107,11 +109,22 @@ __all__ = [
 SynthOp = tuple[str, tuple[int, ...], tuple[float, ...]]
 
 # 纯函数的精确输入缓存（键为矩阵的原始字节），结果与重新计算逐位相同。
-_NUM_CZ_CACHE: BoundedCache[tuple[object, ...], int] = BoundedCache()
-_SYNTH_2Q_CACHE: BoundedCache[tuple[object, ...], tuple[SynthOp, ...]] = BoundedCache()
+# 两比特合成的缓存容量取 2^16：大线路（QV-100）有 3 万多个不同的块，2^14 时
+# 满了就清空，后面的候选流水线又要把同样的块重算一遍。
+_SYNTH_CACHE_SIZE = 1 << 16
+_NUM_CZ_CACHE: BoundedCache[tuple[object, ...], int] = BoundedCache(_SYNTH_CACHE_SIZE)
+#: 精确合成；键的最后一项是 ``_SWAP_FACE_TEMPLATE``，不受它影响的结果记为 ``None``。
+_SYNTH_2Q_CACHE: BoundedCache[tuple[object, ...], tuple[SynthOp, ...]] = BoundedCache(
+    _SYNTH_CACHE_SIZE
+)
+#: :func:`_approximate_two_qubit_ops` 的结果（``False``：没有可用的近似）。
 _APPROX_2Q_CACHE: BoundedCache[
-    tuple[object, ...], tuple[tuple[SynthOp, ...], ApproximationError | None]
-] = BoundedCache()
+    tuple[object, ...], tuple[tuple[SynthOp, ...], ApproximationError] | bool
+] = BoundedCache(_SYNTH_CACHE_SIZE)
+#: :func:`synthesize_swap_face_block` 的结果（``False``：返回 ``None``）。
+_SWAP_FACE_CACHE: BoundedCache[tuple[object, ...], tuple[SynthOp, ...] | bool] = (
+    BoundedCache(_SYNTH_CACHE_SIZE)
+)
 
 _PI4 = math.pi / 4
 _PI2 = math.pi / 2
@@ -407,7 +420,7 @@ def _real_orthogonal_diagonalize(m2: np.ndarray) -> np.ndarray:
     m2 = m2.copy()
     m2.real[np.abs(m2.real) < 1e-14] = 0.0
     m2.imag[np.abs(m2.imag) < 1e-14] = 0.0
-    rng = np.random.default_rng(1234567)
+    rng: np.random.Generator | None = None  # 前两次尝试失败时才需要（同一个种子）
     best_p: np.ndarray | None = None
     best_err = math.inf
     for attempt in range(100):
@@ -416,6 +429,8 @@ def _real_orthogonal_diagonalize(m2: np.ndarray) -> np.ndarray:
         elif attempt == 1:
             w_re, w_im = 0.0, 1.0
         else:
+            if rng is None:
+                rng = np.random.default_rng(1234567)
             w_re, w_im = rng.normal(), rng.normal()
         _, p = np.linalg.eigh(w_re * m2.real + w_im * m2.imag)
         d = p.T @ m2 @ p
@@ -639,9 +654,12 @@ def num_cz_required(unitary: np.ndarray, *, atol: float = DEFAULT_ATOL) -> int:
     cached = _NUM_CZ_CACHE.get(key)
     if cached is not None:
         return cached
-    u = _check_unitary_4(unitary)
-    _, _, v, _ = _kak4(u)
-    count = _count_from_coords(v, atol)
+    native = _native_kak()
+    count = None if native is None else native.num_cz(unitary, atol)
+    if count is None:
+        u = _check_unitary_4(unitary)
+        _, _, v, _ = _kak4(u)
+        count = _count_from_coords(v, atol)
     _NUM_CZ_CACHE.put(key, count)
     return count
 
@@ -772,7 +790,24 @@ def synthesize_swap_face_block(
         >>> [name for name, _, _ in ops]
         ['cx', 'rz', 'cx', 'cx']
     """
-    u = _check_unitary_4(unitary)
+    key = (matrix_key(unitary), verify_atol, basis.entangler, basis.euler)
+    cached = _SWAP_FACE_CACHE.get(key)
+    if cached is not None:
+        return list(cached) if isinstance(cached, tuple) else None
+    native = _native_kak()
+    found = None if native is None else native.swap_face(unitary, basis, verify_atol)
+    if found is None:
+        ops = _synthesize_swap_face_block(_check_unitary_4(unitary), basis, verify_atol)
+    else:
+        ops = list(found) if isinstance(found, list) else None
+    _SWAP_FACE_CACHE.put(key, False if ops is None else tuple(ops))
+    return ops
+
+
+def _synthesize_swap_face_block(
+    u: np.ndarray, basis: TwoQubitBasis, verify_atol: float
+) -> list[SynthOp] | None:
+    """Uncached core of :func:`synthesize_swap_face_block`."""
     kak_u = _kak4(u)
     if not _is_swap_face(kak_u[2]) or _count_from_coords(kak_u[2], DEFAULT_ATOL) < 3:
         return None
@@ -1363,6 +1398,19 @@ def _try_synthesize(
     return best
 
 
+#: The Python implementation (the native backend is bypassed when a test
+#: replaces :func:`_try_synthesize`).
+_try_synthesize_reference = _try_synthesize
+
+
+@functools.cache
+def _native_kak() -> NativeKak | None:
+    """The native KAK backend if it reproduces this module bit for bit here."""
+    from quspect.synthesis._native_kak import load
+
+    return load(sys.modules[__name__])
+
+
 _EULER_CODE = {"zxz": 0, "zsx": 1}
 
 
@@ -1725,20 +1773,51 @@ def synthesize_two_qubit_ops(
             basis=basis,
         )[0]
     basis = _DEFAULT_BASIS if basis is None else basis
-    key = (
-        matrix_key(unitary),
-        atol,
-        verify_atol,
-        basis.entangler,
-        basis.euler,
-        _SWAP_FACE_TEMPLATE,
+    return list(
+        _cached_exact_ops(matrix_key(unitary), unitary, atol, verify_atol, basis)
     )
-    cached = _SYNTH_2Q_CACHE.get(key)
+
+
+def _cached_exact_ops(
+    mkey: object,
+    unitary: np.ndarray,
+    atol: float,
+    verify_atol: float,
+    basis: TwoQubitBasis,
+    kak_u: tuple[float, np.ndarray, np.ndarray, np.ndarray] | None = None,
+) -> tuple[SynthOp, ...]:
+    """:func:`_synthesize_two_qubit_ops` through :data:`_SYNTH_2Q_CACHE`.
+
+    Only blocks on the SWAP face with three entanglers depend on
+    :data:`_SWAP_FACE_TEMPLATE`; every other result is stored once under the
+    flag ``None`` and serves both settings.
+    """
+    base = (mkey, atol, verify_atol, basis.entangler, basis.euler)
+    cached = _SYNTH_2Q_CACHE.get((*base, _SWAP_FACE_TEMPLATE))
+    if cached is None:
+        cached = _SYNTH_2Q_CACHE.get((*base, None))
     if cached is not None:
-        return list(cached)
-    ops = _synthesize_two_qubit_ops(unitary, atol, verify_atol, basis)
-    _SYNTH_2Q_CACHE.put(key, tuple(ops))
+        return cached
+    native = _native_kak() if kak_u is None else None
+    found = (
+        None if native is None else native.synthesize(unitary, atol, verify_atol, basis)
+    )
+    if found is not None:
+        ops = tuple(found[0])
+        uses_flag = found[1]
+    else:
+        u = _check_unitary_4(unitary)
+        if kak_u is None:
+            kak_u = _kak4(u)
+        ops = tuple(_synthesize_two_qubit_ops(u, atol, verify_atol, basis, kak_u))
+        uses_flag = _uses_swap_face_template(kak_u[2], atol)
+    _SYNTH_2Q_CACHE.put((*base, _SWAP_FACE_TEMPLATE if uses_flag else None), ops)
     return ops
+
+
+def _uses_swap_face_template(v: np.ndarray, atol: float) -> bool:
+    """Whether :func:`_synthesize_two_qubit_ops` reads :data:`_SWAP_FACE_TEMPLATE`."""
+    return _count_from_coords(v, atol) == 3 and _is_swap_face(v)
 
 
 def synthesize_two_qubit_approx(
@@ -1801,44 +1880,50 @@ def synthesize_two_qubit_approx(
             f"max_infidelity must be non-negative, got {max_infidelity!r}."
         )
     basis = _DEFAULT_BASIS if basis is None else basis
-    key = (
-        matrix_key(unitary),
-        atol,
-        verify_atol,
-        basis.entangler,
-        basis.euler,
-        max_infidelity,
-        max_entanglers,
-        _SWAP_FACE_TEMPLATE,
-    )
+    mkey = matrix_key(unitary)
+    # 近似结果与 _SWAP_FACE_TEMPLATE 无关；没有可用近似时退回精确合成（自带缓存）
+    key = (mkey, atol, basis.entangler, basis.euler, max_infidelity, max_entanglers)
     hit = _APPROX_2Q_CACHE.get(key)
-    if hit is not None:
-        return list(hit[0]), hit[1]
-    u = _check_unitary_4(unitary)
-    kak_u = _kak4(u)
-    result = _approximate_two_qubit_ops(
-        u, max_infidelity, atol, basis, max_entanglers, kak_u
-    )
-    if result is None:
-        exact_key = (
-            matrix_key(unitary),
-            atol,
-            verify_atol,
-            basis.entangler,
-            basis.euler,
-            _SWAP_FACE_TEMPLATE,
-        )
-        cached = _SYNTH_2Q_CACHE.get(exact_key)
-        if cached is None:
-            # 与 synthesize_two_qubit_ops 相同的结果，复用已算好的 KAK
-            cached = tuple(
-                _synthesize_two_qubit_ops(u, atol, verify_atol, basis, kak_u)
+    kak_u = None
+    if hit is None:
+        native = _native_kak()
+        if native is not None:
+            # 没有可用的近似时，原生实现顺带给出精确合成（同一个 KAK）
+            base = (mkey, atol, verify_atol, basis.entangler, basis.euler)
+            want_exact = (
+                _SYNTH_2Q_CACHE.get((*base, _SWAP_FACE_TEMPLATE)) is None
+                and _SYNTH_2Q_CACHE.get((*base, None)) is None
             )
-            _SYNTH_2Q_CACHE.put(exact_key, cached)
-        _APPROX_2Q_CACHE.put(key, (cached, None))
-        return list(cached), None
-    _APPROX_2Q_CACHE.put(key, (tuple(result[0]), result[1]))
-    return result
+            found = native.approximate(
+                unitary,
+                max_infidelity,
+                atol,
+                verify_atol,
+                basis,
+                max_entanglers,
+                want_exact,
+            )
+            if found is not None:
+                _APPROX_2Q_CACHE.put(key, False)
+                if found[0] is not None:
+                    ops = tuple(found[0])
+                    flag = _SWAP_FACE_TEMPLATE if found[1] else None
+                    _SYNTH_2Q_CACHE.put((*base, flag), ops)
+                    return list(ops), None
+                return list(
+                    _cached_exact_ops(mkey, unitary, atol, verify_atol, basis)
+                ), None
+        u = _check_unitary_4(unitary)
+        kak_u = _kak4(u)
+        result = _approximate_two_qubit_ops(
+            u, max_infidelity, atol, basis, max_entanglers, kak_u
+        )
+        hit = False if result is None else (tuple(result[0]), result[1])
+        _APPROX_2Q_CACHE.put(key, hit)
+    if isinstance(hit, tuple):
+        return list(hit[0]), hit[1]
+    # 与 synthesize_two_qubit_ops 相同的结果（刚算过 KAK 时复用）
+    return list(_cached_exact_ops(mkey, unitary, atol, verify_atol, basis, kak_u)), None
 
 
 def _projected_infidelity(v: np.ndarray, k: int) -> float:
@@ -2002,6 +2087,36 @@ def _standard_gates() -> dict[str, Gate]:
     return {g.name: g for g in ALL_STANDARD}
 
 
+@functools.cache
+def _native_op_builder() -> Callable[..., list[CircuitInstruction] | None] | None:
+    """Native :func:`ops_to_instructions` (``None`` when not built).
+
+    It builds the same instructions in one call and returns ``None`` for
+    anything but plain ops (the Python code then runs, with its errors).
+    """
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    build = None if core is None else getattr(core, "_synth_op_instructions", None)
+    if build is None:
+        return None
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.gates.gate import Gate
+
+    def builder(
+        ops: list[SynthOp], qubits: tuple[int, int], rz: Gate, fixed: dict[str, Gate]
+    ) -> list[CircuitInstruction] | None:
+        result: list[CircuitInstruction] | None = build(
+            ops, qubits, rz, fixed, CircuitInstruction, InstructionType.GATE, Gate
+        )
+        return result
+
+    return builder
+
+
 def ops_to_instructions(
     ops: list[SynthOp], qubits: tuple[int, int]
 ) -> list[CircuitInstruction]:
@@ -2025,18 +2140,21 @@ def ops_to_instructions(
         >>> ins[0].qubits
         (3, 5)
     """
-    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+    from quspect.circuit.instruction import _gate_instructions
     from quspect.gates.parameterized import RZ
 
     fixed = _standard_gates()
-    out: list[CircuitInstruction] = []
-    for name, local, params in ops:
-        gate = RZ.with_params(*params) if name == "rz" else fixed[name]
-        out.append(
-            CircuitInstruction(
-                type=InstructionType.GATE,
-                gate=gate,
-                qubits=tuple(qubits[q] for q in local),
+    builder = _native_op_builder()
+    if builder is not None:
+        built: list[CircuitInstruction] | None = builder(ops, qubits, RZ, fixed)
+        if built is not None:
+            return built
+    return _gate_instructions(
+        [
+            (
+                RZ.with_params(*params) if name == "rz" else fixed[name],
+                tuple(qubits[q] for q in local),
             )
-        )
-    return out
+            for name, local, params in ops
+        ]
+    )

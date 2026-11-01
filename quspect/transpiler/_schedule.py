@@ -495,12 +495,43 @@ def _instruction_resources(
 class _Info:
     """Scheduling nodes of a circuit's instructions (CSR, in circuit order)."""
 
+    width: int
+    offsets: list[int]
+    res: list[int]
+    axes: list[int]
+    two: list[bool]
+    counted: list[bool]
+
     def __init__(self, instrs: Sequence[CircuitInstruction]) -> None:
-        self.width = max((q for ins in instrs for q in ins.qubits), default=-1) + 1
         cache: dict[Gate, tuple[int, ...]] = {}
+        core = _native_core()
+        if core is not None and hasattr(core, "_schedule_info"):
+            from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+            built = core._schedule_info(
+                instrs,
+                CircuitInstruction,
+                InstructionType.GATE,
+                InstructionType.BARRIER,
+                _AXES_1Q,
+                _AXES_MQ,
+                _axes,
+                cache,
+            )
+            if built is not None:
+                (
+                    self.width,
+                    self.offsets,
+                    self.res,
+                    self.axes,
+                    self.two,
+                    self.counted,
+                ) = built
+                return
+        self.width = max((q for ins in instrs for q in ins.qubits), default=-1) + 1
         self.offsets = [0]
-        self.res: list[int] = []
-        self.axes: list[int] = []
+        self.res = []
+        self.axes = []
         for ins in instrs:
             res, axes = _instruction_resources(ins, self.width, cache)
             self.res += res
@@ -750,6 +781,20 @@ def _block_order_native(
     """:func:`_block_order` on the native core (same result)."""
     from quspect.gates._matrix_utils import gate_matrix
 
+    prepared = None
+    if hasattr(core, "_block_schedule_inputs"):
+        from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+        prepared = core._block_schedule_inputs(
+            instrs,
+            CircuitInstruction,
+            InstructionType.GATE,
+            InstructionType.BARRIER,
+            {},
+            _block_matrix,
+        )
+    if prepared is not None:
+        return _run_block_schedule(core, info, *prepared)
     qubit_offsets = [0]
     qubits: list[int] = []
     kind: list[int] = []
@@ -783,6 +828,34 @@ def _block_order_native(
             except TypeError:  # unhashable gate
                 off = -1
         matrix_offset.append(off)
+    return _run_block_schedule(
+        core, info, qubit_offsets, qubits, kind, matrix_offset, mats
+    )
+
+
+def _block_matrix(gate: Gate, k: int) -> np.ndarray | None:
+    """Flattened ``2^k × 2^k`` matrix of a block gate (``None``: not available)."""
+    from quspect.gates._matrix_utils import gate_matrix
+
+    try:
+        m = np.asarray(gate_matrix(gate), dtype=complex)
+    except (KeyError, ValueError, TypeError):
+        return None
+    if m.shape != (2**k, 2**k):
+        return None
+    return m.ravel()
+
+
+def _run_block_schedule(
+    core: Any,
+    info: _Info,
+    qubit_offsets: list[int],
+    qubits: list[int],
+    kind: list[int],
+    matrix_offset: list[int],
+    mats: list[np.ndarray],
+) -> list[int] | None:
+    """Call the native block scheduler on prepared inputs."""
     matrices = np.concatenate(mats) if mats else np.zeros(0, dtype=complex)
     order: list[int] = core._block_schedule(
         info.offsets,

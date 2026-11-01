@@ -354,6 +354,59 @@ TEST(OneQubitGauge, PendingMemoEntriesCommitInOrder) {
     EXPECT_EQ(other.MemoGet(GaugeBeamSearch::MemoKey{1, false, false, 3000000000, true, 0}), nullptr);
 }
 
+// 分组求解后合并 memo：缺失的键写入，已有的键保持首次写入的选项，被并入的对象清空。
+TEST(OneQubitGauge, AbsorbMemoKeepsExistingEntries) {
+    GaugeBeamSearch main(0, 4, 2, 1, CzModel());
+    GaugeBeamSearch part(0, 4, 2, 1, CzModel());
+    const GaugeBeamSearch::MemoKey a{0, false, false, 0, false, 0};
+    const GaugeBeamSearch::MemoKey b{1, true, false, 5, true, 0};
+    main.MemoPut(a, GaugeBeamSearch::MemoOptions{0.5, {0.0}, {3}});
+    part.MemoPut(a, GaugeBeamSearch::MemoOptions{0.25, {0.0, 1.0}, {1, 2}});
+    part.MemoPut(b, GaugeBeamSearch::MemoOptions{0.0, {0.0, 1.0, 2.0, 3.0, 4.0}, {1, 2, 3, 4, 5}});
+    main.AbsorbMemo(part);
+    ASSERT_NE(main.MemoGet(a), nullptr);
+    EXPECT_EQ(main.MemoGet(a)->phi_in, 0.5);
+    EXPECT_EQ(main.MemoGet(a)->costs.size(), 1u);
+    ASSERT_NE(main.MemoGet(b), nullptr);
+    EXPECT_EQ(main.MemoGet(b)->phis.size(), 5u);
+    EXPECT_EQ(main.MemoGet(b)->costs[4], 5);
+    EXPECT_EQ(part.MemoGet(b), nullptr);
+    GaugeBeamSearch empty(0, 4, 2, 1, CzModel());
+    empty.AbsorbMemo(main);  // 空对象直接接管
+    EXPECT_NE(empty.MemoGet(b), nullptr);
+    EXPECT_EQ(main.MemoGet(b), nullptr);
+}
+
+// 运算语义的设置：读回、非法取值、恢复默认；单位阵与 Pauli 矩阵的长度与语义无关。
+TEST(OneQubitGauge, ArithmeticSettingsRoundTrip) {
+    using quspect::native::transpiler::GaugeArithmetic;
+    using quspect::native::transpiler::GetGaugeArithmetic;
+    using quspect::native::transpiler::SetGaugeArithmetic;
+    const GaugeArithmetic defaults;
+    GaugeArithmetic plain;
+    plain.py_mul = 0;
+    plain.np_scalar_mul = 0;
+    plain.scalar_arr_mul = 2;
+    plain.py_div_fma = false;
+    plain.np_div_fma = false;
+    SetGaugeArithmetic(plain);
+    const GaugeArithmetic got = GetGaugeArithmetic();
+    EXPECT_EQ(got.py_mul, 0);
+    EXPECT_EQ(got.np_scalar_mul, 0);
+    EXPECT_EQ(got.scalar_arr_mul, 2);
+    EXPECT_FALSE(got.py_div_fma);
+    EXPECT_FALSE(got.np_div_fma);
+    const Matrix2 identity = {Complex{1, 0}, Complex{0, 0}, Complex{0, 0}, Complex{1, 0}};
+    ASSERT_TRUE(FastLength(identity, CzModel()).has_value());
+    EXPECT_EQ(*FastLength(identity, CzModel()), 0);
+    GaugeArithmetic bad;
+    bad.py_mul = 3;
+    EXPECT_THROW(SetGaugeArithmetic(bad), std::invalid_argument);
+    SetGaugeArithmetic(defaults);
+    EXPECT_EQ(GetGaugeArithmetic().py_mul, 1);
+    EXPECT_TRUE(GetGaugeArithmetic().np_div_fma);
+}
+
 TEST(OneQubitGauge, BeamSearchRejectsBadInput) {
     GaugeBeamSearch search(1, 4, 2, 1, CzModel());
     EXPECT_THROW(search.Prepare({1}, {0}, {0}, {0}, {-1}, {-1}, {1}, {0.0}, {0}, {0}), std::invalid_argument);
