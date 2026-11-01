@@ -600,7 +600,7 @@ py::array_t<std::complex<double>> Scalar(int fn, const ComplexArray& a) {
 }  // namespace
 
 void BindSynthesis(py::module_& m) {
-    py::class_<PyKakSynthesizer>(m, "_KakSynthesizer",
+    py::class_<PyKakSynthesizer>(m, "_KakSynthesizer", py::module_local(),
                                  "Two-qubit KAK synthesis reproducing quspect.synthesis.two_qubit bit for bit.")
         .def(py::init<const py::dict&, bool, const py::dict&, const py::dict&>(), py::arg("functions"),
              py::arg("ilp64"), py::arg("modes"), py::arg("constants"))

@@ -379,16 +379,30 @@ void NumpyLinalg::MatMul(int n, const CView& a, const RView& b, Cx* out) const {
     MatMul(n, a, CView{tmp, n, 1}, out);
 }
 
+namespace {
+
+// dgemv 的两种整数宽度各自放在独立的不内联函数里。若写成同一函数中的两个分支，两次调用只差在
+// 整数常量实参的类型上，GCC 的尾合并（-ftree-tail-merge）会把它们合并成一次调用（aarch64 GCC 13
+// 实测保留了 32 位版本）：在栈上传递的 64 位实参只写了低 32 位，ILP64 库读到的是高位垃圾。
+#if defined(__GNUC__) && !defined(__clang__)
+#define QSPECT_DISTINCT_CALL __attribute__((noinline, no_icf))
+#else
+#define QSPECT_DISTINCT_CALL QSPECT_NOINLINE
+#endif
+
+template <typename I>
+QSPECT_DISTINCT_CALL void CallDgemvT4(std::uintptr_t fn, const double* m, const double* v, double* out) {
+    Fn<DgemvFn<I>>(fn)(kRowMajor, kTrans, I{4}, I{4}, 1.0, m, I{4}, v, I{1}, 0.0, out, I{1});
+}
+
+}  // namespace
+
 void NumpyLinalg::MatVecT4(const double* m, const double* v, double* out) const {
     // DOUBLE_matmul 的 matrix_vector 分支：m.T 不是 C 可用布局，按 RowMajor + Trans 调 dgemv。
-    auto call = [&](auto tag) {
-        using I = decltype(tag);
-        Fn<DgemvFn<I>>(fns_.dgemv)(kRowMajor, kTrans, I{4}, I{4}, 1.0, m, I{4}, v, I{1}, 0.0, out, I{1});
-    };
     if (fns_.ilp64) {
-        call(std::int64_t{});
+        CallDgemvT4<std::int64_t>(fns_.dgemv, m, v, out);
     } else {
-        call(std::int32_t{});
+        CallDgemvT4<std::int32_t>(fns_.dgemv, m, v, out);
     }
 }
 
