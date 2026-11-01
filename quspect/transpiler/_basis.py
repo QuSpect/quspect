@@ -396,8 +396,9 @@ def translate_to_target(circuit: QuantumCircuit, plan: BasisPlan) -> QuantumCirc
 
 #: Environment variable selecting the implementation of
 #: :func:`translate_to_target`: ``"auto"`` (default: the C++ implementation
-#: when the native KAK backend provides numpy's BLAS to it) or ``"python"``.
-#: Both give identical circuits.
+#: when the extension module is built) or ``"python"``.  Both follow the same
+#: steps; the C++ products are the platform-independent reference, the
+#: Python ones (numpy) are numerically equivalent.
 TRANSLATE_DRIVER_ENV = "QUSPECT_TRANSLATE_DRIVER"
 
 
@@ -408,7 +409,7 @@ def _translate_native(
 
     The C++ implementation repeats the Python body step by step (same runs,
     orientation choice, lookahead and emission order; the 2×2 products are
-    numpy's BLAS calls through the native KAK backend) and calls
+    the deterministic products of the native module) and calls
     :func:`~quspect.gates.synthesis.synthesize_one_qubit` for the runs it
     resynthesizes.  Inputs it does not reproduce, and every case in which
     the Python body raises, are left to the Python body.
@@ -427,11 +428,6 @@ def _translate_native(
     except ImportError:  # pragma: no cover - broken build
         return None
     if core is None or not hasattr(core, "_translate_to_target"):
-        return None
-    from quspect.synthesis.two_qubit import _native_kak
-
-    kak = _native_kak()
-    if kak is None or not kak.numpy_compat:
         return None
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction, InstructionType
@@ -473,7 +469,6 @@ def _translate_native(
         ent_info = (ent.symmetric, _gate_named(ent.name), dressings, far_ends)
     done, out = core._translate_to_target(
         circuit.instructions,
-        kak._synth,
         plan.native,
         matrix_of,
         lambda m: synthesize_one_qubit(m, one_q),

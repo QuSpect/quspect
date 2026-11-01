@@ -5,7 +5,12 @@ to the Python reference parser when the native one returns ``None``.  The
 contract checked here: whenever the reference parser raises, the native
 parser declines (so the user sees the reference exception, line and column
 included); whenever both accept, the circuits are identical — same gate
-objects, operands and bit-identical parameters.
+objects and operands — and the parameters agree to rounding.  They are not
+compared bit for bit: the native parser evaluates ``sin`` / ``cos`` / ``tan``
+/ ``exp`` / ``ln`` / ``^`` with correctly rounded functions (identical on
+every platform), the reference parser with the platform's libm, which may
+differ in the last bits.  Expressions without those functions are
+bit-identical (same IEEE operations in the same order).
 """
 
 from __future__ import annotations
@@ -35,10 +40,28 @@ def _key(circuit: object) -> list[tuple[object, ...]]:
     out = []
     for ins in circuit:  # type: ignore[attr-defined]
         gate = ins.gate
-        params = None if gate is None else [p.hex() for p in gate.params]
+        name = None if gate is None else (gate.name, gate.num_qubits, len(gate.params))
         label = None if gate is None else gate.label
-        out.append((ins.type, ins.qubits, ins.clbits, gate, label, params, ins.label))
+        out.append((ins.type, ins.qubits, ins.clbits, name, label, ins.label))
     return out
+
+
+def _params(circuit: object) -> list[float]:
+    return [
+        float(p)
+        for ins in circuit  # type: ignore[attr-defined]
+        if ins.gate is not None
+        for p in ins.gate.params
+    ]
+
+
+def _same_circuit(got: object, ref: object, source: str) -> None:
+    """Same gates and operands; parameters equal up to a few ulp."""
+    assert _key(got) == _key(ref), source
+    pa, pb = _params(got), _params(ref)
+    assert len(pa) == len(pb), source
+    for a, b in zip(pa, pb, strict=True):
+        assert a == pytest.approx(b, rel=1e-14, abs=1e-300), source
 
 
 def _check(source: str) -> str:
@@ -60,11 +83,11 @@ def _check(source: str) -> str:
         return "rejected"
     if native is not None:
         got = native.to_instructions()
-        assert _key(got) == _key(ref), source
+        _same_circuit(got, ref, source)
         for a, b in zip(got, ref, strict=True):
             if a.gate is not None and not a.gate.params:
                 assert a.gate is b.gate  # fixed gates are the shared singletons
-    assert qasm2_loads(source).instructions == ref.instructions  # type: ignore[attr-defined]
+    _same_circuit(qasm2_loads(source).instructions, ref.instructions, source)  # type: ignore[attr-defined]
     return "fallback" if native is None else "native"
 
 

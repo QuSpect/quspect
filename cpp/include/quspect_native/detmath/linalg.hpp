@@ -80,6 +80,11 @@ bool EighSym(int n, const double* a, double* w, double* v);
 // （两个矩阵非对角元平方和的局部极小）。不收敛时返回 false。
 bool JointDiagSym(int n, const double* a, const double* b, double* v);
 
+// 复厄米矩阵 a（n ≤ kMaxDim / 2，只读取上三角）的特征分解：v 的第 j 列是特征值 w[j] 的单位特征
+// 向量（列的顺序不排序；每列模最大的分量为正实数）。经由实嵌入 [[Re, −Im], [Im, Re]] 的
+// Jacobi 分解求得。不收敛时返回 false。
+bool EighHerm(int n, const Cx* a, double* w, Cx* v);
+
 // 复矩阵的奇异值分解 a = u · diag(s) · vh：s 降序，u、vh 为酉矩阵。不收敛时返回 false。
 bool Svd(int n, const Cx* a, Cx* u, double* s, Cx* vh);
 

@@ -7,23 +7,21 @@
 #include <utility>
 #include <vector>
 
+#include "quspect_native/detmath/cx.hpp"
 #include "quspect_native/ir/small_vector.hpp"
 
 namespace quspect::native::transpiler {
 
 // 单比特门最小化（quspect.transpiler._gauge）的标量内核。
 //
-// 这些函数与 Python 参考实现逐位一致：Python 端用 CPython 复数（``complex``、``cmath``）或
-// numpy 复数标量计算，这里按各自的浮点运算顺序复刻——CPython / numpy 的复数乘除在 arm64 上由
-// clang 收缩成 FMA，这里用显式 ``std::fma`` 写出同样的收缩，并以 ``-ffp-contract=off``
-// 编译，禁止编译器再做其他合并。超出复刻范围的输入（非有限值、除以零）返回 ``std::nullopt``，
-// 由调用方退回 Python。
+// 算法与 Python 参考实现相同；数值运算全部走确定性数值层（detmath：固定顺序的复数运算、
+// CORE-MATH 的正确舍入函数），同一输入在所有平台上逐位相同。Python 参考实现只在原生模块缺失时
+// 使用（数值上等价，不要求逐位一致）。非有限值输入与除以零返回 ``std::nullopt``，由调用方退回
+// Python。
 //
-// 复数以 (re, im) 对表示。
-struct Complex {
-    double re;
-    double im;
-};
+// 复数以 (re, im) 对表示：与确定性数值层的 detmath::Cx 是同一类型（指针可以在两者之间直接
+// 传递，不涉及类型双关）。
+using Complex = detmath::Cx;
 
 // 2×2 矩阵（行主序：m00, m01, m10, m11）。
 using Matrix2 = std::array<Complex, 4>;
@@ -37,24 +35,10 @@ struct LengthModel {
     std::vector<Matrix2> named;
 };
 
-// 内核中各类复数运算的语义。mul 取值同 synthesis::MulMode（0 普通，1 fma(ar, br, −ai·bi) 形式，
-// 2 fma(−ai, bi, ar·br) 形式），div 为 Smith 算法是否收缩成 FMA。默认值是 arm64 上 clang 编译的
-// CPython / numpy 的形式；其他平台由 Python 端按 numpy / CPython 的实际行为（原生 KAK 后端的
-// 探测结果）设置，随后的自检确认内核与 Python 参考一致。进程级设置，只应在使用内核之前调用。
-struct GaugeArithmetic {
-    int py_mul = 1;          // CPython complex * complex（_LengthModel、_zyz）
-    int np_scalar_mul = 1;   // numpy 复数标量乘法（_leading_angles、euler_ops）
-    int scalar_arr_mul = 1;  // numpy：标量 * 数组（_rot）
-    bool py_div_fma = true;  // CPython 复数除法
-    bool np_div_fma = true;  // numpy 复数除法
-};
-void SetGaugeArithmetic(const GaugeArithmetic& arith);
-GaugeArithmetic GetGaugeArithmetic();
-
-// ``_LengthModel._fast(m)``：rz 系门集下 ``synthesize_one_qubit`` 的门数（CPython 复数语义）。
+// ``_LengthModel._fast(m)``：rz 系门集下 ``synthesize_one_qubit`` 的门数。
 std::optional<int> FastLength(const Matrix2& m, const LengthModel& model);
 
-// ``_leading_angles(m, axis)`` 在已经换到 Z 坐标系的 ``z = V†·m·V`` 上的部分（numpy 标量语义）：
+// ``_leading_angles(m, axis)`` 在已经换到 Z 坐标系的 ``z = V†·m·V`` 上的部分：
 // 对角时返回 1 个角度，否则返回 4 个；不能复刻时返回 std::nullopt。
 struct LeadingAngles {
     int count = 0;
@@ -62,10 +46,11 @@ struct LeadingAngles {
 };
 std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z);
 
-// ``_rot(axis, phi)`` = cos(phi/2)·I − (1j·sin(phi/2))·P（numpy 数组运算语义）。axis：0 = z, 1 = x, 2 = y。
+// ``_rot(axis, phi)`` = cos(phi/2)·I − (1j·sin(phi/2))·P。axis：0 = z, 1 = x, 2 = y。
 Matrix2 AxisRotation(int axis, double phi);
 
-// ``len(quspect.synthesis.two_qubit.euler_ops(m, q, basis=..., atol=atol))``（numpy / CPython 语义）：
+// ``len(quspect.synthesis.two_qubit.euler_ops(m, q, basis=..., atol=atol))``（与原生 KAK 合成的
+// 欧拉合成 KakSynthesizer::EulerOps 的长度相同）：
 // basis 0 = "zxz"（rz·h·rz·h·rz），1 = "zsx"（rz·sx·rz·sx·rz）。不能复刻时返回 std::nullopt。
 std::optional<int> EulerLength(const Matrix2& m, int basis, double atol);
 

@@ -6,8 +6,8 @@
 //   1. 划分：每条线上的单比特门运行与两比特门锚点（与 Python 相同的运行 / 锚点编号与顺序）；
 //      门矩阵与对易轴由 Python 端的 matrix_of / axes_of 给出（每个门对象只调用一次）；
 //   2. 束搜索（solve_all_native）、CX 朝向局部搜索（sweep_native / evaluate / solve）与输出，
-//      全部按 Python 端的运算顺序执行：2×2 乘法走 numpy 自己的 BLAS（NumpyLinalg，与 numpy
-//      matmul 的 BLAS 调用相同，逐位一致），束搜索的内核与 memo 是同一个 GaugeBeamSearch；
+//      与 Python 端的步骤相同；2×2 乘法与内核走确定性数值层（全平台逐位一致，与 Python 端
+//      numpy 的结果数值上等价），束搜索的内核与 memo 是同一个 GaugeBeamSearch；
 //   3. 输出运行的合成回调 Python 的 synthesize_one_qubit（同一矩阵只调用一次，结果相同），
 //      指令按数据类 __init__ 的字段顺序直接构造（常见情形）。
 //
@@ -38,9 +38,7 @@
 #include "py_interned.hpp"
 #include "run_helpers.hpp"
 #include "quspect_native/common/parallel.hpp"
-#include "quspect_native/synthesis/numpy_compat.hpp"
 #include "quspect_native/transpiler/one_qubit_gauge.hpp"
-#include "synthesis_bindings.hpp"
 
 namespace py = pybind11;
 
@@ -130,9 +128,8 @@ struct Options {
 
 class Minimizer {
  public:
-    Minimizer(const synthesis::NumpyLinalg& la, const transpiler::LengthModel& model, const Options& opt)
-        : mat_(la),
-          model_(model),
+    Minimizer(const transpiler::LengthModel& model, const Options& opt)
+        : model_(model),
           opt_(opt),
           synth_(opt.synthesize),
           factory_(opt.instr_cls, opt.type_gate, opt.gate_cls) {}
@@ -943,42 +940,13 @@ Matrix2 ArgMatrix(const py::handle& obj) {
 
 void BindGauge(py::module_& m) {
     m.def(
-        "_gauge_arithmetic",
-        [](const py::object& synth) {
-            transpiler::GaugeArithmetic a;  // 默认（arm64 上 clang 的形式）
-            if (!synth.is_none()) {
-                const synthesis::NumpyLinalg* la = KakLinalg(synth);
-                if (la == nullptr) {
-                    throw std::invalid_argument("synth must be a _KakSynthesizer or None");
-                }
-                const synthesis::ArithModes& modes = la->modes();
-                a.py_mul = static_cast<int>(modes.py);
-                a.np_scalar_mul = static_cast<int>(modes.np_scalar);
-                a.scalar_arr_mul = static_cast<int>(modes.scalar_arr);
-                // CPython 的复数除法与乘法由同一个编译器、同样的选项编译：收缩与否相同
-                a.py_div_fma = modes.py != synthesis::MulMode::kPlain;
-                a.np_div_fma = modes.np_div == synthesis::DivMode::kFma;
-            }
-            transpiler::SetGaugeArithmetic(a);
-            return py::make_tuple(a.py_mul, a.np_scalar_mul, a.scalar_arr_mul, a.py_div_fma, a.np_div_fma);
-        },
-        py::arg("synth"),
-        "Set the complex-arithmetic semantics of the single-qubit minimization kernels: the defaults (None) "
-        "or the orders probed by a _KakSynthesizer. Returns (py_mul, np_scalar_mul, scalar_arr_mul, "
-        "py_div_fma, np_div_fma).");
-
-    m.def(
         "_gauge_minimize",
-        [](const py::sequence& instrs, const transpiler::LengthModel& model, const py::object& synth,
-           const py::object& one_qubit, const py::object& matrix_of, const py::object& axes_of,
+        [](const py::sequence& instrs, const transpiler::LengthModel& model, const py::object& one_qubit,
+           const py::object& matrix_of, const py::object& axes_of,
            const py::object& synthesize, const py::object& instr_cls, const py::object& type_gate,
            const py::object& type_barrier, const py::object& gate_cls, const py::object& h, const py::sequence& to_z,
            const py::sequence& to_z_conj, int beam, int gate_weight, int run_weight, int sweeps,
            double atol) -> py::object {
-            const synthesis::NumpyLinalg* la = KakLinalg(synth);
-            if (la == nullptr) {
-                return py::make_tuple(false, py::none());
-            }
             Options opt;
             opt.instr_cls = instr_cls;
             opt.type_gate = type_gate;
@@ -1002,7 +970,7 @@ void BindGauge(py::module_& m) {
                     opt.to_z[a] = ArgMatrix(to_z[a]);
                     opt.to_z_conj[a] = ArgMatrix(to_z_conj[a]);
                 }
-                Minimizer minimizer(*la, model, opt);
+                Minimizer minimizer(model, opt);
                 return py::make_tuple(true, minimizer.Run(instrs));
             } catch (const Decline&) {
                 return py::make_tuple(false, py::none());
@@ -1010,7 +978,7 @@ void BindGauge(py::module_& m) {
                 return py::make_tuple(false, py::none());
             }
         },
-        py::arg("instrs"), py::arg("model"), py::arg("synth"), py::arg("one_qubit"), py::arg("matrix_of"),
+        py::arg("instrs"), py::arg("model"), py::arg("one_qubit"), py::arg("matrix_of"),
         py::arg("axes_of"), py::arg("synthesize"), py::arg("instr_cls"), py::arg("type_gate"),
         py::arg("type_barrier"), py::arg("gate_cls"), py::arg("h"), py::arg("to_z"), py::arg("to_z_conj"),
         py::arg("beam"), py::arg("gate_weight"), py::arg("run_weight"), py::arg("sweeps"), py::arg("atol"),

@@ -18,6 +18,7 @@
 #include <pybind11/stl.h>
 
 #include "quspect_native/common/parallel.hpp"
+#include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/executor/executor.hpp"
 #include "quspect_native/executor/gradient_executor.hpp"
 #include "quspect_native/ir/program_builder.hpp"
@@ -1040,6 +1041,40 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
             return out;
         },
         py::arg("axes"), py::arg("phis"), "_rot(axis, phi) for each pair (axis 0 = z, 1 = x, 2 = y).");
+
+    m.def(
+        "_gauge_matmul",
+        [](const ComplexArray& a, const ComplexArray& b) {
+            // a @ b for (2, 2) / (N, 2, 2) stacks (broadcast like numpy), on the deterministic numerics layer
+            auto count = [](const ComplexArray& x) -> py::ssize_t {
+                if (x.ndim() == 2 && x.shape(0) == 2 && x.shape(1) == 2) {
+                    return -1;
+                }
+                if (x.ndim() == 3 && x.shape(1) == 2 && x.shape(2) == 2) {
+                    return x.shape(0);
+                }
+                throw std::invalid_argument("expected a (2, 2) matrix or an (N, 2, 2) stack");
+            };
+            const py::ssize_t na = count(a);
+            const py::ssize_t nb = count(b);
+            if (na >= 0 && nb >= 0 && na != nb) {
+                throw std::invalid_argument("stack sizes differ");
+            }
+            const py::ssize_t n = std::max(na, nb);
+            const auto* pa = reinterpret_cast<const detmath::Cx*>(a.data());
+            const auto* pb = reinterpret_cast<const detmath::Cx*>(b.data());
+            py::array_t<std::complex<double>> out =
+                n < 0 ? py::array_t<std::complex<double>>({static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)})
+                      : py::array_t<std::complex<double>>(
+                            {n, static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)});
+            auto* po = reinterpret_cast<detmath::Cx*>(out.mutable_data());
+            for (py::ssize_t i = 0; i < (n < 0 ? 1 : n); ++i) {
+                detmath::MatMul(2, pa + (na < 0 ? 0 : 4 * i), pb + (nb < 0 ? 0 : 4 * i), po + 4 * i);
+            }
+            return out;
+        },
+        py::arg("a"), py::arg("b"),
+        "a @ b for 2x2 matrices or (N, 2, 2) stacks (deterministic products, bit-identical on all platforms).");
 
     // ---- 精度枚举 ----
     py::enum_<executor::PrecisionKind>(m, "PrecisionKind", py::module_local())

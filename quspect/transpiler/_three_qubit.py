@@ -26,6 +26,12 @@ emitted gate matrices must equal the block unitary up to global phase with
 ``max|U − e^{iφ}V| ≤ 1e-9`` (phase-aligned, element-wise), otherwise the
 block is kept.  The emitted gates are ``cx``, ``ry``, ``rz`` and the
 ``{cz, h, rz, x}`` gates of the two-qubit synthesis; decompose afterwards.
+
+When the C++ extension is built, the numerics (block products, the
+eigendecomposition of the demultiplexing, the cosine–sine decomposition
+and the verification) run on its deterministic numerics layer, so the
+result is bit-identical on every platform; without it numpy / scipy are
+used (same constructions, numerically equivalent).
 """
 
 from __future__ import annotations
@@ -73,7 +79,20 @@ _MUX_SIGNS = np.array(
     ],
     dtype=float,
 )
-_MUX_INV = np.linalg.inv(_MUX_SIGNS)
+# 符号矩阵的行两两正交（S·Sᵀ = 4·I）：逆矩阵是精确的 Sᵀ / 4
+_MUX_INV = _MUX_SIGNS.T / 4.0
+
+
+def _native() -> object | None:
+    """The extension module if it provides the three-qubit numerics."""
+    from quspect.synthesis.two_qubit import _native_kak
+
+    if _native_kak() is None:  # 也遵从 QUSPECT_SYNTHESIS_BACKEND=python
+        return None
+    from quspect._native_loader import load_core
+
+    core = load_core()
+    return core if core is not None and hasattr(core, "_three_qubit_cossin") else None
 
 
 @dataclass
@@ -157,6 +176,9 @@ def _apply(u: np.ndarray, gate_mat: np.ndarray, local: list[int]) -> np.ndarray:
 
 
 def _distance(u: np.ndarray, v: np.ndarray) -> float:
+    core = _native()
+    if core is not None:
+        return float(core._three_qubit_distance(u, v))  # type: ignore[attr-defined]
     overlap = complex(np.vdot(v, u))
     if abs(overlap) < 1e-300:
         return float("inf")
@@ -181,7 +203,9 @@ def _mux_ops(kind: str, angles: np.ndarray, c: int, s1: int, s2: int) -> list[_O
 
     ``angles[2·s1 + s2]`` is the rotation angle applied for that selection.
     """
-    alphas = _MUX_INV @ angles
+    # α = _MUX_INV @ angles，按固定顺序逐项求和（Python 浮点运算，与平台无关）
+    vals = [float(a) for a in angles]
+    alphas = [sum(float(_MUX_INV[j, k]) * vals[k] for k in range(4)) for j in range(4)]
     ops: list[_Op] = []
     for j, cx_ctrl in enumerate((s2, s1, s2, s1)):
         if abs(math.remainder(alphas[j], 4 * math.pi)) > 1e-15:
@@ -194,6 +218,16 @@ def _demultiplex(
     a: np.ndarray, b: np.ndarray, c: int, t1: int, t2: int
 ) -> list[_Op] | None:
     """Gates of ``|0⟩⟨0|_c ⊗ A + |1⟩⟨1|_c ⊗ B`` (A, B act on (t1, t2))."""
+    core = _native()
+    if core is not None:
+        found = core._three_qubit_demultiplex(a, b)  # type: ignore[attr-defined]
+        if found is None:
+            return None
+        v, w, phases_t = found
+        ops = _two_qubit_ops(np.asarray(w), t1, t2)
+        ops += _mux_ops("rz", -2.0 * np.asarray(phases_t), c, t1, t2)
+        ops += _two_qubit_ops(np.asarray(v), t1, t2)
+        return ops
     import scipy.linalg  # type: ignore[import-untyped]
 
     m = a @ b.conj().T
@@ -216,23 +250,36 @@ def _block_unitary_in(order: list[int], instrs: list[CircuitInstruction]) -> np.
     from quspect.gates._matrix_utils import gate_matrix
 
     pos = {q: i for i, q in enumerate(order)}
-    u = np.eye(8, dtype=complex)
+    mats = []
+    local = []
     for ins in instrs:
         assert ins.gate is not None
-        mat = np.asarray(gate_matrix(ins.gate), dtype=complex)
-        u = _apply(u, mat, [pos[q] for q in ins.qubits])
+        mats.append(np.asarray(gate_matrix(ins.gate), dtype=complex))
+        local.append([pos[q] for q in ins.qubits])
+    return _product(mats, local)
+
+
+def _product(mats: list[np.ndarray], local: list[list[int]]) -> np.ndarray:
+    """``u = I; u = G(local) · u`` over the gates (deterministic when native)."""
+    core = _native()
+    if core is not None:
+        return np.asarray(core._three_qubit_unitary(mats, local))  # type: ignore[attr-defined]
+    u = np.eye(8, dtype=complex)
+    for mat, qs in zip(mats, local, strict=True):
+        u = _apply(u, mat, qs)
     return u
 
 
 def _ops_unitary(ops: list[_Op]) -> np.ndarray:
     from quspect.gates._matrix_utils import gate_matrix
 
-    u = np.eye(8, dtype=complex)
+    mats = []
+    local = []
     for ins in _ops_to_instructions(ops, [0, 1, 2]):
         assert ins.gate is not None
-        mat = np.asarray(gate_matrix(ins.gate), dtype=complex)
-        u = _apply(u, mat, list(ins.qubits))
-    return u
+        mats.append(np.asarray(gate_matrix(ins.gate), dtype=complex))
+        local.append(list(ins.qubits))
+    return _product(mats, local)
 
 
 def _ops_to_instructions(ops: list[_Op], qubits: list[int]) -> list[CircuitInstruction]:
@@ -279,14 +326,13 @@ def synthesize_three_qubit(u: np.ndarray) -> list[_Op] | None:
         >>> sum(1 for name, q, _ in ops if len(q) == 2) <= 10
         True
     """
-    import scipy.linalg
-
     best: list[_Op] | None = None
     best_cost = 1 << 30
     for c in range(3):
         t1, t2 = (q for q in range(3) if q != c)
-        perm = _local_perm(c, t1, t2)
-        up = perm @ u @ perm.T
+        # perm @ u @ perm.T：行列置换（精确）
+        idx = _local_perm_index(c, t1, t2)
+        up = np.ascontiguousarray(u[np.ix_(idx, idx)])
         off = max(np.max(np.abs(up[:4, 4:])), np.max(np.abs(up[4:, :4])))
         if off > _MUX_ATOL:
             continue
@@ -299,7 +345,16 @@ def synthesize_three_qubit(u: np.ndarray) -> list[_Op] | None:
     if best is not None:
         return best
     # General block: cosine–sine decomposition around qubit 0.
-    (u1, u2), theta, (v1h, v2h) = scipy.linalg.cossin(u, p=4, q=4, separate=True)
+    core = _native()
+    if core is not None:
+        found = core._three_qubit_cossin(np.ascontiguousarray(u))  # type: ignore[attr-defined]
+        if found is None:
+            return None
+        (u1, u2), theta, (v1h, v2h) = found
+    else:
+        import scipy.linalg
+
+        (u1, u2), theta, (v1h, v2h) = scipy.linalg.cossin(u, p=4, q=4, separate=True)
     right = _demultiplex(v1h, v2h, 0, 1, 2)
     left = _demultiplex(u1, u2, 0, 1, 2)
     if right is None or left is None:
@@ -349,6 +404,16 @@ def _peelings(members: list[CircuitInstruction], order: list[int]) -> list[_Spli
             )
         )
     return out
+
+
+def _local_perm_index(c: int, t1: int, t2: int) -> list[int]:
+    """``idx`` with ``(P u Pᵀ)[i, j] = u[idx[i], idx[j]]`` (``P = _local_perm``)."""
+    idx = [0] * 8
+    for old in range(8):
+        bits = [(old >> (2 - i)) & 1 for i in range(3)]
+        new = (bits[c] << 2) | (bits[t1] << 1) | bits[t2]
+        idx[new] = old
+    return idx
 
 
 def _local_perm(c: int, t1: int, t2: int) -> np.ndarray:

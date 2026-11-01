@@ -129,6 +129,23 @@ class KakSynthesizer {
     // ``_approximate_two_qubit_ops`` 是否一定返回 None（每个更少的纠缠门数的预测不保真度都超出预算）。
     bool ApproximationImpossible(const Kak& kak, double max_infidelity, double atol, int max_entanglers) const;
 
+    // quspect.transpiler._consolidate._verified_euler_ops_uncached：先按 atol 去掉零旋转，误差超出
+    // 1e-9 时改用精确角度（atol 取 min(atol, 1e-12)）；都不满足时返回 nullopt（Python 返回 None）。
+    std::optional<std::vector<Op>> VerifiedEuler(const M2& u, double atol, int basis) const;
+
+    // 块的 4×4 酉矩阵：u = I；对每个成员 u = full @ u。slot 0：4×4 原样；1：kron(m, I2)；
+    // 2：kron(I2, m)；3：交换两个比特的置换副本（m[np.ix_(REV, REV)]）；4：swap4 @ m @ swap4。
+    struct BlockMember {
+        const Cx* matrix;
+        int slot;
+    };
+    M4 BlockUnitary(const std::vector<BlockMember>& members) const;
+
+    // quspect.transpiler._mapping._swap_residual 的数值部分：u = SWAP · (A ⊗ B) 时给出 (A, B)（各自
+    // 除以 sqrt(det) 归一到 SU(2)），否则 nullopt。判据与 Python 相同：重排后的矩阵 r 的奇异值
+    // s1 ≤ tol·s0，且 A ⊗ B 与 SWAP·u 逐元素满足 |x − y| ≤ tol + 1e-5·|y|（np.allclose）。
+    static std::optional<std::array<M2, 2>> SwapResidual(const M4& u, double tol);
+
     // 单比特欧拉合成 ``euler_ops(m, qubit, basis, atol)``（公开以便测试）。
     void EulerOps(const M2& m, int qubit, int basis, double atol, std::vector<Op>* out) const;
     // ``_kron2``、``_axis_rot``、``_axis_angle``、门序列的 2×2 矩阵（公开以便测试）。

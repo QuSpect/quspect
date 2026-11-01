@@ -224,6 +224,13 @@ TEST(DetmathScalar, FmaIsCorrectlyRounded) {
     }
 }
 
+// CORE-MATH 的 atan2 在这个输入上走到"意外的最坏情况"分支（上游打印后 exit(1)，本地改为继续舍入）。
+TEST(DetmathScalar, Atan2HardCaseDoesNotExit) {
+    volatile double y = 0x1.7fffffffffffdp-53;
+    volatile double x = 0x1.ffffffffffffap-3;
+    EXPECT_EQ(Bits(dm::Atan2(y, x)), Bits(0x1.8000000000002p-51));
+}
+
 TEST(DetmathScalar, PowExactCases) {
     volatile double two = 2.0;
     EXPECT_EQ(dm::Pow(two, 10.0), 1024.0);

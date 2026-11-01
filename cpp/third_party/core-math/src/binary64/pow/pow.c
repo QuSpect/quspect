@@ -1957,10 +1957,12 @@ double cr_pow (double x, double y) {
                       in [1, 2) */
     return (qR.sgn == 0x0) ? 1.0 + 0x1p-100 : 1.0 - 0x1p-100;
 
-  printf ("Unexpected worst-case found.\n");
-  printf ("Please report to core-math@inria.fr:\n");
-  printf ("Worst-case of pow found: x,y=%la,%la\n", x, y);
-  exit (1);
+  /* quspect local modification: upstream prints the inputs and calls
+     exit(1) here (a case the error analysis did not expect).  Round the
+     256-bit approximation instead (deterministic; possibly not correctly
+     rounded in such a case). */
+  qZ.sgn = s == -1.0;
+  return qint_tod (&qZ);
 
 #else
   return -0.0;

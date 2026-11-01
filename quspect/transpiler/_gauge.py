@@ -27,14 +27,15 @@ Run lengths are scored with a fast model of
 synthesized and verified for real.  This generalizes Qiskit's
 ``CommutativeCancellation`` + ``Optimize1qGatesDecomposition`` pair.
 
-When the C++ extension is built, the search runs on native kernels
+When the C++ extension is built, the whole minimization runs in C++
 (environment variable ``QUSPECT_GAUGE_BACKEND``: ``auto``, ``native`` or
-``python``): all wires advance layer by layer with the 2×2 products batched
-in numpy, the orientation sweep evaluates every CX at once against the
-state at the start of the sweep and commits the results in gate order
-(re-evaluating the few gates next to an accepted reversal), and every
-kernel reproduces the arithmetic of the Python search bit for bit, so both
-backends return identical circuits.
+``python``): all wires advance layer by layer, the orientation sweep
+evaluates every CX at once against the state at the start of the sweep and
+commits the results in gate order (re-evaluating the few gates next to an
+accepted reversal).  The native kernels and 2×2 products run on the
+deterministic numerics layer, so the result is bit-identical on every
+platform; the pure-Python search follows the same steps with numpy /
+CPython arithmetic (numerically equivalent, not bit-identical).
 """
 
 from __future__ import annotations
@@ -254,9 +255,8 @@ def _zyz(
 
 
 #: Environment variable selecting the beam-search kernels: ``"auto"``
-#: (default: native when the C++ extension provides them and passes its
-#: self-check, else Python), ``"native"`` (raise if unavailable) or
-#: ``"python"``.  Both give bit-identical results.
+#: (default: native when the C++ extension provides them, else Python),
+#: ``"native"`` (raise if unavailable) or ``"python"``.
 GAUGE_BACKEND_ENV = "QUSPECT_GAUGE_BACKEND"
 _BACKENDS = ("auto", "native", "python")
 _AXIS_CODE = {"z": 0, "x": 1, "y": 2}
@@ -278,19 +278,14 @@ class _NativeFallbackError(Exception):
 class _Native:
     """C++ kernels of the beam search (``quspect._core_*``).
 
-    Every kernel reproduces the Python reference bit for bit (the CPython /
-    numpy complex arithmetic, including the FMA contractions of their C
-    builds, is written out explicitly); 2×2 matrix products stay in numpy
-    (BLAS), batched over many runs at a time.  Inputs a kernel cannot
-    reproduce (non-finite values, division by zero) raise
-    :class:`_NativeFallbackError`.
+    The kernels run on the deterministic numerics layer (numerically
+    equivalent to the Python reference).  Inputs a kernel does not handle
+    (non-finite values, division by zero) raise :class:`_NativeFallbackError`.
     """
 
     def __init__(self, core: Any, length: _LengthModel) -> None:
         named = np.array(length.named_entries, dtype=complex).reshape(-1, 2, 2)
         self.core = core
-        #: Whether :func:`orient_cx_gates` may use these kernels.
-        self.orientation = True
         self.model = core._GaugeLengthModel(
             length.h, length.x, length.sx, length.sxdg, named
         )
@@ -309,9 +304,13 @@ class _Native:
             self.core._gauge_rotations([_AXIS_CODE[axis]] * len(phis), phis)
         )
 
+    def mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """``a @ b`` for ``2×2`` matrices or ``(N, 2, 2)`` stacks (native products)."""
+        return np.asarray(self.core._gauge_matmul(a, b))
+
     def leading(self, m: np.ndarray, axis: str) -> list[float]:
         v = _TO_Z[axis]
-        z = v.conj().T @ m @ v
+        z = self.mul(self.mul(v.conj().T, m), v)
         counts, angles = self.core._gauge_leading_angles(z.reshape(1, 2, 2))
         if counts[0] == 0:
             raise _NativeFallbackError
@@ -332,12 +331,7 @@ def _gauge_backend() -> str:
 
 
 def _native_kernels(length: _LengthModel) -> _Native | None:
-    """Native kernels for ``length``'s basis, or ``None`` (not built / not fast).
-
-    The kernels are checked once per basis against the Python reference on
-    a fixed sample; any difference disables them (e.g. a platform whose
-    CPython or numpy rounds differently from the replicated arithmetic).
-    """
+    """Native kernels for ``length``'s basis, or ``None`` (not built / not fast)."""
     if not length.fast:
         return None
     try:
@@ -353,76 +347,8 @@ def _native_kernels(length: _LengthModel) -> _Native | None:
         core = None
     if core is not None and hasattr(core, "_GaugeBeamSearch"):
         native = _Native(core, length)
-        if _ARITHMETIC[0] == "probed" or not _self_check(native, length):
-            native = _probed_kernels(core, length)
     _NATIVE_CACHE[length.basis] = native
     return native
-
-
-#: Arithmetic of the native kernels: ``"default"`` (the CPython / numpy
-#: evaluation orders of the arm64 builds the kernels were written for) or
-#: ``"probed"`` once :func:`_probed_kernels` switched the (process-wide)
-#: kernels to the orders probed by the native KAK backend.
-_ARITHMETIC: list[str] = ["default"]
-
-
-def _probed_kernels(core: Any, length: _LengthModel) -> _Native | None:
-    """Kernels using the complex-arithmetic orders this platform's numpy and
-    CPython actually use (as probed by the native KAK backend), or ``None``.
-
-    Used when the default orders fail the self-check (e.g. Linux x86_64,
-    where CPython and numpy scalars do not contract to FMA).  Only the beam
-    search of :func:`_minimize` uses these kernels: its native and Python
-    paths give identical circuits.  The global CX orientation
-    (:func:`orient_cx_gates`, native only) stays disabled, as it is whenever
-    the default kernels are unavailable, so results do not change.
-    """
-    if not hasattr(core, "_gauge_arithmetic"):
-        return None
-    from quspect.synthesis.two_qubit import _native_kak
-
-    kak = _native_kak()
-    if kak is None or not kak.numpy_compat:
-        return None
-    if _ARITHMETIC[0] != "probed":
-        core._gauge_arithmetic(kak._synth)
-        _ARITHMETIC[0] = "probed"
-        # 已按默认运算顺序自检过的内核不再适用：重新检查
-        _NATIVE_CACHE.clear()
-    native = _Native(core, length)
-    native.orientation = False
-    if not _self_check(native, length):  # pragma: no cover - platform specific
-        return None
-    return native
-
-
-def _self_check(native: _Native, length: _LengthModel) -> bool:
-    """Whether the native kernels match the Python reference on a sample."""
-    rng = np.random.default_rng(12345)
-    a = rng.normal(size=(64, 2, 2)) + 1j * rng.normal(size=(64, 2, 2))
-    mats = [np.linalg.qr(x)[0] for x in a]
-    for axis in ("z", "x", "y"):
-        for phi in (0.3, -1.2, math.pi / 2, math.pi, 1e-9):
-            mats.append(_rot(axis, phi) @ _H)
-            mats.append(_H @ _rot(axis, phi) @ _rot("x", 0.7))
-    mats += [_I2, _H, _PAULI["x"], _PAULI["y"], _PAULI["z"]]
-    try:
-        got = native.lengths(np.array(mats))
-        for m, g in zip(mats, got, strict=True):
-            if g != length._fast(m):
-                return False
-        for axis in ("z", "x", "y"):
-            for m in mats:
-                ref = _leading_angles(m, axis)
-                new = native.leading(m, axis)
-                if [x.hex() for x in map(float, ref)] != [x.hex() for x in new]:
-                    return False
-            for phi in (0.0, -0.0, 0.3, -2.5, math.pi, 7.0, 1e-300):
-                if native.rot(axis, phi).tobytes() != _rot(axis, phi).tobytes():
-                    return False
-    except _NativeFallbackError:
-        return False
-    return True
 
 
 class _Run:
@@ -582,11 +508,7 @@ def orient_cx_gates(
     if not length.fast or _gauge_backend() == "python":
         return circuit
     native = _native_kernels(length)
-    if (
-        native is None
-        or not native.orientation
-        or not hasattr(native.core, "_cx_orientation")
-    ):
+    if native is None or not hasattr(native.core, "_cx_orientation"):
         return circuit
     instrs = circuit.instructions
     cx_instr: list[int] = []
@@ -603,7 +525,7 @@ def orient_cx_gates(
             except (KeyError, ValueError, TypeError):
                 return circuit
             q = ins.qubits[0]
-            current[q] = m @ current[q] if q in current else m
+            current[q] = native.mul(m, current[q]) if q in current else m
             continue
         if ins.gate.name != "cx" or len(ins.qubits) != 2:
             return circuit
@@ -712,9 +634,9 @@ def _gate_tables() -> tuple[
 
 
 #: Environment variable selecting who drives the native minimization:
-#: ``"auto"`` (default: the whole minimization runs in C++ when numpy's
-#: BLAS is available to it, see :func:`_minimize_driver`) or ``"python"``
-#: (the Python body calls the native kernels).  Both give identical results.
+#: ``"auto"`` (default: the whole minimization runs in C++, see
+#: :func:`_minimize_driver`) or ``"python"`` (the Python body calls the
+#: native kernels, with the 2×2 products in numpy).
 GAUGE_DRIVER_ENV = "QUSPECT_GAUGE_DRIVER"
 
 
@@ -725,7 +647,7 @@ def _minimize_driver(
 
     The native driver repeats the Python body step by step (same runs,
     anchors, beam search, memo, orientation sweep and emission order; the
-    2×2 products are numpy's BLAS calls through the native KAK backend) and
+    2×2 products are the deterministic products of the native module) and
     calls :func:`~quspect.gates.synthesis.synthesize_one_qubit` for the
     emitted runs.  ``None`` (use the Python body) when it is disabled or
     unavailable or the input is outside what it reproduces.
@@ -739,11 +661,6 @@ def _minimize_driver(
         or not hasattr(native.core, "_gauge_minimize")
     ):
         return None
-    from quspect.synthesis.two_qubit import _native_kak
-
-    kak = _native_kak()
-    if kak is None or not kak.numpy_compat:
-        return None
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction, InstructionType
     from quspect.gates.gate import Gate
@@ -753,7 +670,6 @@ def _minimize_driver(
     done, out = native.core._gauge_minimize(
         circuit.instructions,
         native.model,
-        kak._synth,
         one_qubit,
         matrix_of,
         axes_of,
@@ -793,6 +709,11 @@ def _minimize(
 
     instrs = circuit.instructions
     matrix_of, axes_of = _gate_tables()
+    # 原生内核时 2×2 乘法与旋转也走原生实现（与 C++ 驱动逐位相同）
+    mul: Callable[[np.ndarray, np.ndarray], np.ndarray] = (
+        np.matmul if native is None else native.mul
+    )
+    rot: Callable[[str, float], np.ndarray] = _rot if native is None else native.rot
 
     # --- split every wire into runs and anchors ---------------------------
     runs: list[_Run] = []
@@ -828,7 +749,7 @@ def _minimize(
                 run.instrs.append(ins)
                 if ins.label or ins.clbits:
                     run.plain = False
-                run.matrix = m @ run.matrix
+                run.matrix = mul(m, run.matrix)
                 if gate.name not in one_qubit:
                     run.native = False
                 original_1q += 1
@@ -871,12 +792,12 @@ def _minimize(
         if i > 0:
             a = anchors[i - 1]
             if a.gate >= 0 and flipped[a.gate]:
-                m = m @ _H
+                m = mul(m, _H)
                 changed = True
         if i < len(anchors):
             a = anchors[i]
             if a.gate >= 0 and flipped[a.gate]:
-                m = _H @ m
+                m = mul(_H, m)
                 changed = True
         return m, changed
 
@@ -935,7 +856,7 @@ def _minimize(
         run = runs[wire_runs[q][i]]
         m, changed = run_base(q, i)
         if ax_in is not None and phi_in != 0.0:
-            m = m @ native.rot(ax_in, phi_in)
+            m = mul(m, native.rot(ax_in, phi_in))
             changed = True
         if phi_fixed is not None:
             opts = [phi_fixed]
@@ -947,7 +868,7 @@ def _minimize(
         mats = [m]
         if moved:
             assert ax_out is not None
-            mats.extend(np.matmul(native.rots(ax_out, [-phi for phi in moved]), m))
+            mats.extend(mul(native.rots(ax_out, [-phi for phi in moved]), m))
         lengths = native.lengths(np.array(mats))
         result = []
         j = 0
@@ -1044,8 +965,8 @@ def _minimize(
 
         ``rows``: slots, run ids, fp, fn, ax_in, ax_out (codes, −1 = none),
         last, phi_fixed, run lengths, base changed.  The run matrices get
-        the same numpy products as ``run_base`` / ``run_options`` (each
-        batched product is the single ``@`` BLAS call).
+        the same products as ``run_base`` / ``run_options`` (native,
+        batched).
         """
         slots, rids, fp, fn, ax_in, ax_out, last, phi_fixed, run_len, changed = rows
         try:
@@ -1056,22 +977,22 @@ def _minimize(
             if len(crow) and any(changed):
                 fp_rows = np.flatnonzero(np.asarray(fp, dtype=bool)[crow])
                 if len(fp_rows):
-                    m[fp_rows] = np.matmul(m[fp_rows], _H)
+                    m[fp_rows] = mul(m[fp_rows], _H)
                 fn_rows = np.flatnonzero(np.asarray(fn, dtype=bool)[crow])
                 if len(fn_rows):
-                    m[fn_rows] = np.matmul(_H, m[fn_rows])
+                    m[fn_rows] = mul(_H, m[fn_rows])
             if len(rot_in):
-                m[rot_in] = np.matmul(m[rot_in], rot_in_mats)
+                m[rot_in] = mul(m[rot_in], rot_in_mats)
             if len(need_lead):
                 axes = np.asarray(ax_out, dtype=np.intp)[crow[need_lead]]
-                z = np.matmul(
-                    np.matmul(_TO_Z_CONJ[axes].transpose(0, 2, 1), m[need_lead]),
+                z = mul(
+                    mul(_TO_Z_CONJ[axes].transpose(0, 2, 1), m[need_lead]),
                     _TO_Z_STACK[axes],
                 )
             else:
                 z = _EMPTY_STACK
             opt_rows, rot_out = search.options(z)
-            search.finish(m, np.matmul(rot_out, m[opt_rows]), insert_memo)
+            search.finish(m, mul(rot_out, m[opt_rows]), insert_memo)
         except ValueError as exc:
             raise _NativeFallbackError from exc
 
@@ -1103,17 +1024,17 @@ def _minimize(
                 crid, cax, rot_in, rot_in_mats, need_lead = search.prepare_layer(i)
                 m = matrices[crid]
                 if len(rot_in):
-                    m[rot_in] = np.matmul(m[rot_in], rot_in_mats)
+                    m[rot_in] = mul(m[rot_in], rot_in_mats)
                 if len(need_lead):
                     axes = cax[need_lead]
-                    z = np.matmul(
-                        np.matmul(_TO_Z_CONJ[axes].transpose(0, 2, 1), m[need_lead]),
+                    z = mul(
+                        mul(_TO_Z_CONJ[axes].transpose(0, 2, 1), m[need_lead]),
                         _TO_Z_STACK[axes],
                     )
                 else:
                     z = _EMPTY_STACK
                 opt_rows, rot_out = search.options(z)
-                search.finish(m, np.matmul(rot_out, m[opt_rows]), True)
+                search.finish(m, mul(rot_out, m[opt_rows]), True)
         except ValueError as exc:
             raise _NativeFallbackError from exc
         for slot, q in enumerate(all_wires):
@@ -1254,12 +1175,12 @@ def _minimize(
             if phi_in != 0.0:
                 ax = anchor_axis(anchors[i - 1])
                 assert ax is not None
-                m = m @ _rot(ax, phi_in)
+                m = mul(m, rot(ax, phi_in))
                 changed = True
             if phi_out != 0.0:
                 ax = anchor_axis(anchors[i])
                 assert ax is not None
-                m = _rot(ax, -phi_out) @ m
+                m = mul(rot(ax, -phi_out), m)
                 changed = True
             if (
                 not changed

@@ -406,14 +406,13 @@ tint_tod (const tint_t *a, uint64_t err, double y, double x)
      (a) a->m = 0 and the low 10 bits of a->h are zero and a->l < err
      (b) a->m = 111...111 and the low 10 bits of a->h are 1 and
          a->l > 2^64 - err */
-  if (__builtin_expect (mm == 0 || ~mm == 0, 0))
-    if ((mm == 0 && (low == 0 || low == 0x400) && ll < err) ||
-        (~mm == 0 && (low == 0x3ff || low == 0x7ff) && ~ll < err))
-    {
-      printf ("Unexpected worst-case found, please report to core-math@inria.fr:\n");
-      printf ("Worst-case of atan2 found: y,x=%la,%la\n", y, x);
-      exit (1);
-    }
+  /* quspect local modification: upstream prints the inputs and calls
+     exit(1) here (a case the error analysis did not expect; one was hit at
+     y,x=0x1.7fffffffffffdp-53,0x1.ffffffffffffap-3).  Fall through instead and
+     round the 192-bit approximation (deterministic; possibly not correctly
+     rounded in such a case). */
+  (void) y;
+  (void) x;
   if (ex <= -1022) // subnormal case
   {
     int sh = -1021 - ex; // 1 <= sh <= 52

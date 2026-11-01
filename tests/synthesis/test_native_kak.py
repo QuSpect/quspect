@@ -31,13 +31,6 @@ NATIVE = tq._native_kak()
 
 pytestmark = pytest.mark.skipif(NATIVE is None, reason="extension module not built")
 
-#: The numpy-semantics helpers (single-qubit synthesis, block products) are
-#: only enabled where they reproduce numpy bit for bit.
-needs_numpy = pytest.mark.skipif(
-    NATIVE is None or not NATIVE.numpy_compat,
-    reason="numpy-semantics helpers not enabled on this platform",
-)
-
 BASES = [TwoQubitBasis(e, x) for e in ("cz", "cx") for x in ("zxz", "zsx")]
 
 _SWAP = np.eye(4, dtype=complex)[[0, 2, 1, 3]]
@@ -398,6 +391,81 @@ GOLDEN = {
 }
 
 
+def test_golden_digests_of_single_qubit_numerics() -> None:
+    """Digests of gate matrices, single-qubit synthesis, ZYZ angles, block
+    products and verified Euler runs on platform-independent inputs.
+
+    Like :func:`test_golden_digests_are_platform_independent`, these must be
+    the same on every platform and build.
+    """
+    from quspect._native_loader import load_core
+    from quspect.gates import synthesis as gs
+
+    assert NATIVE is not None
+    core = load_core()
+    rng = np.random.Generator(np.random.PCG64(77))
+
+    def unitary(n: int) -> np.ndarray:
+        raw = rng.random((n, n)) * 2.0 - 1.0 + 1j * (rng.random((n, n)) * 2.0 - 1.0)
+        return np.ascontiguousarray(core._detmath_qr(np.ascontiguousarray(raw))[0])
+
+    def hexes(arr: np.ndarray) -> str:
+        return np.ascontiguousarray(arr).tobytes().hex()
+
+    angles = (rng.random(40) * 20.0 - 10.0).tolist() + [0.0, -0.0, 1e-10, math.pi]
+    gates = []
+    for name, n in (("rx", 1), ("ry", 1), ("rz", 1), ("p", 1), ("u2", 2), ("u3", 3)):
+        for k in range(len(angles) - 2):
+            gates.append(hexes(core._gate_matrix(name, angles[k : k + n])))
+    for name, n in (("crx", 1), ("cry", 1), ("crz", 1), ("cp", 1), ("cu3", 3)):
+        for k in range(0, len(angles) - 2, 3):
+            gates.append(hexes(core._gate_matrix(name, angles[k : k + n])))
+    mats = [unitary(2) for _ in range(60)]
+    mats += [np.asarray(core._gate_matrix(g, [])) for g in ("h", "x", "sx", "t", "s")]
+    one = []
+    for basis in ONE_QUBIT_BASES:
+        em = gs._EMITTERS.get(basis) or gs._EMITTERS.setdefault(
+            basis, gs._Emitter(basis)
+        )
+        for m in mats:
+            done, got = NATIVE.one_qubit(m, em)
+            assert done
+            one.append(
+                "-"
+                if got is None
+                else ";".join(
+                    g.name + "".join(float(p).hex() for p in g.params) for g in got
+                )
+            )
+    zyz = [",".join(x.hex() for x in NATIVE.zyz_angles(m)) for m in mats]
+    euler = []
+    for m in mats:
+        for euler_basis in ("zxz", "zsx"):
+            ops = NATIVE.verified_euler(m, 1e-9, euler_basis)
+            euler.append(repr(ops))
+    blocks = []
+    for k in range(30):
+        members = [unitary(4), mats[k], mats[k + 1], unitary(4), unitary(4)]
+        blocks.append(hexes(NATIVE.block_unitary(members, [0, 1, 2, 3, 4])))
+        blocks.append(hexes(NATIVE.run_unitary(mats[k : k + 5])))
+    assert {
+        "gates": _digest(gates),
+        "one_qubit": _digest(one),
+        "zyz": _digest(zyz),
+        "euler": _digest(euler),
+        "blocks": _digest(blocks),
+    } == GOLDEN_1Q
+
+
+GOLDEN_1Q = {
+    "gates": "91c229888f5abb35baac6015",
+    "one_qubit": "04ba2a951420a7602ec42a4a",
+    "zyz": "a1e44e28d40943bc0fe28bdb",
+    "euler": "0988fabd9b14ae7ad47d6e72",
+    "blocks": "a3350d350925bd4922a072ea",
+}
+
+
 # ---------------------------------------------------------------------------
 # Single-qubit synthesis (quspect.gates.synthesis)
 # ---------------------------------------------------------------------------
@@ -438,9 +506,35 @@ def _one_qubit_matrices(seed: int) -> list[np.ndarray]:
     return [np.ascontiguousarray(m, dtype=complex) for m in out]
 
 
-@needs_numpy
+def _gates_matrix(gates: list[object]) -> np.ndarray:
+    from quspect.gates._matrix_utils import gate_matrix
+
+    m = np.eye(2, dtype=complex)
+    for g in gates:
+        m = gate_matrix(g) @ m  # type: ignore[arg-type]
+    return m
+
+
+def _close_gates(a: list[object] | None, b: list[object] | None) -> None:
+    """Same gate names; parameters equal to rounding (``mod 2π`` not needed)."""
+    assert (a is None) == (b is None)
+    if a is None or b is None:
+        return
+    assert [g.name for g in a] == [g.name for g in b]  # type: ignore[attr-defined]
+    for x, y in zip(a, b, strict=True):
+        assert x.params == pytest.approx(y.params, abs=1e-12)  # type: ignore[attr-defined]
+
+
+# The native single-qubit synthesis, ZYZ angles, block products and verified
+# Euler runs run on the deterministic numerics layer; the Python references
+# use numpy / CPython arithmetic and the platform libm.  They are compared
+# for equivalence (same gate sequences, parameters and products equal to
+# rounding), not bit for bit; platform independence of the native results is
+# checked by the golden digests above.
+
+
 @pytest.mark.parametrize("basis", ONE_QUBIT_BASES, ids=lambda b: "-".join(sorted(b)))
-def test_one_qubit_synthesis_matches_python(basis: frozenset[str]) -> None:
+def test_one_qubit_synthesis_is_equivalent_to_python(basis: frozenset[str]) -> None:
     from quspect.gates import synthesis as gs
 
     assert NATIVE is not None
@@ -448,25 +542,30 @@ def test_one_qubit_synthesis_matches_python(basis: frozenset[str]) -> None:
     for m in _one_qubit_matrices(7):
         done, got = NATIVE.one_qubit(m, em)
         assert done
-        assert _same(got, gs._synthesize_one_qubit_reference(m, em))
-    # 不能复刻的输入交回 Python
+        _close_gates(got, gs._synthesize_one_qubit_reference(m, em))
+        if got is not None:
+            assert gs._equal_up_to_phase(_gates_matrix(got), m)
+    # 含非有限值的输入交回 Python
     bad = np.array([[np.nan, 0], [0, 1]], dtype=complex)
     assert NATIVE.one_qubit(bad, em) == (False, None)
 
 
-@needs_numpy
-def test_one_qubit_zyz_angles_are_bitwise() -> None:
-    from quspect.dag.passes.single_qubit_fusion import _decompose_u3
+def test_one_qubit_zyz_angles() -> None:
+    from quspect.gates._matrix_utils import gate_matrix
+    from quspect.gates.parameterized import U3
 
     assert NATIVE is not None
     for m in _one_qubit_matrices(13):
-        ref = _decompose_u3(m)
-        got = NATIVE._synth.zyz_angles(m)
-        assert [x.hex() for x in got] == [float(x).hex() for x in ref]
+        theta, phi, lam = NATIVE._synth.zyz_angles(m)
+        assert 0.0 <= phi <= 2 * math.pi and 0.0 <= lam <= 2 * math.pi
+        rebuilt = gate_matrix(U3.with_params(theta, phi, lam))
+        assert (
+            tq._distance_up_to_phase(np.kron(m, np.eye(2)), np.kron(rebuilt, np.eye(2)))
+            < 1e-9
+        )  # θ < 1e-10 is rounded to 0 by design
 
 
-@needs_numpy
-def test_one_qubit_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_qubit_public_api_equivalent(monkeypatch: pytest.MonkeyPatch) -> None:
     from quspect.gates import synthesis as gs
 
     def run() -> list[object]:
@@ -480,7 +579,9 @@ def test_one_qubit_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None
     native = run()
     monkeypatch.setattr(gs, "_native_backend", lambda: None)
     python = run()
-    assert repr(native) == repr(python)
+    gs._SYNTH_1Q_CACHE.clear()
+    for a, b in zip(native, python, strict=True):
+        _close_gates(a, b)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +589,7 @@ def test_one_qubit_public_api_unchanged(monkeypatch: pytest.MonkeyPatch) -> None
 # ---------------------------------------------------------------------------
 
 
-@needs_numpy
-def test_block_and_run_products_are_bitwise() -> None:
+def test_block_and_run_products() -> None:
     from quspect.transpiler._mapping import _SWAP_4
 
     assert NATIVE is not None
@@ -521,35 +621,25 @@ def test_block_and_run_products_are_bitwise() -> None:
             else:
                 full = _SWAP_4 @ m @ _SWAP_4
             u = full @ u
-        got = NATIVE.block_unitary(mats, slots, _SWAP_4)
-        assert got is not None and got.tobytes() == u.tobytes()
+        got = NATIVE.block_unitary(mats, slots)
+        assert np.max(np.abs(got - u)) < 1e-14
         run = [m for m in mats if m.shape == (2, 2)]
         v = np.eye(2, dtype=complex)
         for m in run:
             v = m @ v
-        got_run = NATIVE.run_unitary(run)
-        assert got_run is not None and got_run.tobytes() == v.tobytes()
-    # 非 C 连续的矩阵交回 Python（numpy 的 BLAS 调用取决于布局）
-    assert (
-        NATIVE.block_unitary([np.asfortranarray(_haar(rng, 4))], [0], _SWAP_4) is None
-    )
+        assert np.max(np.abs(NATIVE.run_unitary(run) - v)) < 1e-14
+    # 布局与 dtype 不影响结果（精确转换成 C 连续的 complex128）
     m4 = _haar(rng, 4)
-    assert NATIVE.block_unitary([m4.astype(np.complex64)], [0], _SWAP_4) is None
-    assert NATIVE.block_unitary([m4[:, ::-1]], [0], _SWAP_4) is None
-    assert NATIVE.run_unitary([_haar(rng, 2).astype(np.complex64)]) is None
-    assert NATIVE.run_unitary([_haar(rng, 2).T]) is None
-    assert NATIVE.run_unitary([np.zeros(4, dtype=complex)]) is None
-    # 原生的布局判断与 Python 端的判断结果相同
-    synth = NATIVE._synth
+    ref = NATIVE.block_unitary([m4], [0])
+    assert NATIVE.block_unitary([np.asfortranarray(m4)], [0]).tobytes() == ref.tobytes()
+    assert NATIVE.block_unitary([m4[:, ::-1][:, ::-1]], [0]).tobytes() == ref.tobytes()
     two = _haar(rng, 2)
-    assert synth.run_unitary_strict([two]).tobytes() == (
-        synth.run_unitary([two]).tobytes()
+    assert NATIVE.run_unitary([two.T.copy().T]).tobytes() == (
+        NATIVE.run_unitary([two]).tobytes()
     )
-    assert synth.block_unitary_strict([m4.T], [0], _SWAP_4) is None
 
 
-@needs_numpy
-def test_verified_euler_matches_consolidation() -> None:
+def test_verified_euler_is_equivalent_to_consolidation() -> None:
     from quspect.transpiler import _consolidate
 
     assert NATIVE is not None
@@ -564,4 +654,42 @@ def test_verified_euler_matches_consolidation() -> None:
                 got = NATIVE.verified_euler(m, atol, euler)
                 ref = _consolidate._verified_euler_ops_uncached(m, atol, euler)
                 assert got is not None
-                assert _same(None if got is False else got, ref)
+                got = None if got is False else got
+                assert (got is None) == (ref is None)
+                if got is None or ref is None:
+                    continue
+                assert [(n, q) for n, q, _ in got] == [(n, q) for n, q, _ in ref]
+                for (_, _, pa), (_, _, pb) in zip(got, ref, strict=True):
+                    assert pa == pytest.approx(pb, abs=1e-12)
+
+
+def test_swap_residual_and_gate_matrices() -> None:
+    from quspect.gates import _matrix_utils as mu
+    from quspect.transpiler._mapping import _PRODUCT_TOL
+
+    assert NATIVE is not None
+    rng = np.random.default_rng(43)
+    for _ in range(20):
+        a, b = _haar(rng, 2), _haar(rng, 2)
+        u = (_SWAP @ np.kron(a, b)) * np.exp(0.3j)
+        res = NATIVE.swap_residual(np.ascontiguousarray(u), _PRODUCT_TOL)
+        assert res is not None
+        ra, rb = res
+        assert abs(np.linalg.det(ra) - 1) < 1e-12 and abs(np.linalg.det(rb) - 1) < 1e-12
+        assert tq._distance_up_to_phase(u, _SWAP @ np.kron(ra, rb)) < 1e-12
+    assert (
+        NATIVE.swap_residual(np.ascontiguousarray(_haar(rng, 4)), _PRODUCT_TOL) is None
+    )
+    # 门矩阵：原生（确定性）与 Python 公式在舍入误差内相同
+    from quspect.gates.parameterized import CP, CRX, CU3, RX, RY, RZ, U1, U2, U3, P
+
+    for t in (0.0, 0.3, -2.1, 7.5):
+        for g in (RX, RY, RZ, P, U1, CRX, CP):
+            m = mu.gate_matrix(g.with_params(t))
+            ref = getattr(mu, f"_{'phase' if g is P else g.name}_matrix")(t)
+            assert np.max(np.abs(m - ref)) < 1e-15
+        for g, n in ((U2, 2), (U3, 3), (CU3, 3)):
+            ps = [t, 0.7, -1.3][:n]
+            m = mu.gate_matrix(g.with_params(*ps))
+            ref = getattr(mu, f"_{g.name}_matrix")(*ps)
+            assert np.max(np.abs(m - ref)) < 1e-15

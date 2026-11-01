@@ -2,6 +2,7 @@
 #include "quspect_native/transpiler/depth_schedule.hpp"
 
 #include "quspect_native/common/parallel.hpp"
+#include "quspect_native/detmath/scalar.hpp"
 
 #include <algorithm>
 #include <array>
@@ -674,15 +675,21 @@ namespace {
 using Complex = std::complex<double>;
 using Mat4 = std::array<Complex, 16>;
 
+// 4×4 复数乘法：k 升序累加，每个复数乘积为 (ar·br − ai·bi, ar·bi + ai·br)（不含 FMA；不用
+// std::complex 的乘法，其实现随标准库而不同），各平台逐位相同。
 Mat4 Multiply(const Mat4& a, const Mat4& b) {
     Mat4 out{};
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            Complex acc = 0.0;
+            double re = 0.0;
+            double im = 0.0;
             for (int k = 0; k < 4; ++k) {
-                acc += a[4 * i + k] * b[4 * k + j];
+                const Complex& x = a[4 * i + k];
+                const Complex& y = b[4 * k + j];
+                re += x.real() * y.real() - x.imag() * y.imag();
+                im += x.real() * y.imag() + x.imag() * y.real();
             }
-            out[4 * i + j] = acc;
+            out[4 * i + j] = Complex(re, im);
         }
     }
     return out;
@@ -747,7 +754,8 @@ std::pair<int, int> BlockAxes(const Mat4& u) {
             const Mat4 right = Multiply(u, op);
             double err = 0.0;
             for (int k = 0; k < 16; ++k) {
-                err = std::max(err, std::abs(left[k] - right[k]));
+                const Complex d = left[k] - right[k];
+                err = std::max(err, quspect::native::detmath::Hypot(d.real(), d.imag()));
             }
             if (err < 1e-12) {
                 found[slot] = code;

@@ -530,6 +530,116 @@ bool JointDiagSym(int n, const double* a_in, const double* b_in, double* v) {
     return false;
 }
 
+// ---- 厄米特征分解（实嵌入 + 复 Gram–Schmidt）--------------------------------------
+
+bool EighHerm(int n, const Cx* a, double* w, Cx* v) {
+    CheckDim(n);
+    if (2 * n > kMaxDim) {
+        throw std::invalid_argument("detmath: EighHerm supports n <= kMaxDim / 2");
+    }
+    // H = A + iB ↦ [[A, −B], [B, A]]（实对称；只读取 H 的上三角）：H z = λ z ⇔ 嵌入矩阵作用在
+    // (Re z; Im z) 上的特征方程，每个特征值重数加倍。
+    const int m = 2 * n;
+    double big[kMaxDim * kMaxDim];
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            const Cx h = i <= j ? a[i * n + j] : Conj(a[j * n + i]);
+            const double re = h.re;
+            const double im = i == j ? 0.0 : h.im;
+            big[i * m + j] = re;
+            big[(i + n) * m + (j + n)] = re;
+            big[i * m + (j + n)] = -im;
+            big[(i + n) * m + j] = im;
+        }
+    }
+    double wr[kMaxDim];
+    double vr[kMaxDim * kMaxDim];
+    if (!EighSym(m, big, wr, vr)) {
+        return false;
+    }
+    // 2n 个实特征向量 x + iy 中取 n 个复线性无关者：每次取（对已选向量做两遍复 Gram–Schmidt 后）
+    // 剩余模最大的一个（相等时取下标最小者）。不同特征值的向量互相正交，简并特征空间内任取一组
+    // 正交基即可。
+    Cx cand[kMaxDim][kMaxDim / 2];
+    for (int k = 0; k < m; ++k) {
+        for (int i = 0; i < n; ++i) {
+            cand[k][i] = Cx{vr[i * m + k], vr[(i + n) * m + k]};
+        }
+    }
+    bool used[kMaxDim] = {};
+    for (int got = 0; got < n; ++got) {
+        int best = -1;
+        double best_norm = -1.0;
+        Cx best_vec[kMaxDim / 2];
+        for (int k = 0; k < m; ++k) {
+            if (used[k]) {
+                continue;
+            }
+            Cx z[kMaxDim / 2];
+            for (int i = 0; i < n; ++i) {
+                z[i] = cand[k][i];
+            }
+            for (int pass = 0; pass < 2; ++pass) {
+                for (int j = 0; j < got; ++j) {
+                    Cx dot{0.0, 0.0};
+                    for (int i = 0; i < n; ++i) {
+                        dot = Add(dot, MulConj(v[i * n + j], z[i]));
+                    }
+                    for (int i = 0; i < n; ++i) {
+                        z[i] = Sub(z[i], Mul(dot, v[i * n + j]));
+                    }
+                }
+            }
+            double norm2 = 0.0;
+            for (int i = 0; i < n; ++i) {
+                norm2 += Norm2(z[i]);
+            }
+            if (norm2 > best_norm) {
+                best_norm = norm2;
+                best = k;
+                for (int i = 0; i < n; ++i) {
+                    best_vec[i] = z[i];
+                }
+            }
+        }
+        if (best < 0 || !(best_norm > 0.0)) {
+            return false;
+        }
+        used[best] = true;
+        const double inv = 1.0 / Sqrt(best_norm);
+        // 规范化相位：模最大（相等时下标最小）的分量为正实数
+        int top = 0;
+        double top_mag = -1.0;
+        for (int i = 0; i < n; ++i) {
+            const double mag = Norm2(best_vec[i]);
+            if (mag > top_mag) {
+                top_mag = mag;
+                top = i;
+            }
+        }
+        const double ab = Abs(best_vec[top]);
+        const Cx phase = ab > 0.0 ? Conj(DivReal(best_vec[top], ab)) : Cx{1.0, 0.0};
+        for (int i = 0; i < n; ++i) {
+            v[i * n + got] = Scale(Mul(best_vec[i], phase), inv);
+        }
+        if (top_mag >= 0.0) {
+            v[top * n + got].im = 0.0;
+        }
+        // 特征值：Rayleigh 商 z^† H z（实部）
+        double lam = 0.0;
+        for (int i = 0; i < n; ++i) {
+            Cx hz{0.0, 0.0};
+            for (int j = 0; j < n; ++j) {
+                const Cx h = i <= j ? a[i * n + j] : Conj(a[j * n + i]);
+                hz = Add(hz, Mul(i == j ? Cx{h.re, 0.0} : h, v[j * n + got]));
+            }
+            lam += MulConj(v[i * n + got], hz).re;
+        }
+        w[got] = lam;
+    }
+    return true;
+}
+
 // ---- 奇异值分解（单边 Jacobi）------------------------------------------------------
 
 bool Svd(int n, const Cx* a_in, Cx* u, double* s, Cx* vh) {

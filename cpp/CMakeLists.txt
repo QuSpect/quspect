@@ -296,12 +296,12 @@ set(TRANSPILER_SRCS
   src/transpiler/su4_routing.cpp
 )
 
-# Two-qubit KAK synthesis (deterministic numerics; single-qubit / block products still numpy-exact)
+# Synthesis on the deterministic numerics layer: two-qubit KAK, single-qubit synthesis, gate matrices
 set(SYNTHESIS_SRCS
-  src/synthesis/numpy_compat.cpp
-  src/synthesis/numpy_euler.cpp
+  src/synthesis/gate_matrices.cpp
   src/synthesis/kak_synthesis.cpp
   src/synthesis/one_qubit_synthesis.cpp
+  src/synthesis/three_qubit.cpp
 )
 
 # Deterministic numerics layer (detmath): small-matrix linear algebra + correctly rounded math
@@ -377,12 +377,17 @@ endif()
 # 精确浮点规则（见 include/quspect_native/detmath/config.hpp）：禁止把 a + b * c 合并成 FMA（arm64 上
 # clang 默认会合并，aarch64 上 gcc 默认 -ffp-contract=fast），禁止 fast-math。适用于：
 #   * 确定性数值层与使用它的合成代码（全平台逐位一致）；
-#   * 路由计分、QASM 参数表达式求值、numpy 语义的单比特合成等（与 Python 参考实现逐位一致）。
+#   * 编译路径上的其余代码：路由计分、调度、QASM 参数表达式求值、绑定层等。
 # 这些源文件定义 QSPECT_EXACT_FP=1；detmath 的运算头文件只能在这样的源文件中包含。
+# 编译路径上的全部源文件（含只做数据搬运的绑定层，避免今后新增的浮点运算被编译器收缩）。
 set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} ${DETMATH_SRCS} src/ir/qasm2_parser.cpp
-    src/ir/dag_passes.cpp src/pybind/basis_bindings.cpp src/pybind/gauge_bindings.cpp
+    src/ir/dag_passes.cpp src/ir/dag_store.cpp src/ir/circuit.cpp
+    src/pybind/basis_bindings.cpp src/pybind/gauge_bindings.cpp
     src/pybind/phase_fold_bindings.cpp src/pybind/synthesis_bindings.cpp src/pybind/detmath_bindings.cpp
-    tests/test_detmath.cpp tests/test_kak_synthesis.cpp)
+    src/pybind/module.cpp src/pybind/dag_bindings.cpp src/pybind/dag_pass_bindings.cpp src/pybind/ir_bindings.cpp
+    src/pybind/circuit_bindings.cpp src/pybind/consolidate_bindings.cpp src/pybind/replay_bindings.cpp
+    src/pybind/schedule_bindings.cpp
+    tests/test_detmath.cpp tests/test_kak_synthesis.cpp tests/test_one_qubit_gauge.cpp)
 if(NOT MSVC)
   set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math")
 else()

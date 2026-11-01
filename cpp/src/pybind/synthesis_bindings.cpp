@@ -13,10 +13,11 @@
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
 
+#include "quspect_native/detmath/linalg.hpp"
+#include "quspect_native/synthesis/gate_matrices.hpp"
 #include "quspect_native/synthesis/kak_synthesis.hpp"
-#include "quspect_native/synthesis/numpy_compat.hpp"
-#include "quspect_native/synthesis/numpy_euler.hpp"
 #include "quspect_native/synthesis/one_qubit_synthesis.hpp"
+#include "quspect_native/synthesis/three_qubit.hpp"
 
 namespace py = pybind11;
 
@@ -51,59 +52,6 @@ py::array_t<std::complex<double>> FromMatrix(const std::array<Cx, N>& m) {
     return out;
 }
 
-std::uintptr_t Address(const py::dict& fns, const char* name) {
-    if (!fns.contains(name)) {
-        return 0;
-    }
-    return fns[name].cast<std::uintptr_t>();
-}
-
-MulMode ToMulMode(int v) {
-    if (v < 0 || v > 2) {
-        throw std::invalid_argument("bad multiplication mode");
-    }
-    return static_cast<MulMode>(v);
-}
-
-ArithModes ToModes(const py::dict& d) {
-    ArithModes m;
-    m.arr_scalar = ToMulMode(d["arr_scalar"].cast<int>());
-    m.scalar_arr = ToMulMode(d["scalar_arr"].cast<int>());
-    m.kron = ToMulMode(d["kron"].cast<int>());
-    m.np_scalar = ToMulMode(d["np_scalar"].cast<int>());
-    m.linalg = ToMulMode(d["linalg"].cast<int>());
-    m.py = ToMulMode(d["py"].cast<int>());
-    m.py_mixed = d["py_mixed"].cast<bool>();
-    m.np_div = d["np_div"].cast<int>() != 0 ? DivMode::kFma : DivMode::kPlain;
-    m.py_exp_joint = d["py_exp_joint"].cast<bool>();
-    m.np_exp_joint = d["np_exp_joint"].cast<bool>();
-    return m;
-}
-
-LinalgFunctions ToFunctions(const py::dict& fns, bool ilp64) {
-    LinalgFunctions f;
-    f.ilp64 = ilp64;
-    f.zgemm = Address(fns, "zgemm");
-    f.zsyrk = Address(fns, "zsyrk");
-    f.dgemv = Address(fns, "dgemv");
-    f.zdotc_sub = Address(fns, "zdotc_sub");
-    f.zgesdd = Address(fns, "zgesdd");
-    f.dsyevd = Address(fns, "dsyevd");
-    f.zgetrf = Address(fns, "zgetrf");
-    f.dgetrf = Address(fns, "dgetrf");
-    return f;
-}
-
-// numpy 语义部分（NumpyEuler）用到的 Python 常量矩阵（与 two_qubit.py 的模块常量逐位相同）。
-KakConstants ToNumpyConstants(const py::dict& d) {
-    KakConstants c = KakConstants::Make();
-    auto m2 = [&](const char* key) { return ToMatrix<4>(d[key].cast<ComplexArray>()); };
-    c.i2 = m2("i2");
-    c.x = m2("x");
-    c.h = m2("h");
-    c.sx = m2("sx");
-    return c;
-}
 // 合成结果 → Python 的 (name, qubits, params) 元组列表（与 two_qubit.SynthOp 相同）。
 class OpConverter {
  public:
@@ -151,22 +99,10 @@ class OpConverter {
     py::tuple q0_, q1_, q01_, q10_, empty_;
 };
 
-// 两比特 KAK 合成（确定性数值层，全平台逐位一致）与 numpy 语义的块合并辅助函数。
-//
-// functions / modes 为 None 时只提供 KAK 合成；否则同时构建 NumpyEuler（verified_euler、block_unitary、
-// run_unitary、单比特合成与 KakLinalg），它们与本平台的 numpy 逐位一致。
+// 两比特 KAK 合成、单比特合成与块合并的辅助函数（确定性数值层，全平台逐位一致）。
 class PyKakSynthesizer {
  public:
-    PyKakSynthesizer(const py::object& fns, bool ilp64, const py::object& modes, const py::dict& constants) {
-        if (!fns.is_none() && !modes.is_none()) {
-            numpy_ = std::make_unique<NumpyEuler>(ToFunctions(fns.cast<py::dict>(), ilp64),
-                                                  ToModes(modes.cast<py::dict>()), ToNumpyConstants(constants));
-        }
-    }
-
-    bool HasNumpy() const {
-        return numpy_ != nullptr;
-    }
+    PyKakSynthesizer() = default;
 
     int AddEntangler(const std::string& name, const ComplexArray& matrix, const ComplexArray& b0,
                      const ComplexArray& b1, const ComplexArray& a0, const ComplexArray& a1, bool symmetric) {
@@ -231,34 +167,29 @@ class PyKakSynthesizer {
         return KakSynthesizer::CountFromCoords(impl_.Kak4(m).v, atol);
     }
 
-    // ---- numpy 语义部分（HasNumpy() 为 false 时抛出 RuntimeError）----
+    // ---- 块合并 ----
 
-    // _verified_euler_ops_uncached：ops；False = Python 返回 None；None = 交给 Python。
+    // _verified_euler_ops_uncached：ops；False = Python 返回 None；None = 输入含非有限值（交给 Python）。
     py::object VerifiedEuler(const ComplexArray& u, double atol, int euler) const {
-        const NumpyEuler& np = Numpy();
-        last_fallback_.clear();
         try {
-            const auto ops = np.VerifiedEuler(ToMatrix<4>(u), atol, euler);
+            const auto ops = impl_.VerifiedEuler(ToMatrix<4>(u), atol, euler);
             if (!ops) {
                 return py::bool_(false);
             }
             return conv_.Convert(*ops, py::str("?"));
-        } catch (const Fallback& e) {
-            last_fallback_ = e.what();
+        } catch (const SynthesisFailed&) {
             return py::none();
         }
     }
 
-    // 块的 4×4 酉矩阵（见 NumpyEuler::BlockUnitary）。
-    py::array_t<std::complex<double>> BlockUnitary(const py::list& mats, const std::vector<int>& slots,
-                                                   const ComplexArray& swap4) const {
-        const NumpyEuler& np = Numpy();
+    // 块的 4×4 酉矩阵（见 KakSynthesizer::BlockUnitary）。
+    py::array_t<std::complex<double>> BlockUnitary(const py::list& mats, const std::vector<int>& slots) const {
         if (mats.size() != slots.size()) {
             throw std::invalid_argument("one slot per matrix");
         }
         std::vector<ComplexArray> keep;
         keep.reserve(mats.size());
-        std::vector<NumpyEuler::BlockMember> members;
+        std::vector<KakSynthesizer::BlockMember> members;
         members.reserve(mats.size());
         for (std::size_t i = 0; i < mats.size(); ++i) {
             keep.push_back(mats[i].cast<ComplexArray>());
@@ -269,59 +200,32 @@ class PyKakSynthesizer {
             }
             members.push_back({reinterpret_cast<const Cx*>(keep.back().data()), slot});
         }
-        return FromMatrix(np.BlockUnitary(members, ToMatrix<16>(swap4)));
+        return FromMatrix(impl_.BlockUnitary(members));
     }
 
-    // 与 BlockUnitary / RunUnitary 相同，但先核对每个矩阵都是 C 连续的 complex128 数组
-    // （numpy 的 BLAS 调用取决于操作数的布局；与 Python 端 m.dtype == complex128 and
-    // m.flags.c_contiguous 的判断相同，run 还要求形状为 (2, 2)），否则返回 None。
-    py::object BlockUnitaryStrict(const py::list& mats, const std::vector<int>& slots,
-                                  const ComplexArray& swap4) const {
-        for (const auto item : mats) {
-            if (!StrictArray::check_(item)) {
-                return py::none();
-            }
-        }
-        return BlockUnitary(mats, slots, swap4);
-    }
-    py::object RunUnitaryStrict(const py::list& mats) const {
-        for (const auto item : mats) {
-            if (!StrictArray::check_(item)) {
-                return py::none();
-            }
-            const auto arr = py::reinterpret_borrow<py::array>(item);
-            if (arr.ndim() != 2 || arr.shape(0) != 2 || arr.shape(1) != 2) {
-                return py::none();
-            }
-        }
-        return RunUnitary(mats);
-    }
-
-    // 单比特门串的矩阵：u = I；对每个门 u = m @ u（numpy 的 2×2 乘法）。
+    // 单比特门串的矩阵：u = I；对每个门 u = m @ u。
     py::array_t<std::complex<double>> RunUnitary(const py::list& mats) const {
-        const NumpyLinalg& la = Numpy().linalg();
         M2 u{Cx{1.0, 0.0}, Cx{0.0, 0.0}, Cx{0.0, 0.0}, Cx{1.0, 0.0}};
         for (const auto item : mats) {
-            const M2 m = ToMatrix<4>(item.cast<ComplexArray>());
-            M2 next;
-            la.MatMul(2, View(m), View(u), next.data());
-            u = next;
+            u = detmath::MatMul(ToMatrix<4>(item.cast<ComplexArray>()), u);
         }
         return FromMatrix(u);
     }
 
-    // ---- 单比特合成（numpy 语义）----
-    int AddOneQubitBasis(const py::list& fixed, bool rz, bool h, bool x, bool sx, bool sxdg, bool rx, bool ry,
+    // _mapping._swap_residual 的数值部分：(A, B) 或 None。
+    py::object SwapResidual(const ComplexArray& u, double tol) const {
+        const auto res = KakSynthesizer::SwapResidual(ToMatrix<16>(u), tol);
+        if (!res) {
+            return py::none();
+        }
+        return py::make_tuple(FromMatrix((*res)[0]), FromMatrix((*res)[1]));
+    }
+
+    // ---- 单比特合成 ----
+    int AddOneQubitBasis(bool rz, bool h, bool x, bool sx, bool sxdg, bool rx, bool ry,
                          bool u3, const py::dict& words, const std::vector<int>& named) {
         if (!one_qubit_) {
-            if (fixed.size() != kNumFixedGates) {
-                throw std::invalid_argument("need the matrices of the 10 fixed gates");
-            }
-            std::array<M2, kNumFixedGates> mats;
-            for (std::size_t i = 0; i < mats.size(); ++i) {
-                mats[i] = ToMatrix<4>(fixed[i].cast<ComplexArray>());
-            }
-            one_qubit_ = std::make_unique<OneQubitSynthesizer>(Numpy().linalg().modes(), mats);
+            one_qubit_ = std::make_unique<OneQubitSynthesizer>();
         }
         OneQubitBasis b;
         b.rz = rz;
@@ -351,9 +255,8 @@ class PyKakSynthesizer {
     }
 
     // _synthesize_one_qubit：(0, [(kind, index, p0, p1, p2), ...])；(1, None) = Python 返回 None；
-    // (2, None) = 交给 Python。
+    // (2, None) = 输入含非有限值（交给 Python）。
     py::tuple SynthesizeOneQubit(const ComplexArray& m, int basis) const {
-        last_fallback_.clear();
         if (!one_qubit_ || basis < 0 || static_cast<std::size_t>(basis) >= one_qubit_bases_.size()) {
             throw std::invalid_argument("unknown single-qubit basis");
         }
@@ -368,15 +271,14 @@ class PyKakSynthesizer {
                 out[i] = py::make_tuple(g.kind, g.index, g.p0, g.p1, g.p2);
             }
             return py::make_tuple(0, out);
-        } catch (const Fallback& e) {
-            last_fallback_ = e.what();
+        } catch (const std::domain_error&) {
             return py::make_tuple(2, py::none());
         }
     }
 
-    py::tuple ZyzAngles(const ComplexArray& m) const {
+    py::tuple ZyzAngles(const ComplexArray& m) {
         if (!one_qubit_) {
-            throw std::invalid_argument("no single-qubit basis registered");
+            one_qubit_ = std::make_unique<OneQubitSynthesizer>();
         }
         const auto a = one_qubit_->ZyzAngles(ToMatrix<4>(m));
         return py::make_tuple(a[0], a[1], a[2]);
@@ -411,44 +313,7 @@ class PyKakSynthesizer {
         return KakSynthesizer::AxisAngle(ToMatrix<4>(w), ToMatrix<4>(pauli));
     }
 
-    // numpy 语义的乘法与行列式（探测 / 对拍用）。
-    py::array_t<std::complex<double>> MatMul(const ComplexArray& a, const ComplexArray& b, bool a_t, bool b_t) const {
-        const auto n = static_cast<int>(a.shape(0));
-        std::vector<Cx> out(static_cast<std::size_t>(n * n));
-        const Cx* pa = reinterpret_cast<const Cx*>(a.data());
-        const Cx* pb = reinterpret_cast<const Cx*>(b.data());
-        const CView va = a_t ? CView{pa, 1, n} : CView{pa, n, 1};
-        const CView vb = b_t ? CView{pb, 1, n} : CView{pb, n, 1};
-        Numpy().linalg().MatMul(n, va, vb, out.data());
-        py::array_t<std::complex<double>> res({n, n});
-        std::memcpy(res.mutable_data(), out.data(), out.size() * sizeof(Cx));
-        return res;
-    }
-
-    std::complex<double> Det(const ComplexArray& a) const {
-        const auto n = static_cast<int>(a.shape(0));
-        const Cx* pa = reinterpret_cast<const Cx*>(a.data());
-        const Cx d = Numpy().linalg().Det(n, CView{pa, n, 1});
-        return {d.re, d.im};
-    }
-
-    // 最近一次退回 Python 的原因（numpy 语义部分，诊断用）。
-    const std::string& LastFallback() const {
-        return last_fallback_;
-    }
-
-    // numpy 语义的线性代数（单比特门最小化等其他原生实现复用）；没有 numpy 部分时为 nullptr。
-    const synthesis::NumpyLinalg* Linalg() const {
-        return numpy_ ? &numpy_->linalg() : nullptr;
-    }
-
  private:
-    const NumpyEuler& Numpy() const {
-        if (!numpy_) {
-            throw std::runtime_error("numpy-semantics operations are not available on this synthesizer");
-        }
-        return *numpy_;
-    }
 
     SynthOptions Options(int entangler, int euler, double atol, double verify_atol, bool swap_face_template,
                          bool mirrored) const {
@@ -470,101 +335,86 @@ class PyKakSynthesizer {
     }
 
     KakSynthesizer impl_;
-    std::unique_ptr<NumpyEuler> numpy_;
     OpConverter conv_;
     std::vector<py::str> names_;
-    mutable std::string last_fallback_;
     std::unique_ptr<OneQubitSynthesizer> one_qubit_;
     std::vector<OneQubitBasis> one_qubit_bases_;
 };
-// 逐元素运算的各种运算顺序（探测 numpy / CPython 的实际语义用）：op 0 = 乘法（mode 0–2），1 = numpy
-// 复数除法（mode 0–1），2 = CPython complex * float（mode 0–2 为完整复数乘法，3 = 混合运算）。
-py::array_t<std::complex<double>> Arith(int op, int mode, const ComplexArray& a, const ComplexArray& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("operand sizes differ");
+// gate_matrix(gate) 的确定性实现：未知门名或参数个数不对时返回 None（由 Python 端报错）。
+py::object GateMatrixPy(const std::string& name, const std::vector<double>& params) {
+    Cx out[64];
+    int dim = 0;
+    if (!GateMatrix(name, params.data(), static_cast<int>(params.size()), out, &dim)) {
+        return py::none();
     }
-    const auto n = static_cast<std::size_t>(a.size());
-    const Cx* pa = reinterpret_cast<const Cx*>(a.data());
-    const Cx* pb = reinterpret_cast<const Cx*>(b.data());
-    py::array_t<std::complex<double>> out(static_cast<py::ssize_t>(n));
-    Cx* po = reinterpret_cast<Cx*>(out.mutable_data());
-    for (std::size_t i = 0; i < n; ++i) {
-        switch (op) {
-            case 0:
-                po[i] = Mul(ToMulMode(mode), pa[i], pb[i]);
-                break;
-            case 1:
-                po[i] = NpDiv(mode != 0 ? DivMode::kFma : DivMode::kPlain, pa[i], pb[i]);
-                break;
-            default: {
-                ArithModes m;
-                m.py_mixed = mode == 3;
-                m.py = ToMulMode(mode == 3 ? 0 : mode);
-                po[i] = PyMulReal(m, pa[i], pb[i].re);
-                break;
-            }
-        }
-    }
+    py::array_t<std::complex<double>> arr({static_cast<py::ssize_t>(dim), static_cast<py::ssize_t>(dim)});
+    std::memcpy(arr.mutable_data(), out, sizeof(Cx) * static_cast<std::size_t>(dim * dim));
+    return std::move(arr);
+}
+
+py::array_t<std::complex<double>> FromM8(const M8& m) {
+    py::array_t<std::complex<double>> out({static_cast<py::ssize_t>(8), static_cast<py::ssize_t>(8)});
+    std::memcpy(out.mutable_data(), m.data(), sizeof(M8));
     return out;
 }
 
-// CPython / libm 标量函数（对拍用）：0 = cmath.sqrt，1 = cmath.exp（分别求 sin、cos），2 = cmath.phase，
-// 3 = math.atan2(im, re)，4 = libm atan2(im, re)，5 = (cos(im), sin(im))，6 = abs，7 = cmath.exp（合并的 sincos），
-// 8 = 合并的 sincos 求 (cos(im), sin(im))。
-py::array_t<std::complex<double>> Scalar(int fn, const ComplexArray& a) {
-    const auto n = static_cast<std::size_t>(a.size());
-    const Cx* pa = reinterpret_cast<const Cx*>(a.data());
-    py::array_t<std::complex<double>> out(static_cast<py::ssize_t>(n));
-    Cx* po = reinterpret_cast<Cx*>(out.mutable_data());
-    for (std::size_t i = 0; i < n; ++i) {
-        const Cx& z = pa[i];
-        switch (fn) {
-            case 0:
-                po[i] = PySqrt(z);
-                break;
-            case 1:
-            case 7: {
-                ArithModes m;
-                m.py_exp_joint = fn == 7;
-                po[i] = PyExp(m, z);
-                break;
-            }
-            case 2:
-                po[i] = Cx{PyPhase(z), 0.0};
-                break;
-            case 3:
-                po[i] = Cx{PyAtan2(z.im, z.re), 0.0};
-                break;
-            case 4:
-                po[i] = Cx{std::atan2(z.im, z.re), 0.0};
-                break;
-            case 5:
-                po[i] = Cx{SeparateCos(z.im), SeparateSin(z.im)};
-                break;
-            case 8: {
-                double s;
-                double c;
-                JointSinCos(z.im, &s, &c);
-                po[i] = Cx{c, s};
-                break;
-            }
-            default:
-                po[i] = Cx{PyAbs(z), 0.0};
-                break;
-        }
+// _three_qubit 的块酉矩阵：u = I；对每个 (矩阵, 局部比特) 左乘。
+py::array_t<std::complex<double>> ThreeQubitUnitaryPy(const py::list& mats,
+                                                      const std::vector<std::vector<int>>& qubits) {
+    if (mats.size() != qubits.size()) {
+        throw std::invalid_argument("one qubit tuple per matrix");
     }
-    return out;
+    std::vector<ComplexArray> keep;
+    keep.reserve(mats.size());
+    std::vector<LocalGate> gates;
+    gates.reserve(mats.size());
+    for (std::size_t i = 0; i < mats.size(); ++i) {
+        keep.push_back(mats[i].cast<ComplexArray>());
+        const auto dim = static_cast<py::ssize_t>(1) << qubits[i].size();
+        if (qubits[i].empty() || qubits[i].size() > 3 || keep.back().size() != dim * dim) {
+            throw std::invalid_argument("matrix size does not match its qubits");
+        }
+        gates.push_back({reinterpret_cast<const Cx*>(keep.back().data()), qubits[i]});
+    }
+    return FromM8(ThreeQubitUnitary(gates));
+}
+
+M8 ToM8(const ComplexArray& a) {
+    if (a.size() != 64) {
+        throw std::invalid_argument("expected an 8x8 matrix");
+    }
+    M8 m;
+    std::memcpy(m.data(), a.data(), sizeof(M8));
+    return m;
+}
+
+py::object DemultiplexPy(const ComplexArray& a, const ComplexArray& b) {
+    const auto r = Demultiplex(ToMatrix<16>(a), ToMatrix<16>(b));
+    if (!r) {
+        return py::none();
+    }
+    return py::make_tuple(FromMatrix(r->v), FromMatrix(r->w),
+                          py::make_tuple(r->phases[0], r->phases[1], r->phases[2], r->phases[3]));
+}
+
+py::object CosSinPy(const ComplexArray& u) {
+    const auto r = CosSinDecompose(ToM8(u));
+    if (!r) {
+        return py::none();
+    }
+    py::array_t<double> theta(4);
+    std::memcpy(theta.mutable_data(), r->theta.data(), sizeof(double) * 4);
+    return py::make_tuple(py::make_tuple(FromMatrix(r->u1), FromMatrix(r->u2)), theta,
+                          py::make_tuple(FromMatrix(r->v1h), FromMatrix(r->v2h)));
 }
 
 }  // namespace
 
 void BindSynthesis(py::module_& m) {
     py::class_<PyKakSynthesizer>(m, "_KakSynthesizer", py::module_local(),
-                                 "Two-qubit KAK synthesis on the deterministic numerics layer (bit-identical on all "
-                                 "platforms), plus numpy-semantics block helpers when functions/modes are given.")
-        .def(py::init<const py::object&, bool, const py::object&, const py::dict&>(), py::arg("functions"),
-             py::arg("ilp64"), py::arg("modes"), py::arg("constants"))
-        .def_property_readonly("has_numpy", &PyKakSynthesizer::HasNumpy)
+                                 "Two-qubit KAK synthesis, single-qubit synthesis and block products on the "
+                                 "deterministic numerics layer (bit-identical on all platforms).")
+        .def(py::init<>())
         .def("add_entangler", &PyKakSynthesizer::AddEntangler, py::arg("name"), py::arg("matrix"), py::arg("before0"),
              py::arg("before1"), py::arg("after0"), py::arg("after1"), py::arg("symmetric"))
         .def("synthesize", &PyKakSynthesizer::Synthesize, py::arg("u"), py::arg("entangler"), py::arg("euler"),
@@ -575,38 +425,34 @@ void BindSynthesis(py::module_& m) {
         .def("swap_face", &PyKakSynthesizer::SwapFace, py::arg("u"), py::arg("entangler"), py::arg("euler"),
              py::arg("verify_atol"), py::arg("mirrored"))
         .def("num_cz", &PyKakSynthesizer::NumCz, py::arg("u"), py::arg("atol"))
-        .def("add_one_qubit_basis", &PyKakSynthesizer::AddOneQubitBasis, py::arg("fixed"), py::arg("rz"), py::arg("h"),
-             py::arg("x"), py::arg("sx"), py::arg("sxdg"), py::arg("rx"), py::arg("ry"), py::arg("u3"),
-             py::arg("words"), py::arg("named"))
+        .def("add_one_qubit_basis", &PyKakSynthesizer::AddOneQubitBasis, py::arg("rz"), py::arg("h"), py::arg("x"),
+             py::arg("sx"), py::arg("sxdg"), py::arg("rx"), py::arg("ry"), py::arg("u3"), py::arg("words"),
+             py::arg("named"))
         .def("synthesize_one_qubit", &PyKakSynthesizer::SynthesizeOneQubit, py::arg("m"), py::arg("basis"))
         .def("zyz_angles", &PyKakSynthesizer::ZyzAngles, py::arg("m"))
         .def("verified_euler", &PyKakSynthesizer::VerifiedEuler, py::arg("u"), py::arg("atol"), py::arg("euler"))
-        .def("block_unitary", &PyKakSynthesizer::BlockUnitary, py::arg("mats"), py::arg("slots"), py::arg("swap4"))
+        .def("block_unitary", &PyKakSynthesizer::BlockUnitary, py::arg("mats"), py::arg("slots"))
         .def("run_unitary", &PyKakSynthesizer::RunUnitary, py::arg("mats"))
-        .def("block_unitary_strict", &PyKakSynthesizer::BlockUnitaryStrict, py::arg("mats"), py::arg("slots"),
-             py::arg("swap4"))
-        .def("run_unitary_strict", &PyKakSynthesizer::RunUnitaryStrict, py::arg("mats"))
+        .def("swap_residual", &PyKakSynthesizer::SwapResidual, py::arg("u"), py::arg("tol"))
         .def("kak4", &PyKakSynthesizer::Kak4, py::arg("u"))
         .def("factor_local", &PyKakSynthesizer::FactorLocal, py::arg("k"))
         .def("euler_ops", &PyKakSynthesizer::EulerOps, py::arg("m"), py::arg("qubit"), py::arg("basis"),
              py::arg("atol"))
         .def("kron2", &PyKakSynthesizer::Kron2, py::arg("a"), py::arg("b"))
         .def("axis_rot", &PyKakSynthesizer::AxisRot, py::arg("pauli"), py::arg("phi"))
-        .def("axis_angle", &PyKakSynthesizer::AxisAngle, py::arg("w"), py::arg("pauli"))
-        .def("matmul", &PyKakSynthesizer::MatMul, py::arg("a"), py::arg("b"), py::arg("a_t"), py::arg("b_t"))
-        .def("det", &PyKakSynthesizer::Det, py::arg("a"))
-        .def_property_readonly("last_fallback", &PyKakSynthesizer::LastFallback);
-    m.def("_synthesis_arith", &Arith, py::arg("op"), py::arg("mode"), py::arg("a"), py::arg("b"),
-          "Elementwise complex arithmetic in one of the candidate evaluation orders (semantics probes).");
-    m.def("_synthesis_scalar", &Scalar, py::arg("fn"), py::arg("a"),
-          "CPython / libm scalar functions as reproduced by the native synthesis (semantics probes).");
-}
-
-const synthesis::NumpyLinalg* KakLinalg(py::handle obj) {
-    if (!py::isinstance<PyKakSynthesizer>(obj)) {
-        return nullptr;
-    }
-    return obj.cast<const PyKakSynthesizer&>().Linalg();
+        .def("axis_angle", &PyKakSynthesizer::AxisAngle, py::arg("w"), py::arg("pauli"));
+    m.def("_three_qubit_unitary", &ThreeQubitUnitaryPy, py::arg("mats"), py::arg("qubits"),
+          "8x8 unitary of gates on local qubits (0 = high), deterministic products.");
+    m.def(
+        "_three_qubit_distance",
+        [](const ComplexArray& u, const ComplexArray& v) { return ThreeQubitDistance(ToM8(u), ToM8(v)); },
+        py::arg("u"), py::arg("v"), "Phase-aligned max distance of two 8x8 matrices (inf if orthogonal).");
+    m.def("_three_qubit_demultiplex", &DemultiplexPy, py::arg("a"), py::arg("b"),
+          "(V, W, phases) with A = V D W, B = V D^dagger W, or None (deterministic eigendecomposition).");
+    m.def("_three_qubit_cossin", &CosSinPy, py::arg("u"),
+          "((u1, u2), theta, (v1h, v2h)) as scipy.linalg.cossin(u, p=4, q=4, separate=True), or None.");
+    m.def("_gate_matrix", &GateMatrixPy, py::arg("name"), py::arg("params"),
+          "Deterministic matrix of a standard gate (None for an unknown name or a wrong parameter count).");
 }
 
 }  // namespace quspect::native::pybind

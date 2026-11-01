@@ -1,7 +1,9 @@
 #pragma once
 
 // 单比特门运行类原生实现（单比特门最小化 gauge_bindings.cpp、目标门集翻译 basis_bindings.cpp）
-// 共用的辅助：指令属性读取、numpy 语义的 2×2 乘法、按矩阵字节缓存的合成回调、指令的直接构造。
+// 共用的辅助：指令属性读取、确定性的 2×2 乘法、按矩阵字节缓存的合成回调、指令的直接构造。
+//
+// 本头文件包含 detmath 运算，只能在 QSPECT_EXACT_FP_SRCS 中的源文件里使用。
 
 #include <array>
 #include <complex>
@@ -14,7 +16,7 @@
 #include <pybind11/pybind11.h>
 
 #include "py_interned.hpp"
-#include "quspect_native/synthesis/numpy_compat.hpp"
+#include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/transpiler/one_qubit_gauge.hpp"
 
 namespace quspect::native::pybind::runs {
@@ -81,8 +83,7 @@ inline void ReadBits(PyObject* t, std::vector<long long>* out) {
     }
 }
 
-// C 连续、本机字节序 complex128 的 2×2 数组 → Matrix2；其他布局 Decline（numpy 的乘法会按布局
-// 选不同的 BLAS 调用）。
+// C 连续、本机字节序 complex128 的 2×2 数组 → Matrix2；其他布局 Decline（交给 Python）。
 inline Matrix2 ReadMatrix2(PyObject* obj) {
     if (!py::isinstance<py::array>(obj)) {
         throw Decline{};
@@ -108,43 +109,35 @@ inline Matrix2 Identity2() {
     return {Complex{1.0, 0.0}, Complex{0.0, 0.0}, Complex{0.0, 0.0}, Complex{1.0, 0.0}};
 }
 
-// numpy 语义的 2×2 复数乘法（numpy 自己的 BLAS，见 synthesis::NumpyLinalg::MatMul）。
+// 2×2 复数乘法（确定性数值层：固定求和顺序，不含 FMA）。
 class Mat2 {
  public:
-    explicit Mat2(const synthesis::NumpyLinalg& la) : la_(la) {}
-
-    // ``a @ b``（两者都是 C 连续 complex128）。
+    // ``a @ b``（与 detmath::MatMul(2, ...) 的运算逐项相同，内联展开）。
     Matrix2 Mul(const Matrix2& a, const Matrix2& b) const {
-        Matrix2 out;
-        la_.MatMul(2, View(a), View(b), Out(&out));
-        return out;
+        auto entry = [&a, &b](int i, int j) {
+            const Complex s0 = detmath::Add(Complex{0.0, 0.0}, detmath::Mul(a[i * 2], b[j]));
+            return detmath::Add(s0, detmath::Mul(a[i * 2 + 1], b[2 + j]));
+        };
+        return {entry(0, 0), entry(0, 1), entry(1, 0), entry(1, 1)};
     }
-    // ``a.T @ b``（a 为 C 连续数组，左操作数是它的转置视图）。
+    // ``a.T @ b``。
     Matrix2 MulT(const Matrix2& a, const Matrix2& b) const {
         Matrix2 out;
-        la_.MatMul(2, synthesis::CView{Data(a), 1, 2}, View(b), Out(&out));
+        detmath::MatMulTransA(2, In(a), In(b), Out(&out));
         return out;
     }
-    // ``a @ np.eye(2)``（float64 单位阵：numpy 先把它转换成 C 连续的复数数组）。
+    // ``a @ np.eye(2)``。
     Matrix2 MulRealIdentity(const Matrix2& a) const {
-        static const double kEye[4] = {1.0, 0.0, 0.0, 1.0};
-        Matrix2 out;
-        la_.MatMul(2, View(a), synthesis::RView{kEye, 2, 1}, Out(&out));
-        return out;
+        return Mul(a, Identity2());
     }
 
  private:
-    static const synthesis::Cx* Data(const Matrix2& m) {
-        return reinterpret_cast<const synthesis::Cx*>(m.data());
+    static const detmath::Cx* In(const Matrix2& m) {
+        return m.data();
     }
-    static synthesis::CView View(const Matrix2& m) {
-        return {Data(m), 2, 1};
+    static detmath::Cx* Out(Matrix2* m) {
+        return m->data();
     }
-    static synthesis::Cx* Out(Matrix2* m) {
-        return reinterpret_cast<synthesis::Cx*>(m->data());
-    }
-
-    const synthesis::NumpyLinalg& la_;
 };
 
 // ``synthesize_one_qubit(m, basis)`` 的回调：逐位相同的矩阵只调用一次（函数是纯的，结果相同）。

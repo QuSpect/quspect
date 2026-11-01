@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <utility>
 
@@ -96,6 +97,26 @@ double OffDiagonalResidual(const std::array<double, 16>& p, const M4& m) {
         }
     }
     return err;
+}
+
+// 两个 KAK 结果逐位相同（相位、坐标与局部因子）。
+bool SameKak(const Kak& a, const Kak& b) {
+    auto same = [](double x, double y) { return std::memcmp(&x, &y, sizeof(double)) == 0; };
+    if (!same(a.phase, b.phase)) {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!same(a.v[static_cast<std::size_t>(i)], b.v[static_cast<std::size_t>(i)])) {
+            return false;
+        }
+    }
+    for (std::size_t e = 0; e < 16; ++e) {
+        if (!same(a.k1[e].re, b.k1[e].re) || !same(a.k1[e].im, b.k1[e].im) || !same(a.k2[e].re, b.k2[e].re)
+            || !same(a.k2[e].im, b.k2[e].im)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string FailureMessage(double best) {
@@ -605,6 +626,125 @@ M2 KakSynthesizer::OpsLayerMatrix(const std::vector<Op>& ops, std::size_t begin,
     return m;
 }
 
+std::optional<std::vector<Op>> KakSynthesizer::VerifiedEuler(const M2& u, double atol, int basis) const {
+    for (double tol : {atol, std::min(atol, kExactEulerAtol)}) {
+        std::vector<Op> ops;
+        EulerOps(u, 0, basis, tol, &ops);
+        const M2 v = OpsLayerMatrix(ops, 0, ops.size());
+        // overlap = np.vdot(v, u)；phase = overlap / abs(overlap)；max |u − phase·v| <= 1e-9
+        const Cx overlap = dm::Vdot(4, v.data(), u.data());
+        const double ab = dm::Abs(overlap);
+        Cx phase{1.0, 0.0};
+        if (ab > 1e-300) {
+            phase = dm::DivReal(overlap, ab);
+        }
+        double dist = 0.0;
+        for (int e = 0; e < 4; ++e) {
+            const double a = dm::Abs(dm::Sub(u[e], dm::Mul(phase, v[e])));
+            dist = (a == a) ? std::max(dist, a) : a;
+            if (!(a == a)) {
+                break;
+            }
+        }
+        if (Verified(dist, 1e-9)) {
+            return ops;
+        }
+    }
+    return std::nullopt;
+}
+
+M4 KakSynthesizer::BlockUnitary(const std::vector<BlockMember>& members) const {
+    M4 u{};
+    for (int i = 0; i < 4; ++i) {
+        u[static_cast<std::size_t>(i * 5)] = Cx{1.0, 0.0};
+    }
+    for (const BlockMember& member : members) {
+        M4 full;
+        switch (member.slot) {
+            case 0:
+                std::copy(member.matrix, member.matrix + 16, full.begin());
+                break;
+            case 1:
+            case 2: {
+                M2 m;
+                std::copy(member.matrix, member.matrix + 4, m.begin());
+                full = member.slot == 1 ? Kron2(m, c_.i2) : Kron2(c_.i2, m);
+                break;
+            }
+            case 3: {
+                constexpr int kRev[4] = {0, 2, 1, 3};
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        full[static_cast<std::size_t>(r * 4 + c)] = member.matrix[kRev[r] * 4 + kRev[c]];
+                    }
+                }
+                break;
+            }
+            default: {
+                M4 m;
+                std::copy(member.matrix, member.matrix + 16, m.begin());
+                full = Mat4(Mat4(c_.swap4, m), c_.swap4);
+                break;
+            }
+        }
+        u = Mat4(full, u);
+    }
+    return u;
+}
+
+std::optional<std::array<M2, 2>> KakSynthesizer::SwapResidual(const M4& u, double tol) {
+    // w = SWAP @ u（行置换，精确）
+    constexpr int kSwap[4] = {0, 2, 1, 3};
+    M4 w;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            w[static_cast<std::size_t>(i * 4 + j)] = u[static_cast<std::size_t>(kSwap[i] * 4 + j)];
+        }
+    }
+    // r = w.reshape(2, 2, 2, 2).transpose(0, 2, 1, 3).reshape(4, 4)：r[(a, c), (b, d)] = w[(a, b), (c, d)]
+    M4 r;
+    for (int a = 0; a < 2; ++a) {
+        for (int b = 0; b < 2; ++b) {
+            for (int c = 0; c < 2; ++c) {
+                for (int d = 0; d < 2; ++d) {
+                    r[static_cast<std::size_t>((a * 2 + c) * 4 + b * 2 + d)] =
+                        w[static_cast<std::size_t>((a * 2 + b) * 4 + c * 2 + d)];
+                }
+            }
+        }
+    }
+    M4 left;
+    M4 right;
+    double sv[4];
+    if (!dm::Svd(4, r.data(), left.data(), sv, right.data())) {
+        return std::nullopt;
+    }
+    if (!(sv[1] <= tol * sv[0])) {
+        return std::nullopt;
+    }
+    const double scale = dm::Sqrt(sv[0]);
+    M2 ma;
+    M2 mb;
+    for (int k = 0; k < 4; ++k) {
+        ma[static_cast<std::size_t>(k)] = dm::Scale(left[static_cast<std::size_t>(k * 4)], scale);  // left[:, 0]
+        mb[static_cast<std::size_t>(k)] = dm::Scale(right[static_cast<std::size_t>(k)], scale);     // right[0, :]
+    }
+    const M4 prod = Kron2(ma, mb);
+    for (int e = 0; e < 16; ++e) {
+        const double diff = dm::Abs(dm::Sub(prod[static_cast<std::size_t>(e)], w[static_cast<std::size_t>(e)]));
+        if (!(diff <= tol + 1e-5 * dm::Abs(w[static_cast<std::size_t>(e)]))) {
+            return std::nullopt;
+        }
+    }
+    const Cx ra = dm::Sqrt(dm::Det(ma));
+    const Cx rb = dm::Sqrt(dm::Det(mb));
+    for (int k = 0; k < 4; ++k) {
+        ma[static_cast<std::size_t>(k)] = dm::Div(ma[static_cast<std::size_t>(k)], ra);
+        mb[static_cast<std::size_t>(k)] = dm::Div(mb[static_cast<std::size_t>(k)], rb);
+    }
+    return std::array<M2, 2>{ma, mb};
+}
+
 double KakSynthesizer::DistanceUpToPhase(const M4& u, const M4& v) {
     // overlap = vdot(v, u)；phase = overlap / |overlap|；max |u − phase·v|
     const Cx overlap = dm::Vdot(16, v.data(), u.data());
@@ -989,9 +1129,11 @@ std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const Kak& kak, con
     const bool boundary = std::fabs(a - b) <= kBoundaryTol || std::fabs(b - std::fabs(c)) <= kBoundaryTol ||
                           std::fabs(b) <= kBoundaryTol || std::fabs(c) <= kBoundaryTol ||
                           std::fabs(a - kPi4) <= kBoundaryTol;
-    if (boundary) {
+    // 第二种基给出逐位相同的 KAK（约三分之一的边界块）时合成结果相同，不必再合成
+    const Kak kak1 = boundary ? Kak4(u, 1) : Kak{};
+    if (boundary && !SameKak(kak1, kak)) {
         try {
-            ops1 = SynthesizeExactOnce(u, Kak4(u, 1), opt, &flag1, &best1);
+            ops1 = SynthesizeExactOnce(u, kak1, opt, &flag1, &best1);
         } catch (const SynthesisFailed&) {
             ok1 = false;
         }

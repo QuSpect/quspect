@@ -3,9 +3,9 @@
 :func:`~quspect.transpiler._gauge._minimize_driver` runs the whole
 minimization (runs and anchors, beam search, CX orientation sweep, emission)
 in C++; with ``QUSPECT_GAUGE_DRIVER=python`` the Python body drives the same
-native kernels.  Both must return identical circuits (instruction by
-instruction, including reused instruction objects and their order), with
-any number of threads for the initial search.
+native kernels and native 2×2 products.  Both must return identical circuits
+(instruction by instruction, including reused instruction objects and their
+order), with any number of threads for the initial search.
 """
 
 from __future__ import annotations
@@ -179,41 +179,3 @@ def test_driver_declines_instruction_subclasses(
     assert gauge._minimize_driver(qc, CZ_ONE, native) is None
     ref, got = _both(qc, CZ_ONE, monkeypatch)
     assert _signature(got) == _signature(ref)
-
-
-def test_probed_arithmetic_kernels_match_python(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kernels switched to the probed arithmetic still equal the Python body.
-
-    On platforms whose CPython / numpy do not contract complex products to
-    FMA the default kernels fail their self-check and the probed ones are
-    used; orient_cx_gates then stays disabled.  Here (whatever the platform)
-    the switch is forced and undone afterwards.
-    """
-    native = _native_kernels(_LengthModel(IBM_ONE))
-    assert native is not None
-    core = native.core
-    saved = dict(gauge._NATIVE_CACHE)
-    try:
-        gauge._NATIVE_CACHE.clear()
-        probed = gauge._probed_kernels(core, _LengthModel(IBM_ONE))
-        if probed is None:
-            pytest.skip("probed arithmetic does not pass the self-check here")
-        assert not probed.orientation
-        assert gauge._ARITHMETIC == ["probed"]
-        qc = _random_circuit(9, 6, 400, True, IBM_ONE)
-        assert gauge.orient_cx_gates(qc, IBM_ONE) is qc
-        for driver in ("auto", "python"):
-            monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, driver)
-            got = gauge._minimize(qc, IBM_ONE, probed) if driver == "python" else None
-            if got is None:
-                got = gauge._minimize_driver(qc, IBM_ONE, probed)
-            ref = gauge._minimize(qc, IBM_ONE, None)
-            assert got is not None
-            assert _signature(got) == _signature(ref)
-    finally:
-        core._gauge_arithmetic(None)
-        gauge._ARITHMETIC[0] = "default"
-        gauge._NATIVE_CACHE.clear()
-        gauge._NATIVE_CACHE.update(saved)

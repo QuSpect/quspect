@@ -13,7 +13,14 @@ same (correctly rounded) result.
   file carries the same notice).
 - Files: `src/binary64/{sin,cos,tan,asin,acos,atan,atan2,exp,log,hypot,pow}/<name>.c`,
   plus the headers they include (`atan2/tint.h`, `log/dint.h`, `pow/{pow,dint,qint}.h`). Directory layout as
-  upstream. **No local modifications.**
+  upstream.
+- Local modifications (marked `quspect local modification` in the sources): the
+  "unexpected worst-case" branches of `atan2/tint.h` (`tint_tod`) and `pow/pow.c` print the
+  inputs and call `exit(1)`, which would kill the host process. They now fall through and
+  round the high-precision approximation (deterministic; possibly not correctly rounded in such
+  a case). The atan2 branch was reached at `y, x = 0x1.7fffffffffffdp-53, 0x1.ffffffffffffap-3`
+  while transpiling `qiskit_hrs_multiplier_13` (the fall-through gives the correctly rounded
+  `0x1.8000000000002p-51`, checked with mpmath at 2000 bits); to be reported upstream.
 
 Build notes (see `cpp/CMakeLists.txt`):
 

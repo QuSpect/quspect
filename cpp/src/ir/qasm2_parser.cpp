@@ -1,6 +1,8 @@
 #include "quspect_native/ir/qasm2_parser.hpp"
 
 #include <cmath>
+
+#include "quspect_native/detmath/scalar.hpp"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -200,7 +202,7 @@ double PythonPow(double iv, double iw) {
     if (iv == 1.0) {
         return negate ? -1.0 : 1.0;
     }
-    double ix = std::pow(iv, iw);
+    double ix = detmath::Pow(iv, iw);
     if (std::isinf(ix)) {
         Fail("power overflow");
     }
@@ -214,22 +216,22 @@ double ApplyFunc(Func f, double x) {
     double r = 0.0;
     switch (f) {
         case Func::kSin:
-            r = std::sin(x);
+            r = detmath::Sin(x);
             break;
         case Func::kCos:
-            r = std::cos(x);
+            r = detmath::Cos(x);
             break;
         case Func::kTan:
-            r = std::tan(x);
+            r = detmath::Tan(x);
             break;
         case Func::kExp:
-            r = std::exp(x);
+            r = detmath::Exp(x);
             break;
         case Func::kLn:
             if (!(x > 0.0)) {
                 Fail("log domain");
             }
-            r = std::log(x);
+            r = detmath::Log(x);
             break;
         case Func::kSqrt:
             if (x < 0.0) {

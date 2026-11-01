@@ -362,7 +362,7 @@ def _synthesize_one_qubit(m: np.ndarray, basis: frozenset[str]) -> list[Gate] | 
         em = _EMITTERS[basis] = _Emitter(basis)
     native = _native_backend()
     if native is not None:
-        # 原生实现与下面的 Python 实现逐位一致；不能复刻的输入交回 Python
+        # 原生实现（确定性数值层，全平台逐位一致）；含非有限值的输入交回 Python
         done, gates = native.one_qubit(m, em)
         if done:
             return gates

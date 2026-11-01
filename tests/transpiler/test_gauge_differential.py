@@ -3,16 +3,27 @@
 Round 13 replaced the per-wire Python beam search of
 :func:`~quspect.transpiler._gauge.minimize_single_qubit_gates` by a layered
 search over all wires (batched numpy products + C++ kernels) and sped up
-the KAK stabilizer choice; outputs must be bit-identical to the frozen
-round-12 code (:mod:`tests.transpiler._legacy_gauge_r12`).  Covered here:
+the KAK stabilizer choice; with the Python numerics, outputs must be
+bit-identical to the frozen round-12 code
+(:mod:`tests.transpiler._legacy_gauge_r12`).  Covered here:
 
 * the native kernels against their Python references (run lengths,
   leading angles, rotations) and the batched products against single ``@``;
-* ``minimize_single_qubit_gates`` (native and Python backends) against the
-  legacy function on random circuits in CZ / CX / IBM gates;
+* ``minimize_single_qubit_gates`` against the legacy function on random
+  circuits in CZ / CX / IBM gates (Python backend bit for bit; the native
+  backend, on the deterministic numerics layer, with the same gates and
+  angles equal to rounding);
 * whole :func:`~quspect.transpiler.transpile` runs against the round-12
-  pipeline (:mod:`tests.transpiler._r12_reference`) on benchmark circuits;
-  the full benchmark sweep is opt-in (``QUSPECT_DIFFERENTIAL_BENCHMARK=1``).
+  pipeline (:mod:`tests.transpiler._r12_reference`, Python numerics) on
+  benchmark circuits; the full benchmark sweep is opt-in
+  (``QUSPECT_DIFFERENTIAL_BENCHMARK=1``).
+
+The native kernels compute with correctly rounded math functions and
+fixed-order complex arithmetic (identical on every platform), the Python
+references with numpy / CPython and the platform libm; they agree to
+rounding, except where a decision sits on a threshold within rounding
+(lengths) or an angle is ill-conditioned (leading angles of nearly diagonal
+matrices).
 """
 
 from __future__ import annotations
@@ -41,6 +52,7 @@ from quspect.transpiler._gauge import (
 )
 from tests.transpiler._legacy_gauge_r12 import legacy_minimize_single_qubit_gates
 from tests.transpiler._r12_reference import (
+    _python_numerics,
     current_without_round_17,
     legacy_r12,
     transpile_signature,
@@ -113,7 +125,12 @@ def test_native_lengths_match_python(basis: frozenset[str]) -> None:
     native = _native_kernels(length)
     assert native is not None
     mats = _test_matrices(1, 3000)
-    assert native.lengths(np.array(mats)) == [length._fast(m) for m in mats]
+    got = native.lengths(np.array(mats))
+    ref = [length._fast(m) for m in mats]
+    # 只有阈值上的构造输入（1e-9 量级的旋转、恰为 π/2 的角）可能因舍入落到另一侧
+    differ = [i for i, (a, b) in enumerate(zip(got, ref, strict=True)) if a != b]
+    assert len(differ) <= len(mats) // 200
+    assert all(i >= 3000 for i in differ)  # 随机酉矩阵（前 3000 个）全部相同
 
 
 @native_only
@@ -122,17 +139,27 @@ def test_native_leading_angles_and_rotations_match_python() -> None:
     assert native is not None
     for m in _test_matrices(2, 1500):
         for axis in ("z", "x", "y"):
-            ref = [float(x).hex() for x in _leading_angles(m, axis)]
-            assert [x.hex() for x in native.leading(m, axis)] == ref
+            ref = np.array(_leading_angles(m, axis))
+            got = np.array(native.leading(m, axis))
+            assert got.shape == ref.shape
+            err = np.abs(np.remainder(got - ref + math.pi, 2 * math.pi) - math.pi)
+            v = _TO_Z[axis]
+            z = v.conj().T @ m @ v
+            # 近对角 / 近反对角（θ ≈ 0 或 π，含阈值 1e-10 附近的分支选择）时前导角
+            # 的条件数约为 1 / min(|z00|, |z01|)
+            small = min(
+                max(abs(z[0, 1]), abs(z[1, 0])), max(abs(z[0, 0]), abs(z[1, 1]))
+            )
+            assert err.max(initial=0.0) <= 1e-12 + 1e-15 / max(small, 1e-300)
     rng = np.random.default_rng(3)
     phis = [0.0, -0.0, math.pi, -math.pi, 2 * math.pi, 1e-300, 1e-9]
     phis += [float(x) for x in rng.normal(size=500) * 4]
     for axis in ("z", "x", "y"):
         for phi in phis:
-            assert native.rot(axis, phi).tobytes() == _rot(axis, phi).tobytes()
+            assert np.max(np.abs(native.rot(axis, phi) - _rot(axis, phi))) < 1e-15
         stack = native.rots(axis, phis)
         for phi, r in zip(phis, stack, strict=True):
-            assert r.tobytes() == _rot(axis, phi).tobytes()
+            assert r.tobytes() == native.rot(axis, phi).tobytes()
 
 
 def test_batched_products_equal_single_products() -> None:
@@ -192,11 +219,34 @@ def test_minimize_matches_round_12(
 ) -> None:
     if backend == "native" and _native_kernels(_LengthModel(CZ_ONE)) is None:
         pytest.skip("native kernels not built")
-    monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, backend)
     basis = IBM_ONE if ibm else CZ_ONE
     qc = _random_circuit(seed, two_qubit, ibm, 3 + seed % 4)
-    expected = _signature(legacy_minimize_single_qubit_gates(qc, basis))
-    assert _signature(minimize_single_qubit_gates(qc, basis)) == expected
+    with pytest.MonkeyPatch.context() as mp:
+        _python_numerics(mp)
+        expected = legacy_minimize_single_qubit_gates(qc, basis)
+    monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, backend)
+    if backend == "python":
+        with pytest.MonkeyPatch.context() as mp:
+            _python_numerics(mp)
+            got = minimize_single_qubit_gates(qc, basis)
+        assert _signature(got) == _signature(expected)
+    else:
+        _assert_close(minimize_single_qubit_gates(qc, basis), expected)
+
+
+def _assert_close(got: QuantumCircuit, ref: QuantumCircuit) -> None:
+    """Same gates on the same qubits; angles equal to rounding (mod 2π)."""
+
+    def strip(c: QuantumCircuit) -> list[tuple[object, ...]]:
+        return [(t, n, q, c_) for t, n, q, _, c_ in _signature(c)]
+
+    assert strip(got) == strip(ref)
+    for a, b in zip(got, ref, strict=True):
+        if a.gate is None:
+            continue
+        for x, y in zip(a.gate.params, b.gate.params, strict=True):
+            d = (float(x) - float(y) + math.pi) % (2 * math.pi) - math.pi
+            assert abs(d) < 1e-9
 
 
 def test_backend_env_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,8 +275,11 @@ def test_native_fallback_on_unreproducible_input(
     monkeypatch.setattr(native.core, "_GaugeBeamSearch", no_search)
     monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's kernels
     qc = _random_circuit(5, "cx", False, 4)
-    expected = _signature(legacy_minimize_single_qubit_gates(qc, CZ_ONE))
-    assert _signature(minimize_single_qubit_gates(qc, CZ_ONE)) == expected
+    with pytest.MonkeyPatch.context() as mp:
+        _python_numerics(mp)
+        expected = _signature(legacy_minimize_single_qubit_gates(qc, CZ_ONE))
+        mp.setenv(gauge.GAUGE_BACKEND_ENV, "auto")
+        assert _signature(minimize_single_qubit_gates(qc, CZ_ONE)) == expected
     assert not calls  # the batched search failed first and Python took over
 
 
@@ -239,6 +292,13 @@ def test_speculative_sweep_fallbacks_match_round_12(
     native = _native_kernels(_LengthModel(CZ_ONE))
     assert native is not None
     base = native.core._GaugeBeamSearch
+    monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, "native")
+    monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's sweep
+    cases = []
+    for ibm in (False, True):
+        basis = IBM_ONE if ibm else CZ_ONE
+        qc = _random_circuit(100 + seed, "cx", ibm, 5)
+        cases.append((qc, basis, _signature(minimize_single_qubit_gates(qc, basis))))
     rng = random.Random(seed)
 
     class Flaky(base):  # type: ignore[misc, valid-type]
@@ -250,12 +310,7 @@ def test_speculative_sweep_fallbacks_match_round_12(
             return ok and r < 0.6  # committed, then re-evaluated anyway
 
     monkeypatch.setattr(native.core, "_GaugeBeamSearch", Flaky)
-    monkeypatch.setenv(gauge.GAUGE_BACKEND_ENV, "native")
-    monkeypatch.setenv(gauge.GAUGE_DRIVER_ENV, "python")  # the Python body's sweep
-    for ibm in (False, True):
-        basis = IBM_ONE if ibm else CZ_ONE
-        qc = _random_circuit(100 + seed, "cx", ibm, 5)
-        expected = _signature(legacy_minimize_single_qubit_gates(qc, basis))
+    for qc, basis, expected in cases:
         assert _signature(minimize_single_qubit_gates(qc, basis)) == expected
 
 
