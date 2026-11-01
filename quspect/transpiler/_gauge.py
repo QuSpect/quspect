@@ -516,25 +516,33 @@ def orient_cx_gates(
     wire_ctrl: dict[int, list[int]] = {}
     wire_runs: dict[int, list[np.ndarray]] = {}
     current: dict[int, np.ndarray] = {}
+    pop = current.pop
     for idx, ins in enumerate(instrs):
-        if not ins.is_gate or ins.gate is None:
+        gate = ins.gate
+        if not ins.is_gate or gate is None:
             return circuit
-        if len(ins.qubits) == 1:
+        qubits = ins.qubits
+        if len(qubits) == 1:
             try:
-                m = np.asarray(gate_matrix(ins.gate), dtype=complex)
+                m = np.asarray(gate_matrix(gate), dtype=complex)
             except (KeyError, ValueError, TypeError):
                 return circuit
-            q = ins.qubits[0]
+            q = qubits[0]
             current[q] = native.mul(m, current[q]) if q in current else m
             continue
-        if ins.gate.name != "cx" or len(ins.qubits) != 2:
+        if gate.name != "cx" or len(qubits) != 2:
             return circuit
         g = len(cx_instr)
         cx_instr.append(idx)
-        for pos, q in enumerate(ins.qubits):
-            wire_runs.setdefault(q, []).append(current.pop(q, _I2))
-            wire_gates.setdefault(q, []).append(g)
-            wire_ctrl.setdefault(q, []).append(1 if pos == 0 else 0)
+        for q, is_control in ((qubits[0], 1), (qubits[1], 0)):
+            gates = wire_gates.get(q)
+            if gates is None:
+                gates = wire_gates[q] = []
+                wire_ctrl[q] = []
+                wire_runs[q] = []
+            gates.append(g)
+            wire_ctrl[q].append(is_control)
+            wire_runs[q].append(pop(q, _I2))
     if not cx_instr:
         return circuit
     wires = sorted(wire_gates)

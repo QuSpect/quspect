@@ -387,7 +387,7 @@ set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} ${DETMATH_SRCS} sr
     src/pybind/module.cpp src/pybind/dag_bindings.cpp src/pybind/dag_pass_bindings.cpp src/pybind/ir_bindings.cpp
     src/pybind/circuit_bindings.cpp src/pybind/consolidate_bindings.cpp src/pybind/replay_bindings.cpp
     src/pybind/schedule_bindings.cpp
-    tests/test_detmath.cpp tests/test_kak_synthesis.cpp tests/test_one_qubit_gauge.cpp)
+    tests/test_detmath.cpp tests/test_kak_synthesis.cpp tests/test_one_qubit_gauge.cpp tests/test_cx_orientation.cpp)
 if(NOT MSVC)
   set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math")
 else()
