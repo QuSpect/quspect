@@ -116,9 +116,9 @@ class KakSynthesizer {
     // ``_synthesize_two_qubit_ops(u, atol, verify_atol, basis)``；uses_flag：结果是否取决于
     // ``_SWAP_FACE_TEMPLATE``（三个纠缠门且在 SWAP 面上）。失败时抛出 SynthesisFailed。
     //
-    // 与 Python 参考实现的区别：分别用 Kak4 的两种基（variant 0、1）合成，取（纠缠门数，门数）
-    // 较小者（相同时取 variant 0）。简并点上两种基给出的单比特层长度不同，取较短者使结果不依赖
-    // 特征向量基的偶然选择。
+    // 与 Python 参考实现的区别：Weyl 点在室边界附近（简并，k1、k2 不唯一）时，分别用 Kak4 的
+    // 两种基（variant 0、1）合成，取（纠缠门数，门数）较小者（相同时取 variant 0）：两种基给出的
+    // 单比特层长度可能不同，取较短者使结果不依赖特征向量基的偶然选择。
     std::vector<Op> SynthesizeExact(const M4& u, const SynthOptions& opt, bool* uses_flag) const;
     // 同上，但复用已算好的 KAK。
     std::vector<Op> SynthesizeExact(const M4& u, const Kak& kak, const SynthOptions& opt, bool* uses_flag) const;

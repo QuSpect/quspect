@@ -27,6 +27,9 @@ constexpr double kDefaultAtol = 1e-9;        // DEFAULT_ATOL
 constexpr std::size_t kStabilizerEmits = 4;  // _STABILIZER_EMITS
 // 同时对角化的残差（max |offdiag(P^T M P)|）小于该值即接受（与 Python 的重试阈值相同）。
 constexpr double kDiagonalizeTol = 1e-13;
+// Weyl 坐标与室边界（a = b、b = |c|、b = 0、c = 0、a = π/4）的距离不超过该值时，SynthesizeExact
+// 再用第二种特征向量基合成一次。
+constexpr double kBoundaryTol = 1e-6;
 
 M2 Conj(const M2& m) {
     return {dm::Conj(m[0]), dm::Conj(m[1]), dm::Conj(m[2]), dm::Conj(m[3])};
@@ -979,9 +982,20 @@ std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const Kak& kak, con
     } catch (const SynthesisFailed&) {
         ok0 = false;
     }
-    try {
-        ops1 = SynthesizeExactOnce(u, Kak4(u, 1), opt, &flag1, &best1);
-    } catch (const SynthesisFailed&) {
+    // 第二种基只在 Weyl 室的边界附近（k1、k2 有连续或离散的额外自由度）才可能给出不同的电路
+    const double a = kak.v[0];
+    const double b = kak.v[1];
+    const double c = kak.v[2];
+    const bool boundary = std::fabs(a - b) <= kBoundaryTol || std::fabs(b - std::fabs(c)) <= kBoundaryTol ||
+                          std::fabs(b) <= kBoundaryTol || std::fabs(c) <= kBoundaryTol ||
+                          std::fabs(a - kPi4) <= kBoundaryTol;
+    if (boundary) {
+        try {
+            ops1 = SynthesizeExactOnce(u, Kak4(u, 1), opt, &flag1, &best1);
+        } catch (const SynthesisFailed&) {
+            ok1 = false;
+        }
+    } else {
         ok1 = false;
     }
     if (!ok0 && !ok1) {
