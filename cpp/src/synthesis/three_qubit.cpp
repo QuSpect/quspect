@@ -155,7 +155,106 @@ std::optional<std::pair<M4, std::array<Cx, 4>>> UnitaryEig(const M4& m, double t
     if (!(best_err <= tol)) {
         return std::nullopt;
     }
-    return std::make_pair(best_v, best_lam);
+    // 规范化特征基：特征值相同（|λ_i − λ_j| ≤ 1e-8）的特征向量张成的子空间里改取"最接近计算基"的
+    // 一组基，并按计算基的下标排列列（列 i 由 e_i 在所属特征子空间上的投影正交化得到）。这样已经
+    // 是对角（或块对角、带简并）的 m 得到 V = I 或局部的 V，后续两比特合成需要的纠缠门最少——
+    // 特征向量基的取法不影响分解的正确性，只影响 V、W 的合成代价。
+    M4 v = best_v;
+    std::array<Cx, 4> lam = best_lam;
+    int cluster[4];
+    for (int i = 0; i < 4; ++i) {
+        cluster[i] = i;
+        for (int j = 0; j < i; ++j) {
+            if (dm::Abs(dm::Sub(lam[static_cast<std::size_t>(i)], lam[static_cast<std::size_t>(j)])) <= 1e-8) {
+                cluster[i] = cluster[j];
+                break;
+            }
+        }
+    }
+    M4 out{};
+    std::array<Cx, 4> out_lam{};
+    bool used[4] = {false, false, false, false};
+    // 每个簇的投影 P_c = Σ v_j v_j^†；依次（簇按首个特征向量的下标）为簇里的每个向量选一个未用的
+    // 计算基下标 i（使 P_c e_i 对本簇已选向量正交化后的剩余最大，相等时取下标小者）。
+    for (int c = 0; c < 4; ++c) {
+        int members[4];
+        int k = 0;
+        for (int j = 0; j < 4; ++j) {
+            if (cluster[j] == c) {
+                members[k++] = j;
+            }
+        }
+        if (k == 0) {
+            continue;
+        }
+        int chosen[4];
+        for (int step = 0; step < k; ++step) {
+            int best_i = -1;
+            double best_n = -1.0;
+            Cx best_z[4];
+            for (int i = 0; i < 4; ++i) {
+                if (used[i]) {
+                    continue;
+                }
+                Cx z[4];
+                for (int r = 0; r < 4; ++r) {
+                    Cx acc{0.0, 0.0};
+                    for (int t = 0; t < k; ++t) {
+                        const std::size_t col = static_cast<std::size_t>(members[t]);
+                        acc = dm::Add(acc, dm::Mul(v[static_cast<std::size_t>(r * 4) + col],
+                                                   dm::Conj(v[static_cast<std::size_t>(i * 4) + col])));
+                    }
+                    z[r] = acc;  // (P_c e_i)_r
+                }
+                for (int pass = 0; pass < 2; ++pass) {
+                    for (int t = 0; t < step; ++t) {
+                        const std::size_t col = static_cast<std::size_t>(chosen[t]);
+                        Cx dot{0.0, 0.0};
+                        for (int r = 0; r < 4; ++r) {
+                            dot = dm::Add(dot, dm::MulConj(out[static_cast<std::size_t>(r * 4) + col], z[r]));
+                        }
+                        for (int r = 0; r < 4; ++r) {
+                            z[r] = dm::Sub(z[r], dm::Mul(dot, out[static_cast<std::size_t>(r * 4) + col]));
+                        }
+                    }
+                }
+                double n2 = 0.0;
+                for (int r = 0; r < 4; ++r) {
+                    n2 += dm::Norm2(z[r]);
+                }
+                if (n2 > best_n) {
+                    best_n = n2;
+                    best_i = i;
+                    std::copy(z, z + 4, best_z);
+                }
+            }
+            if (best_i < 0 || !(best_n > 0.0)) {
+                return std::make_pair(best_v, best_lam);  // 不应发生：保留原来的特征基
+            }
+            used[best_i] = true;
+            chosen[step] = best_i;
+            // 相位：第 best_i 个分量为正实数
+            const double inv = 1.0 / dm::Sqrt(best_n);
+            const double ab = dm::Abs(best_z[best_i]);
+            const Cx ph = ab > 0.0 ? dm::Conj(dm::DivReal(best_z[best_i], ab)) : Cx{1.0, 0.0};
+            for (int r = 0; r < 4; ++r) {
+                out[static_cast<std::size_t>(r * 4 + best_i)] = dm::Scale(dm::Mul(best_z[r], ph), inv);
+            }
+            out_lam[static_cast<std::size_t>(best_i)] = lam[static_cast<std::size_t>(members[0])];
+        }
+    }
+    // 新基的残差（特征值取 V^† m V 的对角元）不超过容差才采用
+    M4 mv;
+    M4 d;
+    dm::MatMul(4, m.data(), out.data(), mv.data());
+    dm::MatMulAdjA(4, out.data(), mv.data(), d.data());
+    if (!(OffDiagonal(d) <= tol)) {
+        return std::make_pair(best_v, best_lam);
+    }
+    for (int k = 0; k < 4; ++k) {
+        out_lam[static_cast<std::size_t>(k)] = d[static_cast<std::size_t>(k * 5)];
+    }
+    return std::make_pair(out, out_lam);
 }
 
 std::optional<Demultiplexed> Demultiplex(const M4& a, const M4& b) {

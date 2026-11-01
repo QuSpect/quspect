@@ -40,7 +40,9 @@ struct Demultiplexed {
 };
 std::optional<Demultiplexed> Demultiplex(const M4& a, const M4& b);
 
-// 4×4 酉矩阵 m 的特征分解 m = V·diag(λ)·V†（λ 未排序）。残差超过 tol 时返回 nullopt。
+// 4×4 酉矩阵 m 的特征分解 m = V·diag(λ)·V†。简并特征子空间里取最接近计算基的一组基，列 i 由
+// e_i 的投影得到（m 已是对角 / 块对角时 V 为单位阵或局部矩阵，后续合成的纠缠门最少）。残差
+// 超过 tol 时返回 nullopt。
 std::optional<std::pair<M4, std::array<Cx, 4>>> UnitaryEig(const M4& m, double tol);
 
 // scipy.linalg.cossin(u, p=4, q=4, separate=True) 的约定：
