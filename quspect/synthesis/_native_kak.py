@@ -1,11 +1,19 @@
 """Native backend of the two-qubit KAK synthesis.
 
-:mod:`quspect.synthesis.two_qubit` is a chain of small numpy operations:
-BLAS products, LAPACK decompositions (whose singular / eigenvectors in
-degenerate subspaces depend on the LAPACK build) and element-wise complex
-arithmetic whose rounding depends on how numpy and CPython were compiled
-(fused multiply-add or not).  The C++ implementation (``_KakSynthesizer``)
-reproduces that chain bit for bit by
+The C++ synthesizer (``_KakSynthesizer``) runs the two-qubit KAK synthesis
+(:func:`~quspect.synthesis.two_qubit.synthesize_two_qubit_ops`, the SWAP-face
+block, the CZ count and the "no approximation" decision) on the deterministic
+numerics layer: fixed-order small-matrix arithmetic, Jacobi decompositions
+and correctly rounded math functions (CORE-MATH), without BLAS / LAPACK or
+the platform libm.  Its results are bit-identical on every platform and are
+the reference output of the compiler; the Python implementation in
+:mod:`~quspect.synthesis.two_qubit` is only used when the extension module is
+missing (same algorithm, numerically equivalent but not bit-identical).
+
+The same object also hosts helpers that still follow numpy's semantics bit
+for bit (single-qubit synthesis, the verified Euler runs and block products
+of block consolidation, and the numpy linear algebra used by the native gauge
+search and basis translation).  They reproduce *this platform's* numpy by
 
 * calling the very BLAS / LAPACK routines numpy links against (resolved here
   from numpy's build configuration, after checking that numpy's own binaries
@@ -14,12 +22,12 @@ reproduces that chain bit for bit by
   and CPython use; the order is probed here on random inputs and must match
   exactly one candidate.
 
-The backend is enabled only when all of that succeeds, a self-check against
-the Python reference passes and the platform is one where the whole
-synthesis has been compared against the Python reference on benchmark
-corpora (:data:`_VERIFIED_PLATFORMS`); set :data:`BACKEND_ENV` to ``native``
-to enable it on other platforms (still subject to the probes and the
-self-check) or to ``python`` to disable it.
+That part is enabled only when all of that succeeds, a self-check against
+the Python reference passes and the platform is one where it has been
+compared against the Python reference on benchmark corpora
+(:data:`_VERIFIED_PLATFORMS`); set :data:`BACKEND_ENV` to ``native`` to
+enable it on other platforms (still subject to the probes and the
+self-check) or to ``python`` to disable the native backend altogether.
 """
 
 from __future__ import annotations
@@ -385,14 +393,19 @@ _EULER = {"zxz": 0, "zsx": 1}
 class NativeKak:
     """Dispatch of the KAK synthesis entry points to the native backend.
 
-    Every method returns ``None`` when the native backend cannot reproduce
-    the Python reference for that input (the caller then runs the Python
-    code, which also raises the reference exceptions).
+    The two-qubit entry points always run natively (deterministic numerics)
+    and raise the reference exceptions themselves (``ValueError`` for a
+    non-unitary input, ``RuntimeError`` if synthesis fails); they return
+    ``None`` only for inputs that are not ``4×4`` matrices (the Python code
+    then raises).  The numpy-semantics helpers (:attr:`numpy_compat`) return
+    ``None`` when they cannot reproduce the Python reference for an input.
     """
 
     def __init__(self, synth: Any, tq: Any) -> None:
         self._synth = synth
         self._tq = tq
+        #: Whether the numpy-semantics helpers are available on this platform.
+        self.numpy_compat = bool(synth.has_numpy)
         self._entanglers: dict[str, tuple[object, int]] = {}
         self._one_qubit: dict[frozenset[str], tuple[object, int, tuple[Any, ...]]] = {}
 
@@ -416,38 +429,30 @@ class NativeKak:
         self._entanglers[basis.entangler] = (ent, index)
         return index
 
-    def _call(self, method: Any, *args: Any) -> Any:
-        """Call a synthesizer entry point; supply the random coefficients on demand."""
-        result = method(*args)
-        if self._synth.last_fallback == "need normals":
-            self._synth.set_normals(_normals())
-            result = method(*args)
-        return result
-
-    def _usable(self, u: object) -> bool:
+    def _matrix(self, u: object) -> np.ndarray | None:
+        """``u`` as a ``4×4`` ``complex128`` array (``None``: not a 4×4 matrix)."""
         tq = self._tq
         if tq._try_synthesize is not tq._try_synthesize_reference:
-            return False  # 测试替换了 Python 实现
-        return (
-            isinstance(u, np.ndarray)
-            and u.dtype == _C128
-            and u.shape == (4, 4)
-            and u.flags.c_contiguous
-        )
+            return None  # 测试替换了 Python 实现
+        try:
+            arr = np.asarray(u, dtype=complex)
+        except (TypeError, ValueError):
+            return None
+        if arr.shape != (4, 4):
+            return None
+        return arr
 
     def synthesize(
         self, u: object, atol: float, verify_atol: float, basis: TwoQubitBasis
     ) -> tuple[list[SynthOp], bool] | None:
         """``_synthesize_two_qubit_ops`` and whether it reads the SWAP-face flag."""
-        if not self._usable(u):
-            return None
-        ent = self._entangler(basis)
-        if ent is None:
+        arr = self._matrix(u)
+        ent = None if arr is None else self._entangler(basis)
+        if arr is None or ent is None:
             return None
         tq = self._tq
-        result = self._call(
-            self._synth.synthesize,
-            u,
+        ops, uses = self._synth.synthesize(
+            arr,
             ent,
             _EULER[basis.euler],
             atol,
@@ -455,9 +460,7 @@ class NativeKak:
             bool(tq._SWAP_FACE_TEMPLATE),
             bool(tq._MIRRORED_STABILIZERS),
         )
-        if result is None:
-            return None
-        return result[0], bool(result[1])
+        return ops, bool(uses)
 
     def approximate(
         self,
@@ -470,15 +473,13 @@ class NativeKak:
         want_exact: bool,
     ) -> tuple[list[SynthOp] | None, bool] | None:
         """``None`` unless no approximation applies; then the exact ops (if wanted)."""
-        if not self._usable(u):
-            return None
-        ent = self._entangler(basis)
-        if ent is None:
+        arr = self._matrix(u)
+        ent = None if arr is None else self._entangler(basis)
+        if arr is None or ent is None:
             return None
         tq = self._tq
-        status, ops, uses = self._call(
-            self._synth.approximate,
-            u,
+        status, ops, uses = self._synth.approximate(
+            arr,
             max_infidelity,
             atol,
             verify_atol,
@@ -497,14 +498,12 @@ class NativeKak:
         self, u: object, basis: TwoQubitBasis, verify_atol: float
     ) -> list[SynthOp] | bool | None:
         """``_synthesize_swap_face_block``: ops, ``False`` (``None``) or ``None``."""
-        if not self._usable(u):
+        arr = self._matrix(u)
+        ent = None if arr is None else self._entangler(basis)
+        if arr is None or ent is None:
             return None
-        ent = self._entangler(basis)
-        if ent is None:
-            return None
-        result = self._call(
-            self._synth.swap_face,
-            u,
+        result = self._synth.swap_face(
+            arr,
             ent,
             _EULER[basis.euler],
             verify_atol,
@@ -512,12 +511,32 @@ class NativeKak:
         )
         return result  # type: ignore[no-any-return]
 
+    def num_cz(self, u: object, atol: float) -> int | None:
+        """``_count_from_coords(_kak4(u)[2], atol)``."""
+        arr = self._matrix(u)
+        if arr is None:
+            return None
+        return int(self._synth.num_cz(arr, atol))
+
+    def kak4(
+        self, u: object
+    ) -> tuple[float, np.ndarray, np.ndarray, np.ndarray] | None:
+        """``_kak4(u)`` (``(phase, k1, coords, k2)``) on the deterministic layer."""
+        arr = self._matrix(u)
+        if arr is None:
+            return None
+        self._synth.num_cz(arr, 0.0)  # 酉性检查（不是酉矩阵时抛出 ValueError）
+        phase, k1, v, k2 = self._synth.kak4(arr)
+        return float(phase), k1, np.array(v, dtype=float), k2
+
     def one_qubit(self, m: np.ndarray, em: Any) -> tuple[bool, list[Any] | None]:
         """``_synthesize_one_qubit(m, em.basis)`` as ``(True, gates)``.
 
         ``em`` is the :class:`~quspect.gates.synthesis._Emitter` of the basis;
         ``(False, None)`` hands the matrix back to the Python reference.
         """
+        if not self.numpy_compat:
+            return False, None
         entry = self._one_qubit.get(em.basis)
         if entry is None or entry[0] is not em:
             entry = self._register_one_qubit(em)
@@ -525,9 +544,7 @@ class NativeKak:
         _, index, makers = entry
         if index < 0 or m.dtype != _C128 or m.shape != (2, 2):
             return False, None
-        status, gates = self._call(
-            self._synth.synthesize_one_qubit, np.ascontiguousarray(m), index
-        )
+        status, gates = self._synth.synthesize_one_qubit(np.ascontiguousarray(m), index)
         if status == 1:
             return True, None
         if status != 0:
@@ -584,10 +601,15 @@ class NativeKak:
         self, u: np.ndarray, atol: float, euler: str
     ) -> list[SynthOp] | bool | None:
         """``_verified_euler_ops_uncached``: ops, ``False`` (``None``) or ``None``."""
-        if euler not in _EULER or u.dtype != _C128 or u.shape != (2, 2):
+        if (
+            not self.numpy_compat
+            or euler not in _EULER
+            or u.dtype != _C128
+            or u.shape != (2, 2)
+        ):
             return None
-        result = self._call(
-            self._synth.verified_euler, np.ascontiguousarray(u), atol, _EULER[euler]
+        result = self._synth.verified_euler(
+            np.ascontiguousarray(u), atol, _EULER[euler]
         )
         return result  # type: ignore[no-any-return]
 
@@ -599,6 +621,8 @@ class NativeKak:
         ``None`` unless every matrix is C-contiguous ``complex128`` (numpy's
         BLAS calls depend on the operand layout).
         """
+        if not self.numpy_compat:
+            return None
         strict = getattr(self._synth, "block_unitary_strict", None)
         if strict is not None and type(mats) is list:
             # 布局判断在原生代码中完成；不满足时照常走下面的判断
@@ -611,6 +635,8 @@ class NativeKak:
 
     def run_unitary(self, mats: list[np.ndarray]) -> np.ndarray | None:
         """``u = I; u = m @ u`` over a run of C-contiguous ``2×2`` matrices."""
+        if not self.numpy_compat:
+            return None
         strict = getattr(self._synth, "run_unitary_strict", None)
         if strict is not None and type(mats) is list:
             found = strict(mats)
@@ -622,13 +648,6 @@ class NativeKak:
         ):
             return None
         return np.asarray(self._synth.run_unitary(mats))
-
-    def num_cz(self, u: object, atol: float) -> int | None:
-        """``_count_from_coords(_kak4(u)[2], atol)``."""
-        if not self._usable(u):
-            return None
-        count = int(self._call(self._synth.num_cz, u, atol))
-        return None if count < 0 else count
 
 
 def _check_one_qubit(native: NativeKak, em: Any, entry: Any, gs: Any) -> bool:
@@ -655,14 +674,8 @@ def _check_one_qubit(native: NativeKak, em: Any, entry: Any, gs: Any) -> bool:
     return True
 
 
-def _normals() -> list[float]:
-    """Coefficients ``_real_orthogonal_diagonalize`` draws after two failed attempts."""
-    rng = np.random.default_rng(1234567)
-    return [float(rng.normal()) for _ in range(196)]
-
-
 def _constants(tq: Any) -> dict[str, Any]:
-    # 随机组合系数按需补上（导入 numpy.random 本身就要几毫秒）
+    # numpy 语义部分用到的常量（KAK 合成的常量在 C++ 中定义，数值相同）
     return {
         "magic": tq._MAGIC,
         "magic_conj": np.ascontiguousarray(tq._MAGIC_DAG.T),
@@ -686,62 +699,56 @@ def _constants(tq: Any) -> dict[str, Any]:
 
 
 def _self_check(native: NativeKak, tq: Any) -> bool:
-    """Compare the native synthesis with the Python reference on a fixed sample."""
-    from quspect.synthesis.two_qubit import TwoQubitBasis
+    """Compare the numpy-semantics helpers with the Python reference."""
+    from quspect.transpiler import _consolidate
 
     rng = random.Random(97531)
-    swap = np.eye(4, dtype=complex)[[0, 2, 1, 3]]
-    zz = np.diag(np.exp(-0.15j * np.array([1, -1, -1, 1])))
-    cz = np.diag([1, 1, 1, -1]).astype(complex)
-    cp = np.diag([1, 1, 1, np.exp(0.4j)])
-    heis = tq.canonical_gate(0.3, 0.3, -0.3)
 
     def haar(n: int) -> np.ndarray:
         g = [complex(rng.gauss(0.0, 1.0), rng.gauss(0.0, 1.0)) for _ in range(n * n)]
-        return np.asarray(np.linalg.qr(np.array(g).reshape(n, n))[0])
+        return np.ascontiguousarray(np.linalg.qr(np.array(g).reshape(n, n))[0])
 
-    def local() -> np.ndarray:
-        return np.asarray(np.kron(haar(2), haar(2)))
-
-    mats = [haar(4), haar(4)]
-    mats += [local() @ m @ local() for m in (swap @ zz, cz, cp, heis)]
-    mats = [np.ascontiguousarray(m, dtype=complex) for m in mats]
-    # (基, SWAP 面模板开关, 矩阵)：随机 / SWAP·ZZ / CZ 类 / c = 0 / 退化点
-    plan = (
-        (TwoQubitBasis("cz", "zxz"), False, mats),
-        (TwoQubitBasis("cz", "zsx"), True, mats[1:3]),
-        (TwoQubitBasis("cx", "zsx"), False, mats[:1]),
-    )
-    flags = (tq._SWAP_FACE_TEMPLATE, tq._MIRRORED_STABILIZERS)
     try:
-        tq._SWAP_FACE_TEMPLATE, tq._MIRRORED_STABILIZERS = False, True
-        for m in mats[:2]:
-            ref = tq._kak4(m)
-            got = native._synth.kak4(m)
-            if got is None or [_bits(x) for x in (ref[0], ref[1], ref[2], ref[3])] != [
-                _bits(got[0]),
-                _bits(got[1]),
-                _bits(np.array(got[2])),
-                _bits(got[3]),
-            ]:
-                return False
-        for basis, flag, sample in plan:
-            tq._SWAP_FACE_TEMPLATE = flag
-            for m in sample:
-                ref_ops = tq._synthesize_two_qubit_ops(m, 1e-9, 1e-9, basis)
-                got = native.synthesize(m, 1e-9, 1e-9, basis)
-                if got is None or repr(got[0]) != repr(ref_ops):
-                    return False
-        basis = TwoQubitBasis("cz", "zsx")
-        ref_sf = tq._synthesize_swap_face_block(mats[2], basis, 1e-9)
-        got_sf = native.swap_face(mats[2], basis, 1e-9)
-        if got_sf is None or repr(None if got_sf is False else got_sf) != repr(ref_sf):
+        twos = [haar(2) for _ in range(6)] + [np.ascontiguousarray(tq._H)]
+        twos.append(np.diag([1.0, np.exp(1e-10j)]).astype(complex))
+        for m in twos:
+            for atol in (1e-9, 1e-12):
+                for euler in ("zxz", "zsx"):
+                    got = native.verified_euler(m, atol, euler)
+                    ref = _consolidate._verified_euler_ops_uncached(m, atol, euler)
+                    if got is not None and repr(None if got is False else got) != repr(
+                        ref
+                    ):
+                        return False
+        run = twos[:4]
+        ref_run = np.eye(2, dtype=complex)
+        for m in run:
+            ref_run = m @ ref_run
+        got_run = native.run_unitary(run)
+        if got_run is None or got_run.tobytes() != ref_run.tobytes():
+            return False
+        fours = [haar(4), haar(4)]
+        mats = [fours[0], twos[0], twos[1], fours[1]]
+        slots = [0, 1, 2, 3]
+        ref_block = np.eye(4, dtype=complex)
+        eye2 = np.eye(2, dtype=complex)
+        rev = [0, 2, 1, 3]
+        for m, slot in zip(mats, slots, strict=True):
+            if slot == 0:
+                full = m
+            elif slot == 1:
+                full = tq._kron2(m, eye2)
+            elif slot == 2:
+                full = tq._kron2(eye2, m)
+            else:
+                full = m[np.ix_(rev, rev)]
+            ref_block = full @ ref_block
+        got_block = native.block_unitary(mats, slots, tq._SWAP4)
+        if got_block is None or got_block.tobytes() != ref_block.tobytes():
             return False
     except Exception:  # noqa: BLE001 - 任何异常都视为不一致
-        logger.debug("native KAK self-check raised", exc_info=True)
+        logger.debug("native numpy-semantics self-check raised", exc_info=True)
         return False
-    finally:
-        tq._SWAP_FACE_TEMPLATE, tq._MIRRORED_STABILIZERS = flags
     return True
 
 
@@ -762,6 +769,21 @@ def load(tq: Any) -> NativeKak | None:
         return None
     if core is None or not hasattr(core, "_KakSynthesizer"):
         return None
+    constants = _constants(tq)
+    synth = _numpy_synthesizer(core, constants, backend)
+    if synth is not None:
+        native = NativeKak(synth, tq)
+        if _self_check(native, tq):
+            return native
+        logger.debug("native KAK: numpy-semantics self-check failed")
+    # 两比特 KAK 合成总是可用（确定性数值层，与平台无关）
+    return NativeKak(core._KakSynthesizer(None, False, None, constants), tq)
+
+
+def _numpy_synthesizer(
+    core: Any, constants: dict[str, Any], backend: str
+) -> Any | None:
+    """A synthesizer with the numpy-semantics helpers (``None``: unavailable)."""
     found = _linalg_functions()
     if found is None:
         logger.debug("native KAK: numpy's BLAS / LAPACK not resolved")
@@ -775,16 +797,9 @@ def load(tq: Any) -> NativeKak | None:
     if modes is None:
         return None
     try:
-        synth = _probe_linalg(core, functions, ilp64, modes, _constants(tq))
+        return _probe_linalg(core, functions, ilp64, modes, constants)
     except (
         RuntimeError,
         ValueError,
     ):  # pragma: no cover - LAPACK workspace query failed
         return None
-    if synth is None:
-        return None
-    native = NativeKak(synth, tq)
-    if not _self_check(native, tq):
-        logger.debug("native KAK: self-check against the Python reference failed")
-        return None
-    return native

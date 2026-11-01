@@ -1405,7 +1405,11 @@ _try_synthesize_reference = _try_synthesize
 
 @functools.cache
 def _native_kak() -> NativeKak | None:
-    """The native KAK backend if it reproduces this module bit for bit here."""
+    """The native KAK backend (``None`` without the extension module).
+
+    Its two-qubit synthesis is the deterministic reference implementation
+    (bit-identical on all platforms); see :mod:`quspect.synthesis._native_kak`.
+    """
     from quspect.synthesis._native_kak import load
 
     return load(sys.modules[__name__])

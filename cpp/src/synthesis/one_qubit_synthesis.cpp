@@ -5,7 +5,6 @@
 #include <complex>
 #include <cstdint>
 
-#include "quspect_native/synthesis/kak_synthesis.hpp"
 
 namespace quspect::native::synthesis {
 

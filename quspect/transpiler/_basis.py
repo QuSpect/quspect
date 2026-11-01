@@ -431,7 +431,7 @@ def _translate_native(
     from quspect.synthesis.two_qubit import _native_kak
 
     kak = _native_kak()
-    if kak is None:
+    if kak is None or not kak.numpy_compat:
         return None
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction, InstructionType

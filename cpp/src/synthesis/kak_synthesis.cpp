@@ -2,11 +2,17 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
+#include <cstdio>
 #include <limits>
 #include <utility>
 
+#include "quspect_native/detmath/complex.hpp"
+#include "quspect_native/detmath/linalg.hpp"
+#include "quspect_native/detmath/scalar.hpp"
+
 namespace quspect::native::synthesis {
+
+namespace dm = quspect::native::detmath;
 
 namespace {
 
@@ -15,46 +21,47 @@ constexpr double kPi = 3.141592653589793;
 constexpr double kPi4 = kPi / 4;
 constexpr double kPi2 = kPi / 2;
 constexpr double kTwoPi = 2 * kPi;
-constexpr double kStabilizerTol = 1e-9;   // _STABILIZER_TOL
-constexpr double kExactEulerAtol = 1e-12;  // _EXACT_EULER_ATOL
-constexpr double kDefaultAtol = 1e-9;      // DEFAULT_ATOL
+constexpr double kStabilizerTol = 1e-9;      // _STABILIZER_TOL
+constexpr double kExactEulerAtol = 1e-12;    // _EXACT_EULER_ATOL
+constexpr double kDefaultAtol = 1e-9;        // DEFAULT_ATOL
 constexpr std::size_t kStabilizerEmits = 4;  // _STABILIZER_EMITS
-// 只用于比较的量（numpy np.abs 等）与阈值的相对距离小于该值时退回 Python。
-constexpr double kDecisionMargin = 1e-9;
+// 同时对角化的残差（max |offdiag(P^T M P)|）小于该值即接受（与 Python 的重试阈值相同）。
+constexpr double kDiagonalizeTol = 1e-13;
 
 M2 Conj(const M2& m) {
-    return {Cx{m[0].re, -m[0].im}, Cx{m[1].re, -m[1].im}, Cx{m[2].re, -m[2].im}, Cx{m[3].re, -m[3].im}};
+    return {dm::Conj(m[0]), dm::Conj(m[1]), dm::Conj(m[2]), dm::Conj(m[3])};
 }
 
-M4 Conj(const M4& m) {
-    M4 out;
-    for (int i = 0; i < 16; ++i) {
-        out[i] = Cx{m[i].re, -m[i].im};
-    }
+M2 Mat2(const M2& a, const M2& b) {
+    return dm::MatMul(a, b);
+}
+
+M4 Mat4(const M4& a, const M4& b) {
+    return dm::MatMul(a, b);
+}
+
+// a^† b（2×2）。
+M2 Mat2AdjA(const M2& a, const M2& b) {
+    M2 out;
+    dm::MatMulAdjA(2, a.data(), b.data(), out.data());
     return out;
 }
 
-// 材料化的共轭转置（``np.array([s.conj().T])`` 的值）。
-M2 ConjT(const M2& m) {
-    return {Cx{m[0].re, -m[0].im}, Cx{m[2].re, -m[2].im}, Cx{m[1].re, -m[1].im}, Cx{m[3].re, -m[3].im}};
-}
-
-Cx Add(const Cx& a, const Cx& b) {
-    return {a.re + b.re, a.im + b.im};
-}
-
-Cx Sub(const Cx& a, const Cx& b) {
-    return {a.re - b.re, a.im - b.im};
+// a b^†（2×2）。
+M2 Mat2AdjB(const M2& a, const M2& b) {
+    M2 out;
+    dm::MatMulAdjB(2, a.data(), b.data(), out.data());
+    return out;
 }
 
 bool IsZeroAngle(double angle, double atol) {
-    // _is_zero_angle：abs(math.remainder(angle, 2π)) <= atol
-    return std::fabs(std::remainder(angle, kTwoPi)) <= atol;
+    // _is_zero_angle：abs(math.remainder(angle, 2π)) <= atol（remainder 是精确运算）
+    return std::fabs(dm::Remainder(angle, kTwoPi)) <= atol;
 }
 
 double Wrap(double angle) {
     // _wrap：math.remainder 落在 (−π, π]
-    const double w = std::remainder(angle, kTwoPi);
+    const double w = dm::Remainder(angle, kTwoPi);
     return w <= -kPi ? kPi : w;
 }
 
@@ -62,23 +69,87 @@ bool IsSwapFace(const std::array<double, 3>& v) {
     return std::fabs(v[0] - kPi4) <= 1e-9 && std::fabs(v[1] - kPi4) <= 1e-9;
 }
 
-// 只用于比较的量 x 与阈值 t：x < t 的结果；两者太接近时退回 Python。
-bool ClearlyLess(double x, double t, const char* what) {
-    if (!(x == x) || !(t == t)) {
-        throw Fallback(what);
+// ``err <= verify_atol``（NaN 视为未通过）。
+bool Verified(double err, double verify_atol) {
+    return err <= verify_atol;
+}
+
+// max |offdiag(P^T M P)|（P 实正交，M 复对称）。
+double OffDiagonalResidual(const std::array<double, 16>& p, const M4& m) {
+    M4 t;
+    M4 d;
+    dm::MatMulRTransC(4, p.data(), m.data(), t.data());
+    dm::MatMulCR(4, t.data(), p.data(), d.data());
+    double err = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            if (i != j) {
+                const double a = dm::Abs(d[i * 4 + j]);
+                if (!(a == a)) {
+                    return a;
+                }
+                err = std::max(err, a);
+            }
+        }
     }
-    if (x == t) {
-        // 两个量算法相同、输入相同时逐位相同；此处不同算法的结果恰好相等，无法判断
-        throw Fallback(what);
-    }
-    const double scale = std::max(std::fabs(x), std::fabs(t));
-    if (std::isfinite(scale) && std::fabs(x - t) <= kDecisionMargin * scale) {
-        throw Fallback(what);
-    }
-    return x < t;
+    return err;
+}
+
+std::string FailureMessage(double best) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.3e", best);
+    return std::string("Two-qubit synthesis failed to reproduce the unitary (best error ") + buf + ").";
 }
 
 }  // namespace
+
+// ---- 常量 ----------------------------------------------------------------------
+
+KakConstants KakConstants::Make() {
+    KakConstants c;
+    const double s = 1.0 / dm::Sqrt(2.0);  // _SQ2 = 1.0 / math.sqrt(2.0)
+    const Cx zero{0.0, 0.0};
+    const Cx one{1.0, 0.0};
+    const Cx neg{-1.0, 0.0};
+    const Cx im{0.0, 1.0};
+    const Cx neg_im{0.0, -1.0};
+    // _MAGIC = [[1, 0, 0, 1j], [0, 1j, 1, 0], [0, 1j, -1, 0], [1, 0, 0, -1j]] · _SQ2
+    const Cx magic[16] = {one, zero, zero, im, zero, im, one, zero, zero, im, neg, zero, one, zero, zero, neg_im};
+    for (int e = 0; e < 16; ++e) {
+        c.magic[e] = dm::Scale(magic[e], s);
+    }
+    c.magic_dag = dm::Adjoint(c.magic);
+    c.i2 = {one, zero, zero, one};
+    c.x = {zero, one, one, zero};
+    c.y = {zero, neg_im, im, zero};
+    c.z = {one, zero, zero, neg};
+    c.h = {Cx{s, 0.0}, Cx{s, 0.0}, Cx{s, 0.0}, Cx{-s, 0.0}};
+    c.sx = {Cx{0.5, 0.5}, Cx{0.5, -0.5}, Cx{0.5, -0.5}, Cx{0.5, 0.5}};
+    c.cz4 = M4{};
+    c.swap4 = M4{};
+    constexpr int kSwap[4] = {0, 2, 1, 3};
+    for (int i = 0; i < 4; ++i) {
+        c.cz4[i * 5] = i == 3 ? neg : one;
+        c.swap4[i * 4 + kSwap[i]] = one;
+    }
+    c.pauli_pairs = {KakSynthesizer::Kron2(c.x, c.x), KakSynthesizer::Kron2(c.y, c.y),
+                     KakSynthesizer::Kron2(c.z, c.z)};
+    const M2 sgate{one, zero, zero, im};
+    const M2 rx90{Cx{s, 0.0}, Cx{0.0, -s}, Cx{0.0, -s}, Cx{s, 0.0}};
+    c.swap_ab = KakSynthesizer::Kron2(sgate, sgate);
+    c.swap_bc = KakSynthesizer::Kron2(rx90, rx90);
+    c.flip_ab = KakSynthesizer::Kron2(c.z, c.i2);
+    c.flip_ac = KakSynthesizer::Kron2(c.y, c.i2);
+    c.flip_bc = KakSynthesizer::Kron2(c.x, c.i2);
+    c.can_phases = {1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0};
+    for (int r = 0; r < 4; ++r) {
+        c.phase_map[static_cast<std::size_t>(r * 4)] = 1.0;
+        for (int j = 0; j < 3; ++j) {
+            c.phase_map[static_cast<std::size_t>(r * 4 + 1 + j)] = c.can_phases[static_cast<std::size_t>(r * 3 + j)];
+        }
+    }
+    return c;
+}
 
 // _try_synthesize 中只取决于 u 的局部因子（_factor_local(k1u)、_factor_local(k2u)）。
 struct KakSynthesizer::UFactors {
@@ -86,19 +157,7 @@ struct KakSynthesizer::UFactors {
     Pair d;  // k2u
 };
 
-KakSynthesizer::KakSynthesizer(const LinalgFunctions& fns, const ArithModes& modes, KakConstants constants)
-    : np_(fns, modes), c_(std::move(constants)) {
-    if (!c_.normals.empty() && c_.normals.size() < 196) {
-        throw std::invalid_argument("need 196 precomputed normal deviates");
-    }
-}
-
-void KakSynthesizer::SetNormals(std::vector<double> normals) {
-    if (normals.size() < 196) {
-        throw std::invalid_argument("need 196 precomputed normal deviates");
-    }
-    c_.normals = std::move(normals);
-}
+KakSynthesizer::KakSynthesizer() : c_(KakConstants::Make()) {}
 
 int KakSynthesizer::AddEntangler(EntanglerSpec spec) {
     // Entangler.oriented(True)：_SWAP4 @ matrix @ _SWAP4
@@ -110,33 +169,14 @@ int KakSynthesizer::AddEntangler(EntanglerSpec spec) {
 
 // ---- 小工具 --------------------------------------------------------------------
 
-M2 KakSynthesizer::Mat2(const M2& a, const M2& b) const {
-    M2 out;
-    np_.MatMul(2, View(a), View(b), out.data());
-    return out;
-}
-
-M2 KakSynthesizer::Mat2(const CView& a, const CView& b) const {
-    M2 out;
-    np_.MatMul(2, a, b, out.data());
-    return out;
-}
-
-M4 KakSynthesizer::Mat4(const M4& a, const M4& b) const {
-    M4 out;
-    np_.MatMul(4, View(a), View(b), out.data());
-    return out;
-}
-
-M4 KakSynthesizer::Kron2(const M2& left, const M2& right) const {
+M4 KakSynthesizer::Kron2(const M2& left, const M2& right) {
     // (left[:, None, :, None] * right[None, :, None, :]).reshape(4, 4)
     M4 out;
-    const MulMode mode = np_.modes().kron;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
             for (int k = 0; k < 2; ++k) {
                 for (int l = 0; l < 2; ++l) {
-                    out[(i * 2 + j) * 4 + k * 2 + l] = Mul(mode, left[i * 2 + k], right[j * 2 + l]);
+                    out[(i * 2 + j) * 4 + k * 2 + l] = dm::Mul(left[i * 2 + k], right[j * 2 + l]);
                 }
             }
         }
@@ -144,47 +184,39 @@ M4 KakSynthesizer::Kron2(const M2& left, const M2& right) const {
     return out;
 }
 
-M2 KakSynthesizer::Rx(double theta) const {
+M2 KakSynthesizer::Rx(double theta) {
     // _rx：c = cos(θ/2), s = sin(θ/2)；[[c, -1j*s], [-1j*s, c]]
-    const double c = SeparateCos(theta / 2);
-    const double s = SeparateSin(theta / 2);
-    const Cx off = PyMulReal(np_.modes(), Cx{-0.0, -1.0}, s);
+    const double c = dm::Cos(theta / 2);
+    const double s = dm::Sin(theta / 2);
+    const Cx off{0.0, -s};
     return {Cx{c, 0.0}, off, off, Cx{c, 0.0}};
 }
 
-M2 KakSynthesizer::Rz(double theta) const {
-    // _rz：[[cmath.exp(-0.5j*θ), 0], [0, cmath.exp(0.5j*θ)]]
-    const ArithModes& m = np_.modes();
-    const Cx d0 = PyExp(m, PyMulReal(m, Cx{-0.0, -0.5}, theta));
-    const Cx d1 = PyExp(m, PyMulReal(m, Cx{0.0, 0.5}, theta));
-    return {d0, Cx{0.0, 0.0}, Cx{0.0, 0.0}, d1};
+M2 KakSynthesizer::Rz(double theta) {
+    // _rz：diag(e^{−iθ/2}, e^{iθ/2})
+    return {dm::ExpI(-0.5 * theta), Cx{0.0, 0.0}, Cx{0.0, 0.0}, dm::ExpI(0.5 * theta)};
 }
 
 M2 KakSynthesizer::AxisRot(const M2& pauli, double phi) const {
-    // math.cos(phi/2) * _I2 - 1j * math.sin(phi/2) * pauli
-    const ArithModes& m = np_.modes();
-    const double c = SeparateCos(phi / 2);
-    const Cx js = PyMulReal(m, Cx{0.0, 1.0}, SeparateSin(phi / 2));
+    // cos(φ/2)·I − i·sin(φ/2)·P
+    const double c = dm::Cos(phi / 2);
+    const Cx js{0.0, dm::Sin(phi / 2)};
     M2 out;
     for (int e = 0; e < 4; ++e) {
-        const Cx a = Mul(m.scalar_arr, Cx{c, 0.0}, c_.i2[e]);
-        const Cx b = Mul(m.scalar_arr, js, pauli[e]);
-        out[e] = Sub(a, b);
+        out[e] = dm::Sub(dm::Scale(c_.i2[e], c), dm::Mul(js, pauli[e]));
     }
     return out;
 }
 
-double KakSynthesizer::AxisAngle(const M2& w, const M2& pauli) const {
-    // x = complex(np.trace(w)); y = 1j * complex(np.trace(pauli @ w))
-    // atan2(2.0 * (x * y.conjugate()).real, abs(x) ** 2 - abs(y) ** 2)
-    const ArithModes& m = np_.modes();
-    const Cx x = Add(w[0], w[3]);
+double KakSynthesizer::AxisAngle(const M2& w, const M2& pauli) {
+    // x = tr(w)；y = i·tr(P w)；atan2(2·Re(x·conj(y)), |x|² − |y|²)
+    const Cx x = dm::Add(w[0], w[3]);
     const M2 pw = Mat2(pauli, w);
-    const Cx y = Mul(m.py, Cx{0.0, 1.0}, Add(pw[0], pw[3]));
-    const Cx xy = Mul(m.py, x, Cx{y.re, -y.im});
-    const double ax = PyAbs(x);
-    const double ay = PyAbs(y);
-    return PyAtan2(2.0 * xy.re, PyPow(ax, 2.0) - PyPow(ay, 2.0));
+    const Cx y = dm::Mul(Cx{0.0, 1.0}, dm::Add(pw[0], pw[3]));
+    const Cx xy = dm::Mul(x, dm::Conj(y));
+    const double ax = dm::Abs(x);
+    const double ay = dm::Abs(y);
+    return dm::Atan2(2.0 * xy.re, ax * ax - ay * ay);
 }
 
 M4 KakSynthesizer::LayersUnitary(const std::vector<Layer>& layers) const {
@@ -237,178 +269,137 @@ int KakSynthesizer::CountFromCoords(const std::array<double, 3>& v, double atol)
 // ---- KAK -----------------------------------------------------------------------
 
 void KakSynthesizer::CheckUnitary(const M4& u) const {
-    // np.allclose(arr.conj().T @ arr, np.eye(4), atol=1e-8)
-    const M4 uc = Conj(u);
+    // np.allclose(u^† u, I, atol=1e-8)：|g_ij − δ_ij| <= 1e-8 + 1e-5·δ_ij（NaN 不通过）
     M4 g;
-    np_.MatMul(4, ViewT(uc), View(u), g.data());
+    dm::MatMulAdjA(4, u.data(), u.data(), g.data());
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            const Cx e = Sub(g[i * 4 + j], Cx{i == j ? 1.0 : 0.0, 0.0});
-            const double dist = std::hypot(e.re, e.im);
+            const double dist = dm::Abs(dm::Sub(g[i * 4 + j], Cx{i == j ? 1.0 : 0.0, 0.0}));
             const double thr = 1e-8 + 1e-5 * (i == j ? 1.0 : 0.0);
-            if (!ClearlyLess(dist, thr, "unitarity check")) {
-                throw Fallback("not unitary");
+            if (!(dist <= thr)) {
+                throw NotUnitary();
             }
         }
     }
 }
 
-std::array<double, 16> KakSynthesizer::RealOrthogonalDiagonalize(const M4& m2_in) const {
+std::array<double, 16> KakSynthesizer::RealOrthogonalDiagonalize(const M4& m2_in, int variant) const {
+    // m2 = U_B^T U_B 是复对称酉矩阵，Re m2 与 Im m2 是可交换的实对称矩阵：它们的同时特征向量
+    // 构成所求的 P ∈ SO(4)。
     M4 m2 = m2_in;
-    for (Cx& z : m2) {
+    std::array<double, 16> re;
+    std::array<double, 16> imag;
+    for (int e = 0; e < 16; ++e) {
+        Cx& z = m2[e];
         if (std::fabs(z.re) < 1e-14) {
             z.re = 0.0;
         }
         if (std::fabs(z.im) < 1e-14) {
             z.im = 0.0;
         }
+        re[e] = z.re;
+        imag[e] = z.im;
     }
-    // Python 保留误差最小（严格更小才替换）的尝试。误差用 numpy 的 np.abs 求得，这里的 hypot 可能差
-    // 最后几位：彼此太接近、无法判断先后的尝试都留作候选，只要之后有一次尝试明显更好就不影响结果；
-    // 最后仍有多个不同的候选时退回 Python。
-    struct Attempt {
-        std::array<double, 16> p;
-        M4 d;
-        double err;
-    };
-    enum class Rel { kLess, kGreater, kEqual, kUnknown };
-    auto relation = [](const Attempt& x, const Attempt& y) {
-        if (std::memcmp(x.d.data(), y.d.data(), sizeof(M4)) == 0) {
-            return Rel::kEqual;  // 输入逐位相同，numpy 的误差也相同
+    std::array<double, 16> best{};
+    double best_err = std::numeric_limits<double>::infinity();
+    bool have = false;
+    std::array<double, 16> p;
+    std::array<double, 4> w;
+    auto consider = [&](const std::array<double, 16>& cand) {
+        const double err = OffDiagonalResidual(cand, m2);
+        if (err < best_err) {
+            best = cand;
+            best_err = err;
+            have = true;
         }
-        const double scale = std::max(x.err, y.err);
-        if (x.err == y.err || std::fabs(x.err - y.err) <= kDecisionMargin * scale) {
-            return Rel::kUnknown;
-        }
-        return x.err < y.err ? Rel::kLess : Rel::kGreater;
     };
-    std::vector<Attempt> best;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-        double w_re;
-        double w_im;
-        if (attempt == 0) {
-            w_re = 1.0;
-            w_im = 0.0;
-        } else if (attempt == 1) {
-            w_re = 0.0;
-            w_im = 1.0;
-        } else {
-            if (!HasNormals()) {
-                throw NeedNormals();
+    if (variant == 1) {
+        // Re M、Im M 的特征分解（与 Python 的前两次尝试相同）
+        for (const std::array<double, 16>* mat : {&re, &imag}) {
+            if (!(best_err < kDiagonalizeTol) && dm::EighSym(4, mat->data(), w.data(), p.data())) {
+                consider(p);
             }
-            w_re = c_.normals[static_cast<std::size_t>(2 * (attempt - 2))];
-            w_im = c_.normals[static_cast<std::size_t>(2 * (attempt - 2) + 1)];
         }
+    }
+    if (!(best_err < kDiagonalizeTol)) {
+        dm::JointDiagSym(4, re.data(), imag.data(), p.data());
+        consider(p);
+    }
+    // 都不够精确时（输入只是近似酉矩阵等）：对 cos t·Re + sin t·Im 做特征分解，取残差最小者
+    for (int attempt = 0; attempt < 32 && !(best_err < kDiagonalizeTol); ++attempt) {
+        const double t = 0.5 + 0.7 * attempt;
+        const double wr = dm::Cos(t);
+        const double wi = dm::Sin(t);
         std::array<double, 16> mix;
         for (int e = 0; e < 16; ++e) {
-            const double x = w_re * m2[e].re;
-            const double y = w_im * m2[e].im;
-            mix[e] = x + y;
+            mix[e] = wr * re[e] + wi * imag[e];
         }
-        Attempt cur;
-        std::array<double, 4> w;
-        if (!np_.Eigh4(mix, &w, &cur.p)) {
-            throw Fallback("eigh failed");
+        if (dm::EighSym(4, mix.data(), w.data(), p.data())) {
+            consider(p);
         }
-        // d = p.T @ m2 @ p；err = max |offdiag(d)|
-        M4 t;
-        np_.MatMul(4, RView{cur.p.data(), 1, 4}, View(m2), t.data());
-        np_.MatMul(4, View(t), RView{cur.p.data(), 4, 1}, cur.d.data());
-        cur.err = 0.0;
+    }
+    if (!have) {
+        throw SynthesisFailed("KAK: eigenvector computation failed");
+    }
+    if (dm::DetReal(4, best.data()) < 0) {
         for (int i = 0; i < 4; ++i) {
-            for (int j = 0; j < 4; ++j) {
-                if (i != j) {
-                    const double a = std::hypot(cur.d[i * 4 + j].re, cur.d[i * 4 + j].im);
-                    if (!(a == a)) {
-                        throw Fallback("non-finite eigenvector residual");
-                    }
-                    cur.err = std::max(cur.err, a);
-                }
-            }
-        }
-        bool all_less = true;
-        bool none_less = true;
-        for (const Attempt& b : best) {
-            const Rel r = relation(cur, b);
-            all_less = all_less && r == Rel::kLess;
-            none_less = none_less && (r == Rel::kGreater || r == Rel::kEqual);
-        }
-        if (best.empty() || all_less) {
-            best.assign(1, cur);
-        } else if (!none_less) {
-            best.push_back(cur);
-        }
-        if (ClearlyLess(cur.err, 1e-13, "eigenvector residual vs 1e-13")) {
-            break;
+            best[i * 4] = -best[i * 4];
         }
     }
-    for (const Attempt& b : best) {
-        if (std::memcmp(b.p.data(), best[0].p.data(), sizeof(b.p)) != 0) {
-            throw Fallback("eigenvector residuals too close to order");
-        }
-    }
-    std::array<double, 16> p = best[0].p;
-    if (np_.DetNegative4(RView{p.data(), 4, 1})) {
-        for (int i = 0; i < 4; ++i) {
-            p[i * 4] = -p[i * 4];
-        }
-    }
-    return p;
+    return best;
 }
 
-void KakSynthesizer::RawKak(const M4& u, Kak* out) const {
-    const ArithModes& m = np_.modes();
-    const Cx det = np_.Det(4, View(u));
-    const double phase0 = PyPhase(det) / 4.0;
-    const Cx scale = PyExp(m, PyMulReal(m, Cx{-0.0, -1.0}, phase0));
+void KakSynthesizer::RawKak(const M4& u, int variant, Kak* out) const {
+    const Cx det = dm::Det(u);
+    const double phase0 = dm::Arg(det) / 4.0;
+    const Cx scale = dm::ExpI(-phase0);
     M4 u_su;
     for (int e = 0; e < 16; ++e) {
-        u_su[e] = Mul(m.arr_scalar, u[e], scale);
+        u_su[e] = dm::Mul(u[e], scale);
     }
-    // up = _MAGIC_DAG @ u_su @ _MAGIC；m2 = up.T @ up（syrk）
-    M4 t;
-    M4 up;
+    // up = _MAGIC_DAG @ u_su @ _MAGIC；m2 = up.T @ up
+    const M4 up = Mat4(Mat4(c_.magic_dag, u_su), c_.magic);
     M4 m2;
-    np_.MatMul(4, ViewT(c_.magic_conj), View(u_su), t.data());
-    np_.MatMul(4, View(t), View(c_.magic), up.data());
-    np_.MatMul(4, ViewT(up), View(up), m2.data());
-    std::array<double, 16> p = RealOrthogonalDiagonalize(m2);
-    // eig = np.diag(p.T @ m2 @ p)；theta = np.angle(eig) / 2
+    dm::MatMulTransA(4, up.data(), up.data(), m2.data());
+    std::array<double, 16> p = RealOrthogonalDiagonalize(m2, variant);
+    // eig = diag(p.T @ m2 @ p)；theta = angle(eig) / 2
+    M4 t;
     M4 d;
-    np_.MatMul(4, RView{p.data(), 1, 4}, View(m2), t.data());
-    np_.MatMul(4, View(t), RView{p.data(), 4, 1}, d.data());
+    dm::MatMulRTransC(4, p.data(), m2.data(), t.data());
+    dm::MatMulCR(4, t.data(), p.data(), d.data());
     std::array<double, 4> theta;
     for (int i = 0; i < 4; ++i) {
-        theta[i] = std::atan2(d[i * 5].im, d[i * 5].re) / 2.0;
+        theta[i] = dm::Arg(d[i * 5]) / 2.0;
     }
-    // d = np.exp(1j * theta)；o1c = up @ p @ np.diag(d.conj())
-    M4 dd{};
-    for (int i = 0; i < 4; ++i) {
-        const Cx z = Mul(m.scalar_arr, Cx{0.0, 1.0}, Cx{theta[i], 0.0});
-        const Cx e = NpExpImag(m, z);
-        dd[i * 5] = Cx{e.re, -e.im};
-    }
-    M4 o1c;
-    np_.MatMul(4, View(up), RView{p.data(), 4, 1}, t.data());
-    np_.MatMul(4, View(t), View(dd), o1c.data());
+    // o1c = up @ p @ diag(exp(−iθ))；o1 = Re(o1c)
+    dm::MatMulCR(4, up.data(), p.data(), t.data());
     std::array<double, 16> o1;
-    for (int e = 0; e < 16; ++e) {
-        o1[e] = o1c[e].re;
+    for (int j = 0; j < 4; ++j) {
+        const Cx dd = dm::ExpI(-theta[j]);
+        for (int i = 0; i < 4; ++i) {
+            o1[i * 4 + j] = dm::Mul(t[i * 4 + j], dd).re;
+        }
     }
-    // np.linalg.det(o1c.real) < 0（行列式只取决于数值，与视图步长无关）
-    if (np_.DetNegative4(RView{o1.data(), 4, 1})) {
+    if (dm::DetReal(4, o1.data()) < 0) {
         theta[0] += kPi;
         for (int i = 0; i < 4; ++i) {
             o1[i * 4] = -o1[i * 4];
         }
     }
+    // g = _PHASE_MAP.T @ theta
     double g[4];
-    np_.MatVecT4(c_.phase_map.data(), theta.data(), g);
+    for (int j = 0; j < 4; ++j) {
+        double s = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            s += c_.phase_map[static_cast<std::size_t>(i * 4 + j)] * theta[i];
+        }
+        g[j] = s;
+    }
     // k1 = _MAGIC @ o1 @ _MAGIC_DAG；k2 = _MAGIC @ p.T @ _MAGIC_DAG
-    np_.MatMul(4, View(c_.magic), RView{o1.data(), 4, 1}, t.data());
-    np_.MatMul(4, View(t), ViewT(c_.magic_conj), out->k1.data());
-    np_.MatMul(4, View(c_.magic), RView{p.data(), 1, 4}, t.data());
-    np_.MatMul(4, View(t), ViewT(c_.magic_conj), out->k2.data());
+    dm::MatMulCR(4, c_.magic.data(), o1.data(), t.data());
+    out->k1 = Mat4(t, c_.magic_dag);
+    dm::MatMulCRTrans(4, c_.magic.data(), p.data(), t.data());
+    out->k2 = Mat4(t, c_.magic_dag);
     out->phase = phase0 + g[0] / 4.0;
     out->v = {g[1] / 4.0, g[2] / 4.0, g[3] / 4.0};
 }
@@ -417,10 +408,9 @@ void KakSynthesizer::Canonicalize(Kak* kak) const {
     std::array<double, 3>& v = kak->v;
     // 1. 每个坐标移到 (−π/4, π/4]
     for (int i = 0; i < 3; ++i) {
-        // Python：k 是 int（math.floor 的结果），参与浮点运算时转成 float（0 为 +0.0）
         const double fl = std::floor((v[i] + kPi4) / kPi2);
         if (!(std::fabs(fl) < 1e15)) {
-            throw Fallback("Weyl coordinate out of range");
+            throw SynthesisFailed("Weyl coordinate out of range");
         }
         auto k = -static_cast<long long>(fl);
         double reduced = v[i] + static_cast<double>(k) * kPi2;
@@ -435,9 +425,9 @@ void KakSynthesizer::Canonicalize(Kak* kak) const {
         kak->phase += -kPi2 * static_cast<double>(k);
     }
     auto conj = [this, kak](const M4& c_mat) {
-        const M4 cc = Conj(c_mat);
+        // Can(v_old) = C^† Can(v_new) C：k1 ← k1 C^†，k2 ← C k2
         M4 k1;
-        np_.MatMul(4, View(kak->k1), ViewT(cc), k1.data());
+        dm::MatMulAdjB(4, kak->k1.data(), c_mat.data(), k1.data());
         kak->k1 = k1;
         kak->k2 = Mat4(c_mat, kak->k2);
     };
@@ -474,15 +464,15 @@ void KakSynthesizer::Canonicalize(Kak* kak) const {
     }
 }
 
-Kak KakSynthesizer::Kak4(const M4& u) const {
+Kak KakSynthesizer::Kak4(const M4& u, int variant) const {
     Kak kak;
-    RawKak(u, &kak);
+    RawKak(u, variant, &kak);
     Canonicalize(&kak);
     return kak;
 }
 
 std::array<M2, 2> KakSynthesizer::FactorLocal(const M4& k) const {
-    // realigned = k.reshape(2,2,2,2).transpose(0,2,1,3).reshape(4,4)
+    // realigned = k.reshape(2,2,2,2).transpose(0,2,1,3).reshape(4,4) = vec(A) vec(C)^T（k = A ⊗ C）
     M4 realigned;
     for (int i = 0; i < 2; ++i) {
         for (int j = 0; j < 2; ++j) {
@@ -496,23 +486,22 @@ std::array<M2, 2> KakSynthesizer::FactorLocal(const M4& k) const {
     M4 u;
     M4 vh;
     std::array<double, 4> s;
-    if (!np_.Svd4(realigned, &u, &s, &vh)) {
-        throw Fallback("svd failed");
+    if (!dm::Svd(4, realigned.data(), u.data(), s.data(), vh.data())) {
+        throw SynthesisFailed("KAK: singular value decomposition failed");
     }
-    const ArithModes& m = np_.modes();
-    const double scale = std::sqrt(s[0]);
+    const double scale = dm::Sqrt(s[0]);
     M2 a_mat;
     M2 c_mat;
     for (int e = 0; e < 4; ++e) {
-        a_mat[e] = Mul(m.arr_scalar, u[e * 4], Cx{scale, 0.0});
-        c_mat[e] = Mul(m.arr_scalar, vh[e], Cx{scale, 0.0});
+        a_mat[e] = dm::Scale(u[e * 4], scale);
+        c_mat[e] = dm::Scale(vh[e], scale);
     }
-    const Cx det_a = np_.Det(2, View(a_mat));
-    if (PyAbs(det_a) > 1e-300) {
-        const Cx root = PySqrt(det_a);
+    const Cx det_a = dm::Det(a_mat);
+    if (dm::Abs(det_a) > 1e-300) {
+        const Cx root = dm::Sqrt(det_a);
         for (int e = 0; e < 4; ++e) {
-            a_mat[e] = NpDiv(m.np_div, a_mat[e], root);
-            c_mat[e] = Mul(m.arr_scalar, c_mat[e], root);
+            a_mat[e] = dm::Div(a_mat[e], root);
+            c_mat[e] = dm::Mul(c_mat[e], root);
         }
     }
     return {a_mat, c_mat};
@@ -521,21 +510,20 @@ std::array<M2, 2> KakSynthesizer::FactorLocal(const M4& k) const {
 // ---- 单比特欧拉合成 ------------------------------------------------------------
 
 void KakSynthesizer::EulerOps(const M2& matrix, int qubit, int basis, double atol, std::vector<Op>* out) const {
-    const ArithModes& md = np_.modes();
     // _zxz_angles
-    const Cx det = Sub(Mul(md.np_scalar, matrix[0], matrix[3]), Mul(md.np_scalar, matrix[1], matrix[2]));
-    const Cx root = PySqrt(det);
-    const Cx m00 = NpDiv(md.np_div, matrix[0], root);
-    const Cx m10 = NpDiv(md.np_div, matrix[2], root);
-    const double a00 = PyAbs(m00);
-    const double a10 = PyAbs(m10);
-    const double theta = 2.0 * PyAtan2(a10, a00);
-    const double plus = a00 > 1e-12 ? -2.0 * PyPhase(m00) : 0.0;
-    const double minus = a10 > 1e-12 ? 2.0 * PyPhase(m10) + kPi : 0.0;
+    const Cx det = dm::Sub(dm::Mul(matrix[0], matrix[3]), dm::Mul(matrix[1], matrix[2]));
+    const Cx root = dm::Sqrt(det);
+    const Cx m00 = dm::Div(matrix[0], root);
+    const Cx m10 = dm::Div(matrix[2], root);
+    const double a00 = dm::Abs(m00);
+    const double a10 = dm::Abs(m10);
+    const double theta = 2.0 * dm::Atan2(a10, a00);
+    const double plus = a00 > 1e-12 ? -2.0 * dm::Arg(m00) : 0.0;
+    const double minus = a10 > 1e-12 ? 2.0 * dm::Arg(m10) + kPi : 0.0;
     const double phi = (plus + minus) / 2.0;
     const double lam = (plus - minus) / 2.0;
     if (!std::isfinite(theta) || !std::isfinite(phi) || !std::isfinite(lam)) {
-        throw Fallback("non-finite Euler angles");
+        throw SynthesisFailed("non-finite Euler angles");
     }
     const auto q = static_cast<std::uint8_t>(qubit);
     auto rz = [&](double angle) { out->push_back(Op{OpKind::kRz, q, 0, Wrap(angle)}); };
@@ -614,37 +602,23 @@ M2 KakSynthesizer::OpsLayerMatrix(const std::vector<Op>& ops, std::size_t begin,
     return m;
 }
 
-double KakSynthesizer::DistanceUpToPhase(const M4& u, const M4& v) const {
-    // overlap = np.vdot(v, u)；phase = overlap / abs(overlap)；max |u − phase·v|
-    const Cx overlap = np_.Vdot16(v.data(), u.data());
-    const double ab = PyAbs(overlap);
+double KakSynthesizer::DistanceUpToPhase(const M4& u, const M4& v) {
+    // overlap = vdot(v, u)；phase = overlap / |overlap|；max |u − phase·v|
+    const Cx overlap = dm::Vdot(16, v.data(), u.data());
+    const double ab = dm::Abs(overlap);
     Cx phase{1.0, 0.0};
     if (ab > 1e-300) {
-        phase = Cx{overlap.re / ab, overlap.im / ab};
+        phase = dm::DivReal(overlap, ab);
     }
     double dist = 0.0;
     for (int e = 0; e < 16; ++e) {
-        const Cx diff = Sub(u[e], Mul(np_.modes().scalar_arr, phase, v[e]));
-        const double a = std::hypot(diff.re, diff.im);
+        const double a = dm::Abs(dm::Sub(u[e], dm::Mul(phase, v[e])));
         if (!(a == a)) {
             return a;
         }
         dist = std::max(dist, a);
     }
     return dist;
-}
-
-bool KakSynthesizer::Verified(double err, double verify_atol) {
-    if (!(err == err)) {
-        throw Fallback("non-finite verification distance");
-    }
-    if (verify_atol == 0.0 || std::isinf(verify_atol)) {
-        return err <= verify_atol;  // err 为 0 / 有限值的判断与 numpy 一致
-    }
-    if (std::fabs(err - verify_atol) <= kDecisionMargin * verify_atol) {
-        throw Fallback("verification distance near the tolerance");
-    }
-    return err <= verify_atol;
 }
 
 KakSynthesizer::TryResult KakSynthesizer::EmitLayers(const M4& u, const std::vector<Layer>& layers,
@@ -719,73 +693,6 @@ KakSynthesizer::TryResult KakSynthesizer::EmitFixedLayers(const M4& u, const std
     return best;
 }
 
-std::optional<std::vector<Op>> KakSynthesizer::VerifiedEuler(const M2& u, double atol, int basis) const {
-    for (double tol : {atol, std::min(atol, 1e-12)}) {
-        std::vector<Op> ops;
-        EulerOps(u, 0, basis, tol, &ops);
-        const M2 v = OpsLayerMatrix(ops, 0, ops.size());
-        // overlap = np.vdot(v, u)；phase = overlap / abs(overlap)；max |u − phase·v| <= 1e-9
-        Cx overlap{0.0, 0.0};
-        for (int e = 0; e < 4; ++e) {
-            overlap = Cx{overlap.re + (v[e].re * u[e].re + v[e].im * u[e].im),
-                         overlap.im + (v[e].re * u[e].im - v[e].im * u[e].re)};
-        }
-        const double ab = PyAbs(overlap);
-        Cx phase{1.0, 0.0};
-        if (ab > 1e-300) {
-            phase = Cx{overlap.re / ab, overlap.im / ab};
-        }
-        double dist = 0.0;
-        for (int e = 0; e < 4; ++e) {
-            const Cx diff = Sub(u[e], Mul(np_.modes().scalar_arr, phase, v[e]));
-            dist = std::max(dist, std::hypot(diff.re, diff.im));
-        }
-        if (Verified(dist, 1e-9)) {
-            return ops;
-        }
-    }
-    return std::nullopt;
-}
-
-M4 KakSynthesizer::BlockUnitary(const std::vector<BlockMember>& members, const M4& swap4) const {
-    M4 u{};
-    for (int i = 0; i < 4; ++i) {
-        u[i * 5] = Cx{1.0, 0.0};
-    }
-    for (const BlockMember& member : members) {
-        M4 full;
-        switch (member.slot) {
-            case 0:
-                std::copy(member.matrix, member.matrix + 16, full.begin());
-                break;
-            case 1:
-            case 2: {
-                M2 m;
-                std::copy(member.matrix, member.matrix + 4, m.begin());
-                full = member.slot == 1 ? Kron2(m, c_.i2) : Kron2(c_.i2, m);
-                break;
-            }
-            case 3: {
-                constexpr int kRev[4] = {0, 2, 1, 3};
-                for (int r = 0; r < 4; ++r) {
-                    for (int c = 0; c < 4; ++c) {
-                        full[r * 4 + c] = member.matrix[kRev[r] * 4 + kRev[c]];
-                    }
-                }
-                break;
-            }
-            default: {
-                M4 m;
-                std::copy(member.matrix, member.matrix + 16, m.begin());
-                full = Mat4(Mat4(swap4, m), swap4);
-                break;
-            }
-        }
-        u = Mat4(full, u);
-    }
-    return u;
-}
-
 // ---- 稳定子候选 ----------------------------------------------------------------
 
 std::vector<KakSynthesizer::Pair> KakSynthesizer::StabilizerFamily(
@@ -857,15 +764,11 @@ std::vector<KakSynthesizer::Pair> KakSynthesizer::StabilizerCandidates(int k, co
     const double b = v[1];
     const double c = v[2];
     // targets：k1u_i^† k1v_i 与 k2u_i k2v_i^†
-    const M2 c1u0 = Conj(k1u[0]);
-    const M2 c1u1 = Conj(k1u[1]);
-    const M2 c2v0 = Conj(k2v[0]);
-    const M2 c2v1 = Conj(k2v[1]);
     std::vector<std::pair<int, M2>> targets = {
-        {0, Mat2(ViewT(c1u0), View(k1v[0]))},
-        {1, Mat2(ViewT(c1u1), View(k1v[1]))},
-        {0, Mat2(View(k2u[0]), ViewT(c2v0))},
-        {1, Mat2(View(k2u[1]), ViewT(c2v1))},
+        {0, Mat2AdjA(k1u[0], k1v[0])},
+        {1, Mat2AdjA(k1u[1], k1v[1])},
+        {0, Mat2AdjB(k2u[0], k2v[0])},
+        {1, Mat2AdjB(k2u[1], k2v[1])},
     };
     std::vector<Pair> out = StabilizerFamily(a, b, c, targets, fit_cosets);
     if (mirrored_stabilizers && c < -kStabilizerTol && std::fabs(b + c) <= kStabilizerTol) {
@@ -885,18 +788,16 @@ std::vector<std::pair<KakSynthesizer::Pair, KakSynthesizer::Pair>> KakSynthesize
     const Pair& k1u, const Pair& k1v, const Pair& k2v, const Pair& k2u) const {
     Pair lw;
     Pair rw;
-    for (int i = 0; i < 2; ++i) {
-        const M2 cu = Conj(k1u[static_cast<std::size_t>(i)]);
-        lw[static_cast<std::size_t>(i)] = Mat2(ViewT(cu), View(k1v[static_cast<std::size_t>(i)]));
-        const M2 cd = Conj(k2u[static_cast<std::size_t>(i)]);
-        rw[static_cast<std::size_t>(i)] = Mat2(View(k2v[static_cast<std::size_t>(i)]), ViewT(cd));
+    for (std::size_t i = 0; i < 2; ++i) {
+        lw[i] = Mat2AdjA(k1u[i], k1v[i]);
+        rw[i] = Mat2AdjB(k2v[i], k2u[i]);
     }
-    // Python 的 {0.0, x, y}：按 == 去重、保留先插入的值，再升序排列
+    // Python 的 {0.0, x, y}：按 == 去重，再升序排列
     auto sorted_set = [](double x, double y) {
         std::vector<double> vals{0.0};
         for (double t : {x, y}) {
             if (!(t == t)) {
-                throw Fallback("non-finite gauge angle");
+                throw SynthesisFailed("non-finite gauge angle");
             }
             if (std::find(vals.begin(), vals.end(), t) == vals.end()) {
                 vals.push_back(t);
@@ -938,9 +839,8 @@ KakSynthesizer::TryResult KakSynthesizer::TrySynthesize(const M4& u, const Kak& 
     const Pair b = FactorLocal(kv.k1);
     const Pair& d = uf.d;
     const Pair c = FactorLocal(kv.k2);
-    const Pair b_conj{Conj(b[0]), Conj(b[1])};  // b_dag[i] = ViewT(b_conj[i])
-    const Pair c_conj{Conj(c[0]), Conj(c[1])};
 
+    // u ∝ (k1u S k1v^†) V (k2v^† S^† k2u)：lefts = a_i S_i b_i^†，rights = c_i^† R_i d_i（R = S^† 或规范对的右因子）
     std::vector<Pair> cands =
         StabilizerCandidates(k, kv.v, a, b, c, d, /*fit_cosets=*/swap_face, opt.mirrored_stabilizers);
     std::vector<std::pair<Pair, Pair>> gauges;
@@ -949,52 +849,49 @@ KakSynthesizer::TryResult KakSynthesizer::TrySynthesize(const M4& u, const Kak& 
     }
     const std::size_t nc = cands.size();
     const std::size_t n = nc + gauges.size();
-    auto left_stab = [&](std::size_t j, int i) -> const M2& {
-        return j < nc ? cands[j][static_cast<std::size_t>(i)] : gauges[j - nc].first[static_cast<std::size_t>(i)];
+    auto left_stab = [&](std::size_t j, std::size_t i) -> const M2& {
+        return j < nc ? cands[j][i] : gauges[j - nc].first[i];
+    };
+    auto right_stab = [&](std::size_t j, std::size_t i) -> M2 {
+        return j < nc ? dm::Adjoint(cands[j][i]) : gauges[j - nc].second[i];
+    };
+    auto outer = [&](std::size_t j, std::size_t i, M2* first, M2* last) {
+        const M2 left = Mat2AdjB(Mat2(a[i], left_stab(j, i)), b[i]);
+        const M2 right = Mat2(Mat2AdjA(c[i], right_stab(j, i)), d[i]);
+        const M2& first_layer = i == 0 ? layers[0].left : layers[0].right;
+        const M2& last_layer = i == 0 ? layers.back().left : layers.back().right;
+        *first = Mat2(first_layer, right);
+        *last = Mat2(left, last_layer);
     };
 
     if (n == 1) {
         // fixed(cands[0])（只有 k = 0）
-        const Pair& stab = cands[0];
-        Pair lefts;
-        Pair rights;
-        for (int i = 0; i < 2; ++i) {
-            const auto si = static_cast<std::size_t>(i);
-            lefts[si] = Mat2(View(Mat2(a[si], stab[si])), ViewT(b_conj[si]));
-            const M2 sc = Conj(stab[si]);
-            rights[si] = Mat2(View(Mat2(ViewT(c_conj[si]), ViewT(sc))), View(d[si]));
-        }
         std::vector<Layer> out = layers;
-        out[0] = Layer{Mat2(layers[0].left, rights[0]), Mat2(layers[0].right, rights[1])};
-        Layer& last = out.back();
-        last = Layer{Mat2(lefts[0], last.left), Mat2(lefts[1], last.right)};
+        M2 f0;
+        M2 f1;
+        M2 l0;
+        M2 l1;
+        outer(0, 0, &f0, &l0);
+        outer(0, 1, &f1, &l1);
+        out[0] = Layer{f0, f1};
+        if (out.size() == 1) {
+            // 第一层与最后一层是同一层：先右因子，再左因子
+            out[0] = Layer{Mat2(Mat2AdjB(Mat2(a[0], cands[0][0]), b[0]), f0),
+                           Mat2(Mat2AdjB(Mat2(a[1], cands[0][1]), b[1]), f1)};
+        } else {
+            out.back() = Layer{l0, l1};
+        }
         return EmitFixedLayers(u, out, k, atol, opt);
     }
 
-    // 分批计算每个候选的首末层（与 numpy 的逐项 matmul 相同），按欧拉长度打分
+    // 每个候选的首末层，按欧拉长度打分
     std::vector<M2> firsts[2];
     std::vector<M2> lasts[2];
-    for (int i = 0; i < 2; ++i) {
-        const auto si = static_cast<std::size_t>(i);
+    for (std::size_t i = 0; i < 2; ++i) {
         firsts[i].resize(n);
         lasts[i].resize(n);
-        const M2& first_layer = si == 0 ? layers[0].left : layers[0].right;
-        const M2& last_layer = si == 0 ? layers.back().left : layers.back().right;
         for (std::size_t j = 0; j < n; ++j) {
-            const M2& s = left_stab(j, i);
-            const M2 left = Mat2(View(Mat2(a[si], s)), ViewT(b_conj[si]));
-            M2 right;
-            if (!gauges.empty()) {
-                // right_stack = np.array([...])：候选部分是 s.conj().T 的值，规范对部分是右因子
-                const M2 r = j < nc ? ConjT(cands[j][si]) : gauges[j - nc].second[si];
-                right = Mat2(View(Mat2(ViewT(c_conj[si]), View(r))), View(d[si]));
-            } else {
-                // right_stack = stack.conj().transpose(0, 2, 1)
-                const M2 sc = Conj(s);
-                right = Mat2(View(Mat2(ViewT(c_conj[si]), ViewT(sc))), View(d[si]));
-            }
-            firsts[i][j] = Mat2(first_layer, right);
-            lasts[i][j] = Mat2(left, last_layer);
+            outer(j, i, &firsts[i][j], &lasts[i][j]);
         }
     }
     std::vector<int> scores(n, 0);
@@ -1069,6 +966,40 @@ std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const SynthOptions&
 
 std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const Kak& kak, const SynthOptions& opt,
                                                 bool* uses_flag) const {
+    double best0 = std::numeric_limits<double>::infinity();
+    double best1 = std::numeric_limits<double>::infinity();
+    bool flag0 = false;
+    bool flag1 = false;
+    std::vector<Op> ops0;
+    std::vector<Op> ops1;
+    bool ok0 = true;
+    bool ok1 = true;
+    try {
+        ops0 = SynthesizeExactOnce(u, kak, opt, &flag0, &best0);
+    } catch (const SynthesisFailed&) {
+        ok0 = false;
+    }
+    try {
+        ops1 = SynthesizeExactOnce(u, Kak4(u, 1), opt, &flag1, &best1);
+    } catch (const SynthesisFailed&) {
+        ok1 = false;
+    }
+    if (!ok0 && !ok1) {
+        throw SynthesisFailed(FailureMessage(std::min(best0, best1)));
+    }
+    auto entanglers = [](const std::vector<Op>& ops) {
+        return std::count_if(ops.begin(), ops.end(), [](const Op& o) { return o.kind == OpKind::kEntangler; });
+    };
+    const bool take1 = !ok0 || (ok1 && (entanglers(ops1) < entanglers(ops0) ||
+                                        (entanglers(ops1) == entanglers(ops0) && ops1.size() < ops0.size())));
+    if (uses_flag != nullptr) {
+        *uses_flag = take1 ? flag1 : flag0;
+    }
+    return take1 ? std::move(ops1) : std::move(ops0);
+}
+
+std::vector<Op> KakSynthesizer::SynthesizeExactOnce(const M4& u, const Kak& kak, const SynthOptions& opt,
+                                                    bool* uses_flag, double* best_err) const {
     const int k_min = CountFromCoords(kak.v, opt.atol);
     const bool swap_face = k_min == 3 && IsSwapFace(kak.v);
     if (uses_flag != nullptr) {
@@ -1079,12 +1010,19 @@ std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const Kak& kak, con
     if (opt.atol > kExactEulerAtol) {
         euler_tols.push_back(kExactEulerAtol);
     }
+    double best = std::numeric_limits<double>::infinity();
+    auto note = [&best](double err) {
+        if (err < best) {
+            best = err;
+        }
+    };
     if (opt.swap_face_template && swap_face) {
         for (double tol : euler_tols) {
             TryResult r = TrySynthesize(u, kak, uf, 3, tol, nullptr, opt, true);
             if (Verified(r.err, opt.verify_atol)) {
                 return std::move(r.ops);
             }
+            note(r.err);
         }
     }
     for (int k = k_min; k < 4; ++k) {
@@ -1098,11 +1036,12 @@ std::vector<Op> KakSynthesizer::SynthesizeExact(const M4& u, const Kak& kak, con
                 if (Verified(r.err, opt.verify_atol)) {
                     return std::move(r.ops);
                 }
+                note(r.err);
             }
         }
     }
-    // Python 端抛出 RuntimeError（附最优误差）
-    throw Fallback("two-qubit synthesis failed");
+    *best_err = best;
+    throw SynthesisFailed(FailureMessage(best));
 }
 
 std::optional<std::vector<Op>> KakSynthesizer::SynthesizeSwapFace(const M4& u, const SynthOptions& opt) const {
@@ -1153,17 +1092,14 @@ bool KakSynthesizer::ApproximationImpossible(const Kak& kak, double max_infideli
         double sum = 0.0;
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {
-                const double s = std::sin(0.5 * (phases[i] - phases[j]));
+                const double s = dm::Sin(0.5 * (phases[i] - phases[j]));
                 sum += s * s;
             }
         }
         const double predicted = 4.0 * (2.0 * sum / 16.0) / 5.0;
-        // predicted > budget 时 Python 跳过该 k；否则它会尝试合成（交给 Python）
+        // predicted > budget 时 Python 跳过该 k；否则可能存在近似
         if (!(predicted > budget)) {
             return false;
-        }
-        if (predicted - budget <= kDecisionMargin * budget + 1e-300) {
-            throw Fallback("predicted infidelity near the budget");
         }
     }
     return true;

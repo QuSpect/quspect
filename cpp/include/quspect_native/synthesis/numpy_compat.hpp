@@ -3,6 +3,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
+
+#include "quspect_native/detmath/cx.hpp"
 
 namespace quspect::native::synthesis {
 
@@ -23,13 +26,17 @@ namespace quspect::native::synthesis {
 // 本文件以 -ffp-contract=off 编译：所有 FMA 都显式写成 std::fma。
 
 // 复数（与 numpy complex128 / std::complex<double> 布局相同）。
-struct Cx {
-    double re;
-    double im;
-};
+using Cx = detmath::Cx;
 
 using M2 = std::array<Cx, 4>;   // 2×2，行主序
 using M4 = std::array<Cx, 16>;  // 4×4，行主序
+
+// numpy 语义的原生实现不能复刻 Python 参考结果（比较落在阈值附近、输入不是有限值等），需要退回
+// Python 参考实现。
+class Fallback : public std::runtime_error {
+ public:
+    explicit Fallback(const char* what) : std::runtime_error(what) {}
+};
 
 // 复数乘法 a·b 的运算顺序。
 enum class MulMode : int {

@@ -42,6 +42,7 @@
 #include "quspect_native/transpiler/su4_routing.hpp"
 
 #include "dag_bindings.hpp"
+#include "detmath_bindings.hpp"
 #include "ir_bindings.hpp"
 #include "consolidate_bindings.hpp"
 #include "gauge_bindings.hpp"
@@ -280,6 +281,7 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
     quspect::native::pybind::BindIr(m);
     quspect::native::pybind::BindDagCore(m);
     quspect::native::pybind::BindSynthesis(m);
+    quspect::native::pybind::BindDetmath(m);
     quspect::native::pybind::BindSchedule(m);
     quspect::native::pybind::BindConsolidate(m);
     quspect::native::pybind::BindGauge(m);

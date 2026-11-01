@@ -57,6 +57,13 @@ def current_without_round_17() -> Iterator[None]:
     """Run the current code with the round-17 algorithm changes off."""
     with pytest.MonkeyPatch.context() as mp:
         _without_round_17(mp)
+        # 两边都用 Python 的两比特 KAK：原生 KAK 走确定性数值层，
+        # 与 numpy / LAPACK 的 Python 参考实现不逐位一致；这里比较的是
+        # 单比特最小化与稳定子选择的加速，不涉及 KAK 的数值实现。
+        # 换成另一个函数对象即可绕过原生 KAK（见 NativeKak._matrix），
+        # numpy 语义的原生辅助函数不受影响。
+        reference = two_qubit._try_synthesize_reference
+        mp.setattr(two_qubit, "_try_synthesize", lambda *a, **k: reference(*a, **k))
         clear_synthesis_caches()
         try:
             yield

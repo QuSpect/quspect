@@ -382,7 +382,7 @@ def _probed_kernels(core: Any, length: _LengthModel) -> _Native | None:
     from quspect.synthesis.two_qubit import _native_kak
 
     kak = _native_kak()
-    if kak is None:
+    if kak is None or not kak.numpy_compat:
         return None
     if _ARITHMETIC[0] != "probed":
         core._gauge_arithmetic(kak._synth)
@@ -742,7 +742,7 @@ def _minimize_driver(
     from quspect.synthesis.two_qubit import _native_kak
 
     kak = _native_kak()
-    if kak is None:
+    if kak is None or not kak.numpy_compat:
         return None
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction, InstructionType

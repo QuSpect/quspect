@@ -1,10 +1,10 @@
-// 两比特 KAK 合成（synthesis/kak_synthesis）的 gtest。
+// 两比特 KAK 合成（synthesis/kak_synthesis，确定性数值层）与 numpy 语义辅助代码（numpy_compat、
+// 单比特合成）的 gtest。
 //
-// 生产环境中 BLAS / LAPACK 函数地址来自 numpy 链接的库，与 Python 参考实现的逐位一致性由
-// tests/synthesis/test_native_kak.py 检查。这里用测试内的朴素实现（三重循环乘法、Jacobi 特征分解与
-// 奇异值分解、部分主元 LU，接口与 Fortran / CBLAS 相同）代替，检查算法本身：KAK 分解能重建输入、
-// 坐标落在 Weyl 室内、合成出的门序列等于输入（相差全局相位）且纠缠门数最少、欧拉合成正确、
-// 各种逐元素运算顺序的定义正确。
+// KAK 合成不依赖外部库，这里直接检查算法：KAK 分解能重建输入、坐标落在 Weyl 室内、合成出的门序列
+// 等于输入（相差全局相位）且纠缠门数最少、欧拉合成正确。numpy 语义部分在生产环境中调用 numpy 链接的
+// BLAS / LAPACK，这里用测试内的朴素实现（三重循环乘法、Jacobi 特征分解与奇异值分解、部分主元 LU，
+// 接口与 Fortran / CBLAS 相同）代替，检查各种逐元素运算顺序的定义与调用约定。
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -427,47 +427,36 @@ const CM kCZ{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1};
 const CM kCX{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0};
 const CM kSwap{1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1};
 
-KakConstants TestConstants() {
-    KakConstants c;
-    c.magic = ToArr<16>(kMagic);
-    CM mc = kMagic;
-    for (C& z : mc) {
-        z = std::conj(z);
-    }
-    c.magic_conj = ToArr<16>(mc);
-    c.i2 = ToArr<4>(kI2);
-    c.x = ToArr<4>(kX);
-    c.y = ToArr<4>(kY);
-    c.z = ToArr<4>(kZ);
-    c.h = ToArr<4>(kH);
-    c.sx = ToArr<4>(kSX);
-    c.cz4 = ToArr<16>(kCZ);
-    c.swap4 = ToArr<16>(kSwap);
-    c.pauli_pairs = {ToArr<16>(Kron(kX, kX)), ToArr<16>(Kron(kY, kY)), ToArr<16>(Kron(kZ, kZ))};
-    c.swap_ab = ToArr<16>(Kron(kSg, kSg));
-    c.swap_bc = ToArr<16>(Kron(kRx90, kRx90));
-    c.flip_ab = ToArr<16>(Kron(kZ, kI2));
-    c.flip_ac = ToArr<16>(Kron(kY, kI2));
-    c.flip_bc = ToArr<16>(Kron(kX, kI2));
+// KakConstants::Make() 与 two_qubit.py 的常量矩阵数值相同。
+TEST(KakConstants, MatchTheModuleConstants) {
+    const KakConstants c = KakConstants::Make();
+    auto same = [](const auto& got, const CM& want) {
+        for (std::size_t i = 0; i < want.size(); ++i) {
+            EXPECT_EQ(ToC(got[i]), want[i]) << i;
+        }
+    };
+    same(c.magic, kMagic);
+    same(c.magic_dag, Dagger(kMagic));
+    same(c.h, kH);
+    same(c.sx, kSX);
+    same(c.cz4, kCZ);
+    same(c.swap4, kSwap);
+    same(c.pauli_pairs[1], Kron(kY, kY));
+    same(c.swap_ab, Kron(kSg, kSg));
+    same(c.swap_bc, Kron(kRx90, kRx90));
+    same(c.flip_ac, Kron(kY, kI2));
     const double phases[4][3] = {{1, -1, 1}, {1, 1, -1}, {-1, -1, -1}, {-1, 1, 1}};
     for (int r = 0; r < 4; ++r) {
-        c.phase_map[static_cast<std::size_t>(r * 4)] = 1.0;
+        EXPECT_EQ(c.phase_map[static_cast<std::size_t>(r * 4)], 1.0);
         for (int k = 0; k < 3; ++k) {
-            c.phase_map[static_cast<std::size_t>(r * 4 + 1 + k)] = phases[r][k];
-            c.can_phases[static_cast<std::size_t>(r * 3 + k)] = phases[r][k];
+            EXPECT_EQ(c.phase_map[static_cast<std::size_t>(r * 4 + 1 + k)], phases[r][k]);
+            EXPECT_EQ(c.can_phases[static_cast<std::size_t>(r * 3 + k)], phases[r][k]);
         }
     }
-    std::mt19937_64 rng(1234567);
-    std::normal_distribution<double> normal;
-    for (int i = 0; i < 196; ++i) {
-        c.normals.push_back(normal(rng));
-    }
-    return c;
 }
 
-// 平台无关的运算顺序（测试 BLAS 本身没有精确语义，这里只检查数学正确性）。
 KakSynthesizer MakeSynth() {
-    KakSynthesizer s(TestFunctions(), ArithModes{}, TestConstants());
+    KakSynthesizer s;
     EntanglerSpec cz;
     cz.name = "cz";
     cz.matrix = ToArr<16>(kCZ);
@@ -615,8 +604,7 @@ TEST(NumpyCompat, DivisionAndScalarFunctions) {
 }
 
 TEST(NumpyLinalg, MatMulSyrkAndDecompositions) {
-    const KakSynthesizer s = MakeSynth();
-    const NumpyLinalg& np = s.linalg();
+    const NumpyLinalg np(TestFunctions(), ArithModes{});
     std::mt19937_64 rng(7);
     const M4 a = ToArr<16>(RandomUnitary(rng, 4));
     const M4 b = ToArr<16>(RandomUnitary(rng, 4));
@@ -790,7 +778,7 @@ TEST(KakSynthesizer, ApproximationFilterAndUnitarityCheck) {
     EXPECT_FALSE(s.ApproximationImpossible(s.Kak4(ToArr<16>(cp)), 1e-12, 1e-9, 2));
     CM bad = kCZ;
     bad[0] = 2.0;
-    EXPECT_THROW(s.CheckUnitary(ToArr<16>(bad)), Fallback);
+    EXPECT_THROW(s.CheckUnitary(ToArr<16>(bad)), NotUnitary);
     EXPECT_NO_THROW(s.CheckUnitary(ToArr<16>(kCZ)));
 }
 

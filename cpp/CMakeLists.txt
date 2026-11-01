@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(quspect_native VERSION 0.1.0 LANGUAGES CXX)
+project(quspect_native VERSION 0.1.0 LANGUAGES C CXX)
 
 # ---- CTest ----
 include(CTest)
@@ -8,6 +8,9 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# C 只用于 third_party/core-math（C99 + GCC 扩展）
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ---- Build options ----
@@ -289,22 +292,67 @@ set(TRANSPILER_SRCS
   src/transpiler/su4_routing.cpp
 )
 
-# Two-qubit KAK synthesis (numpy-exact small-matrix linear algebra)
+# Two-qubit KAK synthesis (deterministic numerics; single-qubit / block products still numpy-exact)
 set(SYNTHESIS_SRCS
   src/synthesis/numpy_compat.cpp
+  src/synthesis/numpy_euler.cpp
   src/synthesis/kak_synthesis.cpp
   src/synthesis/one_qubit_synthesis.cpp
 )
-# 路由计分必须与 Python 参考实现逐位一致：禁止把 a + b * c 合并成 FMA（arm64 上 clang 默认会合并）。
-# QASM 参数表达式求值同理（结果必须与 Python 的 float 运算逐位一致）。
-# 两比特合成必须与 numpy / CPython 的运算顺序逐位一致（FMA 一律显式写出）。
-set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} src/ir/qasm2_parser.cpp src/ir/dag_passes.cpp
-    src/pybind/basis_bindings.cpp src/pybind/gauge_bindings.cpp src/pybind/phase_fold_bindings.cpp)
+
+# Deterministic numerics layer (detmath): small-matrix linear algebra + correctly rounded math
+set(DETMATH_SRCS
+  src/detmath/scalar.cpp
+  src/detmath/complex.cpp
+  src/detmath/linalg.cpp
+)
+
+# CORE-MATH（https://core-math.gitlabpages.inria.fr/，MIT）：正确舍入的 binary64 超越函数，
+# 结果与平台、编译器无关。版本与来源见 third_party/core-math/README.md。
+set(CORE_MATH_DIR third_party/core-math/src/binary64)
+set(CORE_MATH_SRCS
+  ${CORE_MATH_DIR}/sin/sin.c
+  ${CORE_MATH_DIR}/cos/cos.c
+  ${CORE_MATH_DIR}/tan/tan.c
+  ${CORE_MATH_DIR}/asin/asin.c
+  ${CORE_MATH_DIR}/acos/acos.c
+  ${CORE_MATH_DIR}/atan/atan.c
+  ${CORE_MATH_DIR}/atan2/atan2.c
+  ${CORE_MATH_DIR}/exp/exp.c
+  ${CORE_MATH_DIR}/log/log.c
+  ${CORE_MATH_DIR}/hypot/hypot.c
+)
+# CORE-MATH 用到 128 位整数（unsigned __int128 / _BitInt(128)）与 GCC 内建函数，MSVC 的 C 编译器
+# 不支持；Windows 上 C 编译器须为 clang-cl（-DCMAKE_C_COMPILER=clang-cl，C++ 仍用 MSVC）。
+if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
+  message(FATAL_ERROR "cpp/third_party/core-math needs a C compiler with 128-bit integers and GCC builtins; "
+                      "MSVC's C compiler has neither. Configure with -DCMAKE_C_COMPILER=clang-cl.")
+endif()
+if(MSVC)
+  # clang-cl：与 MSVC 同一 ABI；关闭 FMA 收缩
+  set(_qspect_coremath_options /fp:precise /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-w)
+else()
+  set(_qspect_coremath_options -ffp-contract=off -fno-fast-math -w)
+endif()
+set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES COMPILE_OPTIONS "${_qspect_coremath_options}")
+set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES INCLUDE_DIRECTORIES
+  "${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/atan2;${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/log")
+
+# 精确浮点规则（见 include/quspect_native/detmath/config.hpp）：禁止把 a + b * c 合并成 FMA（arm64 上
+# clang 默认会合并，aarch64 上 gcc 默认 -ffp-contract=fast），禁止 fast-math。适用于：
+#   * 确定性数值层与使用它的合成代码（全平台逐位一致）；
+#   * 路由计分、QASM 参数表达式求值、numpy 语义的单比特合成等（与 Python 参考实现逐位一致）。
+# 这些源文件定义 QSPECT_EXACT_FP=1；detmath 的运算头文件只能在这样的源文件中包含。
+set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} ${DETMATH_SRCS} src/ir/qasm2_parser.cpp
+    src/ir/dag_passes.cpp src/pybind/basis_bindings.cpp src/pybind/gauge_bindings.cpp
+    src/pybind/phase_fold_bindings.cpp src/pybind/synthesis_bindings.cpp src/pybind/detmath_bindings.cpp
+    tests/test_detmath.cpp tests/test_kak_synthesis.cpp)
 if(NOT MSVC)
-  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+  set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math")
 else()
   set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
+set_source_files_properties(${QSPECT_EXACT_FP_SRCS} PROPERTIES COMPILE_DEFINITIONS QSPECT_EXACT_FP=1)
 
 # pybind11 module
 set(PYBIND_SRCS
@@ -315,6 +363,7 @@ set(PYBIND_SRCS
   src/pybind/basis_bindings.cpp
   src/pybind/circuit_bindings.cpp
   src/pybind/consolidate_bindings.cpp
+  src/pybind/detmath_bindings.cpp
   src/pybind/gauge_bindings.cpp
   src/pybind/phase_fold_bindings.cpp
   src/pybind/replay_bindings.cpp
@@ -350,6 +399,8 @@ set(QSPECT_CORE_SRCS
   ${OPTIMIZATION_SRCS}
   ${TRANSPILER_SRCS}
   ${SYNTHESIS_SRCS}
+  ${DETMATH_SRCS}
+  ${CORE_MATH_SRCS}
 )
 
 # 编译阶段的任务并行（common/parallel.cpp 的 RunTasks）使用 std::thread
@@ -524,6 +575,7 @@ if(QSPECT_BUILD_TESTS)
     tests/test_ir_circuit.cpp
     tests/test_qasm2_parser.cpp
     tests/test_kak_synthesis.cpp
+    tests/test_detmath.cpp
   )
 
   foreach(test_src ${TEST_SRCS})
