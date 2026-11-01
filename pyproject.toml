@@ -118,12 +118,6 @@ QSPECT_BUILD_TESTS = "OFF"
 # 可编辑安装（pip install -e .）保持纯 Python、原地生效，与之前一致：
 # C++ 扩展仍由开发者手动用 CMake 构建到 quspect/（见 README），
 # 因此 lint / 类型检查不需要编译器或网络。
-# Windows：cpp/third_party/core-math 需要支持 128 位整数与 GCC 内建函数的 C 编译器（clang-cl），
-# C++ 仍用 MSVC。
-[[tool.scikit-build.overrides]]
-if.platform-system = "win32"
-cmake.define.CMAKE_C_COMPILER = "clang-cl"
-
 [[tool.scikit-build.overrides]]
 if.state = "editable"
 wheel.cmake = false
@@ -151,14 +145,15 @@ environment = { SKBUILD_CMAKE_DEFINE = "QSPECT_REQUIRE_OPENMP=ON" }
 test-sources = ["tests", "examples", "tools"]
 test-requires = ["pytest>=8"]
 # tests/optimization 中的 iSing 客户端测试需要 httpx，经 isingq extra 安装。
-# tests/pulse 校验 quspect._pulse 包络模块（与 envelopes-qc 0.1.5 逐位一致的黄金值）。
+# tests/pulse 校验 quspect._pulse 包络模块（与 envelopes-qc 0.1.5 逐位一致的黄金值）；
+# test_golden_digests_are_platform_independent 校验确定性数值层与 KAK 合成的跨平台金标准摘要。
 test-extras = ["isingq"]
 test-environment = { QUSPECT_EXPECT_OPENMP = "1" }
 test-command = [
     "python tools/wheel_smoke.py --project-dir {project}",
-    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent -q -o addopts=\"\" -p no:cacheprovider",
     "QUSPECT_DISABLE_AVX2=1 python tools/wheel_smoke.py --project-dir {project}",
-    "QUSPECT_DISABLE_AVX2=1 python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "QUSPECT_DISABLE_AVX2=1 python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent -q -o addopts=\"\" -p no:cacheprovider",
 ]
 
 [tool.cibuildwheel.linux]
@@ -193,10 +188,10 @@ repair-wheel-command = "python {project}/tools/windows_repair_wheel.py --wheel {
 # Windows 上 test-command 由 cmd.exe 执行：用 set 设置环境变量。
 test-command = [
     "python tools/wheel_smoke.py --project-dir {project}",
-    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent -q -o addopts=\"\" -p no:cacheprovider",
     "set \"QUSPECT_DISABLE_AVX2=1\"",
     "python tools/wheel_smoke.py --project-dir {project}",
-    "python -m pytest tests/native tests/optimization tests/pulse -q -o addopts=\"\" -p no:cacheprovider",
+    "python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent -q -o addopts=\"\" -p no:cacheprovider",
 ]
 
 [tool.ruff]

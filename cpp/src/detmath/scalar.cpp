@@ -12,6 +12,7 @@ double cr_atan2(double, double);
 double cr_exp(double);
 double cr_log(double);
 double cr_hypot(double, double);
+double cr_pow(double, double);
 }
 
 namespace quspect::native::detmath {
@@ -54,6 +55,10 @@ double Log(double x) {
 
 double Hypot(double x, double y) {
     return cr_hypot(x, y);
+}
+
+double Pow(double x, double y) {
+    return cr_pow(x, y);
 }
 
 }  // namespace quspect::native::detmath

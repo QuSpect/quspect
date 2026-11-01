@@ -25,7 +25,7 @@ using ComplexArray = py::array_t<std::complex<double>, py::array::c_style | py::
 // 对数组逐元素求 detmath 标量函数（二元函数 atan2 / hypot 的第二个参数为 y）。
 py::array_t<double> Scalar(const std::string& name, const RealArray& x, const RealArray& y) {
     const auto n = static_cast<std::size_t>(x.size());
-    const bool binary = name == "atan2" || name == "hypot";
+    const bool binary = name == "atan2" || name == "hypot" || name == "pow";
     if (binary && static_cast<std::size_t>(y.size()) != n) {
         throw std::invalid_argument("operand sizes differ");
     }
@@ -58,6 +58,8 @@ py::array_t<double> Scalar(const std::string& name, const RealArray& x, const Re
             po[i] = dm::Atan2(px[i], py_[i]);
         } else if (name == "hypot") {
             po[i] = dm::Hypot(px[i], py_[i]);
+        } else if (name == "pow") {
+            po[i] = dm::Pow(px[i], py_[i]);
         } else {
             po[i] = unary(px[i]);
         }

@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
-project(quspect_native VERSION 0.1.0 LANGUAGES C CXX)
+project(quspect_native VERSION 0.1.0 LANGUAGES CXX)
+# C 只用于 third_party/core-math（C11 + GCC 扩展）。MSVC 工具链下 core-math 由 clang-cl 单独编译成
+# 目标文件（见下面的 CORE-MATH 一节）：CMake 不允许 C 用 clang-cl 而 C++ 用 MSVC。
+if(NOT MSVC)
+  enable_language(C)
+endif()
 
 # ---- CTest ----
 include(CTest)
@@ -8,7 +13,6 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-# C 只用于 third_party/core-math（C99 + GCC 扩展）
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -321,22 +325,54 @@ set(CORE_MATH_SRCS
   ${CORE_MATH_DIR}/exp/exp.c
   ${CORE_MATH_DIR}/log/log.c
   ${CORE_MATH_DIR}/hypot/hypot.c
+  ${CORE_MATH_DIR}/pow/pow.c
 )
 # CORE-MATH 用到 128 位整数（unsigned __int128 / _BitInt(128)）与 GCC 内建函数，MSVC 的 C 编译器
-# 不支持；Windows 上 C 编译器须为 clang-cl（-DCMAKE_C_COMPILER=clang-cl，C++ 仍用 MSVC）。
-if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
-  message(FATAL_ERROR "cpp/third_party/core-math needs a C compiler with 128-bit integers and GCC builtins; "
-                      "MSVC's C compiler has neither. Configure with -DCMAKE_C_COMPILER=clang-cl.")
-endif()
+# 不支持。MSVC 工具链（Windows）下用 clang-cl（同一 ABI，可与 MSVC 目标文件链接）把这些源文件
+# 编译成目标文件，直接放进静态库（QSPECT_CORE_MATH_OBJECTS）；其他平台作为普通 C 源文件编译。
+# clang-cl 生成的目标文件只引用 UCRT 的函数（fma、fmin、fmax、sqrt、round、fe*、printf / exit），
+# 不需要 compiler-rt。
+set(_qspect_coremath_includes "${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/atan2"
+    "${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/log")
+set(QSPECT_CORE_MATH_OBJECTS)
 if(MSVC)
-  # clang-cl：与 MSVC 同一 ABI；关闭 FMA 收缩
-  set(_qspect_coremath_options /fp:precise /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-w)
+  find_program(QSPECT_CLANG_CL NAMES clang-cl
+    HINTS "$ENV{VCINSTALLDIR}/Tools/Llvm/x64/bin" "$ENV{ProgramFiles}/LLVM/bin" "C:/Program Files/LLVM/bin")
+  if(NOT QSPECT_CLANG_CL)
+    message(FATAL_ERROR "cpp/third_party/core-math needs clang-cl on Windows (128-bit integers and GCC builtins "
+                        "are not available in MSVC's C compiler); install LLVM or the VS 'C++ Clang tools'.")
+  endif()
+  if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
+    set(_qspect_clang_target aarch64-pc-windows-msvc)
+  else()
+    set(_qspect_clang_target x86_64-pc-windows-msvc)
+  endif()
+  message(STATUS "CORE-MATH: compiled with ${QSPECT_CLANG_CL} (target ${_qspect_clang_target})")
+  set(_qspect_coremath_inc_flags)
+  foreach(_dir IN LISTS _qspect_coremath_includes)
+    list(APPEND _qspect_coremath_inc_flags "/I${_dir}")
+  endforeach()
+  foreach(_src IN LISTS CORE_MATH_SRCS)
+    get_filename_component(_name "${_src}" NAME_WE)
+    set(_obj "${CMAKE_CURRENT_BINARY_DIR}/core-math/${_name}.obj")
+    add_custom_command(
+      OUTPUT "${_obj}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/core-math"
+      COMMAND "${QSPECT_CLANG_CL}" /nologo /c /O2 /MD /fp:precise "/clang:--target=${_qspect_clang_target}"
+              /clang:-std=gnu11 /clang:-ffp-contract=off /clang:-fno-fast-math /clang:-w
+              ${_qspect_coremath_inc_flags} "/Fo${_obj}" "${CMAKE_CURRENT_SOURCE_DIR}/${_src}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_src}"
+      COMMENT "Compiling CORE-MATH ${_name}.c with clang-cl"
+      VERBATIM)
+    list(APPEND QSPECT_CORE_MATH_OBJECTS "${_obj}")
+  endforeach()
+  set_source_files_properties(${QSPECT_CORE_MATH_OBJECTS} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  set(QSPECT_CORE_MATH_C_SRCS)
 else()
-  set(_qspect_coremath_options -ffp-contract=off -fno-fast-math -w)
+  set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-fast-math;-w")
+  set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES INCLUDE_DIRECTORIES "${_qspect_coremath_includes}")
+  set(QSPECT_CORE_MATH_C_SRCS ${CORE_MATH_SRCS})
 endif()
-set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES COMPILE_OPTIONS "${_qspect_coremath_options}")
-set_source_files_properties(${CORE_MATH_SRCS} PROPERTIES INCLUDE_DIRECTORIES
-  "${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/atan2;${CMAKE_CURRENT_SOURCE_DIR}/${CORE_MATH_DIR}/log")
 
 # 精确浮点规则（见 include/quspect_native/detmath/config.hpp）：禁止把 a + b * c 合并成 FMA（arm64 上
 # clang 默认会合并，aarch64 上 gcc 默认 -ffp-contract=fast），禁止 fast-math。适用于：
@@ -400,7 +436,7 @@ set(QSPECT_CORE_SRCS
   ${TRANSPILER_SRCS}
   ${SYNTHESIS_SRCS}
   ${DETMATH_SRCS}
-  ${CORE_MATH_SRCS}
+  ${QSPECT_CORE_MATH_C_SRCS}
 )
 
 # 编译阶段的任务并行（common/parallel.cpp 的 RunTasks）使用 std::thread
@@ -421,6 +457,7 @@ target_include_directories(qspect_dispatch_scalar PUBLIC ${NATIVE_INCLUDE_DIR})
 add_library(qspect_native_scalar_static STATIC
   $<TARGET_OBJECTS:qspect_core_obj>
   $<TARGET_OBJECTS:qspect_dispatch_scalar>
+  ${QSPECT_CORE_MATH_OBJECTS}
 )
 target_include_directories(qspect_native_scalar_static PUBLIC ${NATIVE_INCLUDE_DIR})
 target_link_libraries(qspect_native_scalar_static PUBLIC Threads::Threads)
@@ -444,6 +481,7 @@ if(QSPECT_AVX2_ACTIVE)
     $<TARGET_OBJECTS:qspect_core_obj>
     $<TARGET_OBJECTS:qspect_dispatch_avx2>
     $<TARGET_OBJECTS:qspect_kernels_avx2_obj>
+    ${QSPECT_CORE_MATH_OBJECTS}
   )
   target_include_directories(qspect_native_avx2_static PUBLIC ${NATIVE_INCLUDE_DIR})
   target_link_libraries(qspect_native_avx2_static PUBLIC Threads::Threads)

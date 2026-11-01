@@ -20,12 +20,19 @@ Sections of the dump:
 * ``kak``: Weyl coordinates, phase and local factors of ``_kak4``;
 * ``ops/<basis>``: the synthesized gate sequence (names, qubits and
   ``float.hex`` parameters) for several target bases and template switches.
+
+``--transpile DIR`` instead fingerprints whole compilations: every QASM file
+of ``DIR`` is parsed by quspect and transpiled with ``seed=0`` onto several
+coupling graphs (line, ring, grid, full) and gate sets (``{cz, rz, sx, x}``,
+``{cx, rz, sx, x}``) at levels 1–3; each record holds the layouts and the
+output gate sequence (``tp/<level>`` sections).
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import math
 import sys
 import time
@@ -260,6 +267,84 @@ def harvest(path: str, files: list[str], limit: int) -> None:
     print(f"{len(seen)} blocks from {len(files)} files -> {path}")
 
 
+_TP_BASES = {"cz": ("cz", "rz", "sx", "x"), "cx": ("cx", "rz", "sx", "x")}
+_TP_TOPOLOGIES = ("line", "ring", "grid", "full")
+
+
+def _edges(kind: str, n: int) -> tuple[int, list[tuple[int, int]]]:
+    """Number of physical qubits and edges of a small coupling graph."""
+    if kind == "line":
+        return n, [(i, i + 1) for i in range(n - 1)]
+    if kind == "ring":
+        return n, [(i, (i + 1) % n) for i in range(n)] if n > 2 else [(0, 1)]
+    if kind == "full":
+        return n, [(i, j) for i in range(n) for j in range(i + 1, n)]
+    cols = math.isqrt(n - 1) + 1
+    rows = -(-n // cols)
+    edges = []
+    for r in range(rows):
+        for c in range(cols):
+            q = r * cols + c
+            if c + 1 < cols:
+                edges.append((q, q + 1))
+            if r + 1 < rows:
+                edges.append((q, q + cols))
+    return rows * cols, edges
+
+
+def _circuit_text(circuit: Any) -> str:
+    parts = []
+    for ins in circuit:
+        g = ins.gate
+        name = g.name if g is not None else ins.type.name.lower()
+        params = g.params if g is not None else ()
+        parts.append(
+            name
+            + "".join(f",{q}" for q in ins.qubits)
+            + "".join(f":{float(p).hex()}" for p in params)
+        )
+    return ";".join(parts)
+
+
+def _transpile_job(job: tuple[str, str, str, int]) -> list[str]:
+    from quspect.ir import qasm2_loads
+    from quspect.transpiler import CompilationTarget, transpile
+
+    path, kind, basis, level = job
+    with open(path) as fh:
+        circuit = qasm2_loads(fh.read())
+    n, edges = _edges(kind, max(circuit.num_qubits, 2))
+    target = CompilationTarget.from_coupling_map(
+        n, edges, native_gates=set(_TP_BASES[basis])
+    )
+    res = transpile(circuit, target, optimization_level=level, seed=0)
+    name = path.rsplit("/", 1)[-1].removesuffix(".qasm")
+    text = _circuit_text(res.circuit)
+    head = f"tp/O{level} {name}@{kind}@{basis} {res.initial_layout} {res.final_layout}"
+    return [f"{head} {len(res.circuit)} {text}"]
+
+
+def transpile_records(directory: str, levels: list[int], jobs: int) -> Iterator[str]:
+    import glob
+    from concurrent.futures import ProcessPoolExecutor
+
+    files = sorted(glob.glob(f"{directory}/*.qasm"))
+    tasks = [
+        (f, kind, basis, level)
+        for level in levels
+        for f in files
+        for kind in _TP_TOPOLOGIES
+        for basis in _TP_BASES
+    ]
+    if jobs <= 1:
+        for t in tasks:
+            yield from _transpile_job(t)
+        return
+    with ProcessPoolExecutor(jobs) as pool:
+        for recs in pool.map(_transpile_job, tasks, chunksize=1):
+            yield from recs
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -277,6 +362,11 @@ def main(argv: list[str] | None = None) -> int:
         "--harvest", metavar="FILE", help="harvest benchmark blocks into FILE"
     )
     ap.add_argument("--harvest-limit", type=int, default=20000)
+    ap.add_argument(
+        "--transpile", metavar="DIR", help="fingerprint transpile() of DIR/*.qasm"
+    )
+    ap.add_argument("--levels", default="1,2,3", help="levels for --transpile")
+    ap.add_argument("--jobs", type=int, default=1, help="processes for --transpile")
     ap.add_argument("qasm", nargs="*", help="QASM files for --harvest")
     args = ap.parse_args(argv)
 
@@ -295,6 +385,10 @@ def main(argv: list[str] | None = None) -> int:
 
     import quspect.synthesis.two_qubit as tq
 
+    if args.transpile:
+        levels = [int(x) for x in args.levels.split(",")]
+        records: Iterator[str] = transpile_records(args.transpile, levels, args.jobs)
+        return _digest(records, args.dump, None)
     core = _core()
     native = tq._native_kak()
     if native is None:
@@ -314,16 +408,22 @@ def main(argv: list[str] | None = None) -> int:
 
         mats = chained()
     stats: dict[str, list[float]] = {}
+    records = itertools.chain(
+        scalar_records(core), kak_records(native, mats, stats if args.stats else None)
+    )
+    return _digest(records, args.dump, stats if args.stats else None)
+
+
+def _digest(
+    records: Iterator[str], dump: str | None, stats: dict[str, list[float]] | None
+) -> int:
     digest = hashlib.sha256()
     sections: dict[str, Any] = {}
-    out = open(args.dump, "w") if args.dump else None  # noqa: SIM115
+    out = open(dump, "w") if dump else None  # noqa: SIM115
     count = 0
     t0 = time.perf_counter()
     try:
-        for rec in (
-            *scalar_records(core),
-            *kak_records(native, mats, stats if args.stats else None),
-        ):
+        for rec in records:
             line = rec + "\n"
             digest.update(line.encode())
             key = rec.split(" ", 1)[0]
@@ -338,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     for key, h in sorted(sections.items()):
         print(f"{key:24s} {h.hexdigest()}")
     print(f"{'ALL':24s} {digest.hexdigest()}  ({count} records, {elapsed:.1f} s)")
-    if args.stats:
+    if stats:
         for key, errs in sorted(stats.items()):
             arr = np.array(errs)
             print(
