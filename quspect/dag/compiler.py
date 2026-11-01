@@ -17,6 +17,7 @@ Complexity: O(n + m) where n = num_qubits + num_clbits, m = num_instructions.
 
 from __future__ import annotations
 
+from quspect.circuit._native import bit_counts
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.dag.dag_circuit import DAGCircuit
 
@@ -55,8 +56,17 @@ class CircuitCompiler:
             ValueError: If the circuit contains invalid instructions.
         """
         dag = DAGCircuit()
-        n_qubits = circuit.num_qubits
-        n_clbits = circuit.num_clbits
+        counts = None
+        if type(circuit) is QuantumCircuit:
+            # Both bit counts in one native pass over the instruction list
+            # (None when the extension is missing or an instruction is not a
+            # plain CircuitInstruction).
+            counts = bit_counts(circuit._instructions)
+        if counts is not None:
+            n_qubits, n_clbits = counts
+        else:
+            n_qubits = circuit.num_qubits
+            n_clbits = circuit.num_clbits
 
         dag.set_qubit_count(n_qubits)
         dag.set_clbit_count(n_clbits)
@@ -68,5 +78,10 @@ class CircuitCompiler:
         # Steps 2-6 (INPUT nodes, one OPERATION node per instruction wired to
         # the previous node on each of its lines, OUTPUT nodes) run in one
         # call into the DAG storage core.
-        dag._build_from_instructions(circuit.instructions, n_qubits, n_clbits)
+        instructions = (
+            circuit._instructions
+            if type(circuit) is QuantumCircuit
+            else circuit.instructions
+        )
+        dag._build_from_instructions(instructions, n_qubits, n_clbits)
         return dag

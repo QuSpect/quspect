@@ -71,6 +71,19 @@ class DAGToCircuitCompiler:
         circuit_name = name if name else ""
         circuit = QuantumCircuit(name=circuit_name)
 
+        if type(dag) is DAGCircuit:
+            # Native core: when every instruction takes the reuse fast path
+            # below, the list comes straight from the node records (no node
+            # objects are created).
+            fast = dag._operation_instructions()
+            if fast is not None:
+                logger.debug(
+                    "DAGToCircuit: reconstructing circuit from %d operation nodes",
+                    len(fast),
+                )
+                circuit._instructions = fast
+                return circuit
+
         # Collect OPERATION nodes in topological order
         op_nodes = dag.operation_nodes()
         logger.debug(

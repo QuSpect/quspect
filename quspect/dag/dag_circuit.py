@@ -15,7 +15,10 @@ The graph storage lives in the C++ native core (``_DagCore``, built on
 ``quspect_native/ir/dag_store.hpp``) whenever the extension is available;
 :class:`_PyDagCore` is the pure-Python reference implementation with
 identical semantics, used when the extension has not been built.  Nodes
-remain :class:`~quspect.dag.dag_node.DAGNode` Python objects in both cases.
+are :class:`~quspect.dag.dag_node.DAGNode` Python objects in both cases; the
+native core creates a node's object only when it is first accessed (until
+then it keeps the node's kind and instruction), and returns that same object
+from then on.
 """
 
 from __future__ import annotations
@@ -387,6 +390,27 @@ class _PyDagCore:
                     wires[w] = seq = []
                 seq.append(key)
         return wires
+
+    def _set_node_instruction(self, node_id: int, instruction: object) -> bool:
+        """Set ``node.instruction`` (``DAGCircuit.substitute_node_instruction``)."""
+        self._nodes[node_id].instruction = instruction  # type: ignore[assignment]
+        return True
+
+    def _remove_lazy_node_and_reconnect(self, node_id: int) -> bool:
+        """Native-core shortcut of :meth:`DAGCircuit.remove_node_and_reconnect`.
+
+        The Python core creates every node object up front, so there is
+        nothing to shortcut.
+        """
+        return False
+
+    def _nodes_of_type(self, node_type: DAGNodeType) -> list[DAGNode]:
+        """Return the nodes of type ``node_type``, in insertion order."""
+        return [n for n in self._nodes.values() if n.node_type == node_type]
+
+    def _operation_instructions(self) -> list[Any] | None:
+        """Native-core shortcut of :meth:`DAGToCircuitCompiler.compile`."""
+        return None
 
     def _core_getstate(self) -> dict[str, Any]:
         """Return the complete storage state (for copying / pickling)."""
@@ -1056,12 +1080,19 @@ if TYPE_CHECKING:
     _DagCoreBase = _PyDagCore
     _MixinBase = _PyDagCore
 elif _native is not None and hasattr(_native, "_DagCore"):
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
     _native._register_dag_types(
         DAGNodeType.INPUT,
         DAGNodeType.OUTPUT,
         DAGNodeType.OPERATION,
         DAGNode,
         _scan_wire_fallback,
+        CircuitInstruction,
+        InstructionType.GATE,
+        InstructionType.MEASURE,
+        InstructionType.BARRIER,
+        InstructionType.CHANNEL,
     )
     _DagCoreBase = _native._DagCore
     _MixinBase = object
@@ -1080,11 +1111,14 @@ class _DAGCircuitAPI(_MixinBase):
     _nodes: dict[int, DAGNode]
 
     def _bind_nodes(self) -> None:
-        """Bind the node dict and the hot lookups straight to it.
+        """Bind the node mapping and the hot lookups straight to it.
 
-        ``get_node`` / ``has_node`` become the dict's own ``__getitem__`` /
-        ``__contains__`` (same results and ``KeyError`` as the methods they
-        shadow, without a Python frame).
+        ``_nodes`` is a ``node_id -> DAGNode`` mapping: a dict on the Python
+        core, a read-only view with dict lookup semantics on the native core
+        (it creates node objects on first access).  ``get_node`` /
+        ``has_node`` become its own ``__getitem__`` / ``__contains__`` (same
+        results and ``KeyError`` as the methods they shadow, without a Python
+        frame).
         """
         self._nodes = self._nodes_dict()
         self.get_node = self._nodes.__getitem__  # type: ignore[method-assign,assignment]
@@ -1174,6 +1208,8 @@ class _DAGCircuitAPI(_MixinBase):
             >>> [n.instruction.gate.name for n in dag.operation_nodes()]
             ['x']
         """
+        if type(node_id) is int and self._remove_lazy_node_and_reconnect(node_id):
+            return
         node = self.get_node(node_id)
         if node.instruction is not None:
             wires = [f"q{q}" for q in node.instruction.qubits]
@@ -1212,22 +1248,26 @@ class _DAGCircuitAPI(_MixinBase):
         """
         from quspect.circuit.instruction import CircuitInstruction
 
-        node = self._nodes[node_id]
+        if node_id not in self._nodes:
+            raise KeyError(node_id)
         if not isinstance(instruction, CircuitInstruction):
             raise TypeError(
                 "instruction must be a CircuitInstruction, got "
                 f"{type(instruction).__name__}."
             )
-        node.instruction = instruction
+        if type(node_id) is int:
+            self._set_node_instruction(node_id, instruction)
+        else:
+            self._nodes[node_id].instruction = instruction
         self._bump_version()
 
     def input_nodes(self) -> list[DAGNode]:
         """Return all INPUT boundary nodes."""
-        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.INPUT]
+        return self._nodes_of_type(DAGNodeType.INPUT)
 
     def output_nodes(self) -> list[DAGNode]:
         """Return all OUTPUT boundary nodes."""
-        return [n for n in self._nodes.values() if n.node_type == DAGNodeType.OUTPUT]
+        return self._nodes_of_type(DAGNodeType.OUTPUT)
 
     def summary(self) -> str:
         """Return a human-readable summary of the DAG.

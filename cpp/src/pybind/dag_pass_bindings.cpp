@@ -236,15 +236,13 @@ public:
             return true;
         }
         core_.pass_validated_version = -1;
-        auto* node_cls = reinterpret_cast<PyTypeObject*>(dag_core::Registry().dag_node_cls.ptr());
         core_.store.node_ids(ids_);
         auto& entries = core_.pass_entries();
+        py::object instr;
         for (NodeId id : ids_) {
-            PyObject* obj = core_.node_object(id);
-            if (obj == nullptr || Py_TYPE(obj) != node_cls) {
+            if (!core_.pass_instruction(id, instr)) {
                 return false;
             }
-            py::object instr = Attr(obj, Names().instruction);
             if (PyDagCore::PassEntry* e = entries.find(id); e != nullptr && e->instr.ptr() == instr.ptr()) {
                 continue;
             }
@@ -453,15 +451,7 @@ private:
 
     // dag.substitute_node_instruction(id, instr)
     void substitute(NodeId id, const py::object& instr) {
-        PyObject* obj = core_.node_object(id);
-        if (obj == nullptr) {
-            py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(id));
-            PyErr_SetObject(PyExc_KeyError, key.ptr());
-            throw py::error_already_set();
-        }
-        if (PyObject_SetAttr(obj, Names().instruction.ptr(), instr.ptr()) != 0) {
-            throw py::error_already_set();
-        }
+        core_.set_instruction(id, instr);
         core_.store.bump_version();
         PyDagCore::PassEntry fresh;
         if (!DecodeInstruction(instr.ptr(), core_.store.kind(id), fresh)) {
@@ -845,11 +835,11 @@ py::object ComputeSignature(PyDagCore& core, const std::shared_ptr<ReprCache>& c
         if (e != nullptr) {
             sig->keep.push_back(e->instr);
         } else {
-            PyObject* obj = core.node_object(id);
-            if (obj == nullptr) {
+            py::object instr = core.instruction_of(id);
+            if (!instr) {
                 continue;
             }
-            sig->keep.push_back(Attr(obj, Names().instruction));
+            sig->keep.push_back(std::move(instr));
         }
         instrs[id] = sig->keep.back().ptr();
         for (WireId w : *store.node_wires(id)) {

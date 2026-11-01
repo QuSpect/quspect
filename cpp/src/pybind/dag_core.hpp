@@ -2,6 +2,7 @@
 // 优化 pass 共用）。只在扩展模块内部使用。
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -34,6 +35,15 @@ struct DagRegistry {
     py::object node_type_operation;
     py::object dag_node_cls;
     py::object scan_fallback;  // 非规范线标签的 nodes_on_wire 回退：_scan_wire_fallback(dag, label)
+    // CircuitInstruction 与 InstructionType 的成员（延迟创建节点与 DAG -> 线路的快速路径用）。
+    py::object instr_cls;
+    py::object type_gate;
+    py::object type_measure;
+    py::object type_barrier;
+    py::object type_channel;
+    // 两个互不相同的比特 a、b 组成的 set 的迭代顺序是否总是按 (x & 7) 排列（登记时用真实的
+    // set 核对；不成立时一律构造 set 取顺序）。
+    bool pair_order_by_slot = false;
     bool ready = false;
 };
 
@@ -60,6 +70,9 @@ struct Names {
     py::str source_id = InternedStr("source_id");
     py::str target_id = InternedStr("target_id");
     py::str wire = InternedStr("wire");
+    py::str type = InternedStr("type");
+    py::str gate = InternedStr("gate");
+    py::str channel = InternedStr("channel");
 };
 
 inline Names& N() {
@@ -94,15 +107,140 @@ inline std::optional<WireId> ParseCanonical(const char* s, Py_ssize_t n) {
     return s[0] == 'q' ? ir::QubitWire(v) : ir::ClbitWire(v);
 }
 
+class PyDagCore;
+
+// node_id -> DAGNode 的映射视图（DAGCircuit._nodes，get_node / has_node 直接绑定到它的
+// __getitem__ / __contains__）。在 dag_bindings.cpp 中实现：按 dict 的语义查找、按插入顺序迭代，
+// 取值时按需创建节点对象。视图只持有内核的裸指针，内核析构时解除（之后表现为空映射）。
+PyObject* NewNodeTable(PyDagCore* core);
+void DetachNodeTable(PyObject* table) noexcept;
+
+// 节点的存储：
+// * 节点对象（DAGNode）只在 Python 端第一次取用时才创建（get_node、_nodes、operation_nodes、
+//   拷贝 / pickle 等），之后缓存并以它为准（Python 端可能直接改写它的字段）；
+// * 由 _build_from_instructions 建立、尚未取用过的节点只记下种类与指令对象：INPUT / OUTPUT
+//   节点的比特与标签由所在的线推出，OPERATION 节点的 qubits / clbits 集合在创建对象时由指令的
+//   比特元组构造——与立即创建时完全相同的值（指令是冻结的数据类，比特元组不会变）。
+// 优化 pass、收敛签名与 DAG -> 线路的转换都直接读取指令记录，不创建节点对象。
 class PyDagCore {
 public:
-    PyDagCore() : nodes_(py::dict()) {
+    PyDagCore() : table_(py::reinterpret_steal<py::object>(NewNodeTable(this))) {
+        if (!table_) {
+            throw py::error_already_set();
+        }
     }
+    ~PyDagCore() {
+        DetachNodeTable(table_.ptr());
+    }
+    PyDagCore(const PyDagCore&) = delete;
+    PyDagCore& operator=(const PyDagCore&) = delete;
 
     DagStore store;
 
-    py::dict nodes_dict() const {
-        return nodes_;
+    py::object nodes_dict() const {
+        return table_;
+    }
+
+    // ---- 节点对象（按需创建） ----
+
+    // 节点对象（借用引用，必要时先创建）；节点不存在时返回 nullptr。
+    PyObject* node_ptr(NodeId id) {
+        NodeEntry* e = objects_.find(id);
+        if (e == nullptr) {
+            return nullptr;
+        }
+        if (!e->obj) {
+            materialize(id, *e);
+        }
+        return e->obj.ptr();
+    }
+
+    // 节点当前的指令（新引用）；节点不存在时返回空对象。
+    py::object instruction_of(NodeId id) {
+        NodeEntry* e = objects_.find(id);
+        if (e == nullptr) {
+            return py::object();
+        }
+        if (e->obj) {
+            return py::reinterpret_steal<py::object>(GetAttrOrThrow(e->obj.ptr(), N().instruction.ptr()));
+        }
+        return e->instr ? e->instr : py::none();
+    }
+
+    // pass 读取节点指令：节点对象已创建时它必须恰好是 DAGNode（子类可能改写字段语义）。
+    bool pass_instruction(NodeId id, py::object& out) {
+        NodeEntry* e = objects_.find(id);
+        if (e == nullptr) {
+            return false;
+        }
+        if (e->obj) {
+            if (Py_TYPE(e->obj.ptr()) != reinterpret_cast<PyTypeObject*>(Registry().dag_node_cls.ptr())) {
+                return false;
+            }
+            out = py::reinterpret_steal<py::object>(GetAttrOrThrow(e->obj.ptr(), N().instruction.ptr()));
+        } else {
+            out = e->instr ? e->instr : py::none();
+        }
+        return true;
+    }
+
+    // node.instruction = instr（不计入版本号）。未创建对象的节点：新指令的比特元组与原指令逐项
+    // 相同（同一组 int、同样的顺序）时只替换记录；否则先按原指令创建节点对象再赋值，使节点的
+    // qubits / clbits 与立即创建时一样保留原来的集合。节点不存在时抛出 KeyError。
+    void set_instruction(NodeId id, const py::object& instr) {
+        NodeEntry* e = objects_.find(id);
+        if (e == nullptr) {
+            py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(id));
+            PyErr_SetObject(PyExc_KeyError, key.ptr());
+            throw py::error_already_set();
+        }
+        if (!e->obj && e->instr && SameBits(e->instr.ptr(), instr.ptr())) {
+            e->instr = instr;
+            return;
+        }
+        if (!e->obj) {
+            materialize(id, *e);
+        }
+        if (PyObject_SetAttr(e->obj.ptr(), N().instruction.ptr(), instr.ptr()) != 0) {
+            throw py::error_already_set();
+        }
+    }
+
+    // 节点是否存在且尚未创建对象。
+    bool is_lazy(NodeId id) const noexcept {
+        const NodeEntry* e = objects_.find(id);
+        return e != nullptr && !e->obj;
+    }
+
+    // 未创建对象的节点所在的线（remove_node_and_reconnect 的顺序：OPERATION 节点按指令的
+    // qubits、clbits 顺序去重；边界节点只有一条线）。
+    void lazy_reconnect_wires(NodeId id, std::vector<WireId>& out) {
+        out.clear();
+        const NodeEntry* e = objects_.find(id);
+        if (e->instr) {
+            append_tuple_wires(e->instr.ptr(), N().qubits.ptr(), 'q', out);
+            append_tuple_wires(e->instr.ptr(), N().clbits.ptr(), 'c', out);
+            std::vector<WireId> unique;
+            for (WireId w : out) {
+                bool seen = false;
+                for (WireId u : unique) {
+                    seen = seen || u == w;
+                }
+                if (!seen) {
+                    unique.push_back(w);
+                }
+            }
+            out.swap(unique);
+        } else {
+            for (WireId w : *store.node_wires(id)) {
+                out.push_back(w);
+            }
+        }
+    }
+
+    // 节点种类（节点存在时）。
+    DagNodeKind entry_kind(NodeId id) const noexcept {
+        return objects_.find(id)->kind;
     }
 
     // ---- 线标签 ----
@@ -333,10 +471,114 @@ public:
         const std::vector<NodeId>& order = topo();
         py::list out;
         for (NodeId id : order) {
-            const NodeEntry* e = objects_.find(id);
-            if (e->kind == DagNodeKind::kOperation) {
-                out.append(e->obj);
+            if (objects_.find(id)->kind == DagNodeKind::kOperation) {
+                out.append(py::handle(node_ptr(id)));
             }
+        }
+        return out;
+    }
+
+    // DAGToCircuitCompiler.compile 的快速路径：拓扑序中全部操作节点的指令，前提是每条指令都满足
+    // 该函数快速路径的条件（CircuitInstruction 本身、label 为 ""、qubits / clbits 为 tuple，且
+    // GATE 有门 / MEASURE / 有比特无 clbit 的 BARRIER / 有通道无 clbit 的 CHANNEL），这时线路
+    // 直接复用这些指令对象；否则返回 None，由 Python 端逐节点处理。
+    py::object operation_instructions() {
+        DagRegistry& reg = Registry();
+        if (!reg.instr_cls) {
+            return py::none();
+        }
+        const std::vector<NodeId>& order = topo();
+        auto* instr_type = reinterpret_cast<PyTypeObject*>(reg.instr_cls.ptr());
+        Names& n = N();
+        py::list out;
+        for (NodeId id : order) {
+            if (objects_.find(id)->kind != DagNodeKind::kOperation) {
+                continue;
+            }
+            py::object instr = instruction_of(id);
+            if (Py_TYPE(instr.ptr()) != instr_type) {
+                return py::none();
+            }
+            PyObject* obj = instr.ptr();
+            py::object label = py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.label.ptr()));
+            if (!PyUnicode_CheckExact(label.ptr()) || PyUnicode_GET_LENGTH(label.ptr()) != 0) {
+                return py::none();
+            }
+            py::object qubits = py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.qubits.ptr()));
+            py::object clbits = py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.clbits.ptr()));
+            if (!PyTuple_CheckExact(qubits.ptr()) || !PyTuple_CheckExact(clbits.ptr())) {
+                return py::none();
+            }
+            py::object type = py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.type.ptr()));
+            const bool no_clbits = PyTuple_GET_SIZE(clbits.ptr()) == 0;
+            bool ok = false;
+            if (type.is(reg.type_gate)) {
+                ok = !py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.gate.ptr())).is_none();
+            } else if (type.is(reg.type_measure)) {
+                ok = true;
+            } else if (type.is(reg.type_barrier)) {
+                ok = PyTuple_GET_SIZE(qubits.ptr()) > 0 && no_clbits;
+            } else if (type.is(reg.type_channel)) {
+                ok = no_clbits && !py::reinterpret_steal<py::object>(GetAttrOrThrow(obj, n.channel.ptr())).is_none();
+            }
+            if (!ok) {
+                return py::none();
+            }
+            if (PyList_Append(out.ptr(), obj) != 0) {
+                throw py::error_already_set();
+            }
+        }
+        return out;
+    }
+
+    // input_nodes / output_nodes：按插入顺序列出 node_type == node_type 的节点（未创建对象的节点
+    // 按种类判断，不创建其他节点的对象）。
+    py::list nodes_of_type(const py::object& node_type) {
+        std::vector<NodeId> ids;
+        store.node_ids(ids);
+        DagRegistry& reg = Registry();
+        py::list out;
+        for (NodeId id : ids) {
+            NodeEntry* e = objects_.find(id);
+            if (!e->obj) {
+                const py::object& t = e->kind == DagNodeKind::kInput    ? reg.node_type_input
+                                      : e->kind == DagNodeKind::kOutput ? reg.node_type_output
+                                                                        : reg.node_type_operation;
+                const int eq = PyObject_RichCompareBool(t.ptr(), node_type.ptr(), Py_EQ);
+                if (eq < 0) {
+                    throw py::error_already_set();
+                }
+                if (eq == 0) {
+                    continue;
+                }
+                materialize(id, *e);
+            } else {
+                py::object t = py::reinterpret_steal<py::object>(GetAttrOrThrow(e->obj.ptr(), N().node_type.ptr()));
+                const int eq = PyObject_RichCompareBool(t.ptr(), node_type.ptr(), Py_EQ);
+                if (eq < 0) {
+                    throw py::error_already_set();
+                }
+                if (eq == 0) {
+                    continue;
+                }
+            }
+            out.append(e->obj);
+        }
+        return out;
+    }
+
+    // 按插入顺序列出全部节点编号 / 节点对象（_nodes 视图的迭代）。
+    py::list node_id_list() const {
+        std::vector<NodeId> ids;
+        store.node_ids(ids);
+        return id_list(ids);
+    }
+    py::list node_object_list() {
+        std::vector<NodeId> ids;
+        store.node_ids(ids);
+        py::list out(ids.size());
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            out[i] = py::handle(node_ptr(ids[i]));
         }
         return out;
     }
@@ -413,10 +655,7 @@ public:
                 continue;
             }
             PyObject* node = e->obj.ptr();
-            py::object instr = py::reinterpret_steal<py::object>(PyObject_GetAttr(node, N().instruction.ptr()));
-            if (!instr) {
-                throw py::error_already_set();
-            }
+            py::object instr = instruction_of(id);
             py::object key;
             if (!use_cache) {
                 key = py::reinterpret_steal<py::object>(PyObject_Repr(instr.ptr()));
@@ -452,15 +691,22 @@ public:
                     }
                 }
             }
-            append_wire_keys(wires, node, N().qubits.ptr(), false, key);
-            append_wire_keys(wires, node, N().clbits.ptr(), true, key);
+            if (node != nullptr) {
+                append_wire_keys(wires, node, N().qubits.ptr(), false, key);
+                append_wire_keys(wires, node, N().clbits.ptr(), true, key);
+            } else {
+                // 未创建对象：线的顺序就是 set(qubits)、set(clbits) 的迭代顺序（都是规范线）。
+                for (WireId w : *store.node_wires(id)) {
+                    append_wire_key(wires, w % 2 == 0 ? w / 2 : -1 - w / 2, key);
+                }
+            }
         }
         return wires;
     }
 
     // ---- 状态（拷贝 / pickle） ----
 
-    py::tuple get_state() const {
+    py::tuple get_state() {
         const ir::DagState st = store.export_state();
         py::list nodes;
         for (const auto& n : st.nodes) {
@@ -468,7 +714,7 @@ public:
             for (WireId w : n.wires) {
                 wires.append(w);
             }
-            nodes.append(py::make_tuple(n.id, static_cast<int>(n.kind), wires, objects_.find(n.id)->obj));
+            nodes.append(py::make_tuple(n.id, static_cast<int>(n.kind), wires, py::handle(node_ptr(n.id))));
         }
         py::list edges;
         for (const auto& e : st.edges) {
@@ -571,15 +817,10 @@ public:
             throw py::value_error(e.what());
         }
         // 节点对象与线标签表。
-        PyDict_Clear(nodes_.ptr());
         pass_entries_.clear();
         pass_validated_version = -1;
         objects_.clear();
         for (std::size_t i = 0; i < node_objs.size(); ++i) {
-            py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(node_objs[i].first));
-            if (PyDict_SetItem(nodes_.ptr(), key.ptr(), node_objs[i].second.ptr()) != 0) {
-                throw py::error_already_set();
-            }
             NodeEntry& e = objects_[node_objs[i].first];
             e.obj = node_objs[i].second;
             e.kind = st.nodes[i].kind;
@@ -611,28 +852,20 @@ public:
         std::vector<NodeId> qubit_last(static_cast<std::size_t>(num_qubits));
         std::vector<NodeId> clbit_last(static_cast<std::size_t>(num_clbits));
         py::object empty_label = py::str("");
+        auto* instr_type = reg.instr_cls ? reinterpret_cast<PyTypeObject*>(reg.instr_cls.ptr()) : nullptr;
 
-        auto boundary = [&](const py::object& type, char kind, std::int64_t bit, const char* prefix) {
-            py::object bits = py::reinterpret_steal<py::object>(PySet_New(nullptr));
-            py::object bit_obj = py::reinterpret_steal<py::object>(PyLong_FromLongLong(bit));
-            if (PySet_Add(bits.ptr(), bit_obj.ptr()) != 0) {
-                throw py::error_already_set();
-            }
-            py::object none_bits = py::reinterpret_steal<py::object>(PySet_New(nullptr));
-            py::object lbl = py::reinterpret_steal<py::object>(
-                PyUnicode_FromFormat("%s:%c%lld", prefix, kind, static_cast<long long>(bit)));
-            py::object node = kind == 'q' ? make_node(next_id, type, py::none(), bits, none_bits, lbl)
-                                          : make_node(next_id, type, py::none(), none_bits, bits, lbl);
-            wires_buf_.assign(1, kind == 'q' ? ir::QubitWire(bit) : ir::ClbitWire(bit));
-            insert_node(next_id, type.is(reg.node_type_input) ? DagNodeKind::kInput : DagNodeKind::kOutput, node);
+        // 边界节点只记下所在的线（对象在取用时由线推出）。
+        auto boundary = [&](DagNodeKind kind, WireId wire) {
+            wires_buf_.assign(1, wire);
+            insert_lazy(next_id, kind, py::object());
             return next_id++;
         };
 
         for (std::int64_t q = 0; q < num_qubits; ++q) {
-            qubit_last[static_cast<std::size_t>(q)] = boundary(reg.node_type_input, 'q', q, "IN");
+            qubit_last[static_cast<std::size_t>(q)] = boundary(DagNodeKind::kInput, ir::QubitWire(q));
         }
         for (std::int64_t c = 0; c < num_clbits; ++c) {
-            clbit_last[static_cast<std::size_t>(c)] = boundary(reg.node_type_input, 'c', c, "IN");
+            clbit_last[static_cast<std::size_t>(c)] = boundary(DagNodeKind::kInput, ir::ClbitWire(c));
         }
 
         std::vector<std::int64_t> qs;
@@ -646,27 +879,39 @@ public:
             if (!clbits) {
                 throw py::error_already_set();
             }
-            py::object qset = py::reinterpret_steal<py::object>(PySet_New(qubits.ptr()));
-            if (!qset) {
-                throw py::error_already_set();
-            }
-            py::object cset = py::reinterpret_steal<py::object>(PySet_New(clbits.ptr()));
-            if (!cset) {
-                throw py::error_already_set();
-            }
-            set_items(qset.ptr(), qs);
-            set_items(cset.ptr(), cs);
-            py::object node = make_node(next_id, reg.node_type_operation, py::reinterpret_borrow<py::object>(instr),
-                                        qset, cset, empty_label);
-            wires_buf_.clear();
-            for (std::int64_t q : qs) {
-                wires_buf_.push_back(bit_wire(q, 'q'));
-            }
-            for (std::int64_t c : cs) {
-                wires_buf_.push_back(bit_wire(c, 'c'));
-            }
             const NodeId op_id = next_id++;
-            insert_node(op_id, DagNodeKind::kOperation, node);
+            if (Py_TYPE(instr.ptr()) == instr_type && SetOrder(qubits.ptr(), qs) && SetOrder(clbits.ptr(), cs)) {
+                // 延迟创建：qs / cs 即 set(qubits) / set(clbits) 的迭代顺序。
+                wires_buf_.clear();
+                for (std::int64_t q : qs) {
+                    wires_buf_.push_back(ir::QubitWire(q));
+                }
+                for (std::int64_t c : cs) {
+                    wires_buf_.push_back(ir::ClbitWire(c));
+                }
+                insert_lazy(op_id, DagNodeKind::kOperation, py::reinterpret_borrow<py::object>(instr));
+            } else {
+                py::object qset = py::reinterpret_steal<py::object>(PySet_New(qubits.ptr()));
+                if (!qset) {
+                    throw py::error_already_set();
+                }
+                py::object cset = py::reinterpret_steal<py::object>(PySet_New(clbits.ptr()));
+                if (!cset) {
+                    throw py::error_already_set();
+                }
+                set_items(qset.ptr(), qs);
+                set_items(cset.ptr(), cs);
+                py::object node = make_node(op_id, reg.node_type_operation, py::reinterpret_borrow<py::object>(instr),
+                                            qset, cset, empty_label);
+                wires_buf_.clear();
+                for (std::int64_t q : qs) {
+                    wires_buf_.push_back(bit_wire(q, 'q'));
+                }
+                for (std::int64_t c : cs) {
+                    wires_buf_.push_back(bit_wire(c, 'c'));
+                }
+                insert_node(op_id, DagNodeKind::kOperation, node);
+            }
             for (std::int64_t q : qs) {
                 NodeId& last = last_ref(qubit_last, q);
                 store.add_edge(last, op_id, ir::QubitWire(q));
@@ -680,11 +925,11 @@ public:
         }
 
         for (std::int64_t q = 0; q < num_qubits; ++q) {
-            const NodeId out = boundary(reg.node_type_output, 'q', q, "OUT");
+            const NodeId out = boundary(DagNodeKind::kOutput, ir::QubitWire(q));
             store.add_edge(qubit_last[static_cast<std::size_t>(q)], out, ir::QubitWire(q));
         }
         for (std::int64_t c = 0; c < num_clbits; ++c) {
-            const NodeId out = boundary(reg.node_type_output, 'c', c, "OUT");
+            const NodeId out = boundary(DagNodeKind::kOutput, ir::ClbitWire(c));
             store.add_edge(clbit_last[static_cast<std::size_t>(c)], out, ir::ClbitWire(c));
         }
     }
@@ -708,11 +953,6 @@ public:
     ir::IdMap<PassEntry>& pass_entries() noexcept {
         return pass_entries_;
     }
-    // 节点对象（借用引用；节点不存在时为 nullptr）。
-    PyObject* node_object(NodeId id) const noexcept {
-        const NodeEntry* e = objects_.find(id);
-        return e == nullptr ? nullptr : e->obj.ptr();
-    }
     // 是否登记过非规范线标签（这时 pass 改走 Python 实现）。
     bool has_noncanonical_wires() const noexcept {
         return next_other_ != -1;
@@ -724,7 +964,8 @@ public:
 
 private:
     struct NodeEntry {
-        py::object obj;
+        py::object obj;    // 节点对象（尚未创建时为空）
+        py::object instr;  // 尚未创建对象的 OPERATION 节点的指令
         DagNodeKind kind = DagNodeKind::kOperation;
     };
 
@@ -889,25 +1130,176 @@ private:
     void insert_node(NodeId id, DagNodeKind kind, const py::object& node) {
         pass_entries_.erase(id);
         store.add_node(id, kind, wires_buf_.data(), wires_buf_.size());
-        py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(id));
-        if (PyDict_SetItem(nodes_.ptr(), key.ptr(), node.ptr()) != 0) {
-            throw py::error_already_set();
-        }
         NodeEntry& e = objects_[id];
         e.obj = node;
+        e.instr = py::object();
         e.kind = kind;
+    }
+
+    // 加入尚未创建对象的节点（instr 为 OPERATION 节点的指令，边界节点为空）。
+    void insert_lazy(NodeId id, DagNodeKind kind, py::object instr) {
+        pass_entries_.erase(id);
+        store.add_node(id, kind, wires_buf_.data(), wires_buf_.size());
+        NodeEntry& e = objects_[id];
+        e.obj = py::object();
+        e.instr = std::move(instr);
+        e.kind = kind;
+    }
+
+    // 创建节点对象：与 _build_from_instructions 立即创建时的字段完全相同。
+    void materialize(NodeId id, NodeEntry& e) {
+        RequireRegistry();
+        DagRegistry& reg = Registry();
+        if (e.instr) {
+            PyObject* instr = e.instr.ptr();
+            py::object qubits = py::reinterpret_steal<py::object>(GetAttrOrThrow(instr, N().qubits.ptr()));
+            py::object clbits = py::reinterpret_steal<py::object>(GetAttrOrThrow(instr, N().clbits.ptr()));
+            py::object qset = py::reinterpret_steal<py::object>(PySet_New(qubits.ptr()));
+            if (!qset) {
+                throw py::error_already_set();
+            }
+            py::object cset = py::reinterpret_steal<py::object>(PySet_New(clbits.ptr()));
+            if (!cset) {
+                throw py::error_already_set();
+            }
+            py::object empty_label = py::str("");
+            e.obj = make_node(id, reg.node_type_operation, e.instr, qset, cset, empty_label);
+        } else {
+            const WireId w = (*store.node_wires(id))[0];
+            const char kind = w % 2 == 0 ? 'q' : 'c';
+            const long long bit = static_cast<long long>(w / 2);
+            const bool input = e.kind == DagNodeKind::kInput;
+            py::object bits = py::reinterpret_steal<py::object>(PySet_New(nullptr));
+            py::object bit_obj = py::reinterpret_steal<py::object>(PyLong_FromLongLong(bit));
+            if (!bits || !bit_obj || PySet_Add(bits.ptr(), bit_obj.ptr()) != 0) {
+                throw py::error_already_set();
+            }
+            py::object none_bits = py::reinterpret_steal<py::object>(PySet_New(nullptr));
+            py::object lbl = py::reinterpret_steal<py::object>(
+                PyUnicode_FromFormat("%s:%c%lld", input ? "IN" : "OUT", kind, bit));
+            if (!none_bits || !lbl) {
+                throw py::error_already_set();
+            }
+            const py::object& type = input ? reg.node_type_input : reg.node_type_output;
+            e.obj = kind == 'q' ? make_node(id, type, py::none(), bits, none_bits, lbl)
+                                : make_node(id, type, py::none(), none_bits, bits, lbl);
+        }
+        e.instr = py::object();
     }
 
     void drop_node(NodeId id) {
         pass_entries_.erase(id);
-        py::object key = py::reinterpret_steal<py::object>(PyLong_FromLongLong(id));
-        if (PyDict_DelItem(nodes_.ptr(), key.ptr()) != 0) {
-            PyErr_Clear();
-        }
         objects_.erase(id);
     }
 
-    py::dict nodes_;
+    static PyObject* GetAttrOrThrow(PyObject* obj, PyObject* name) {
+        PyObject* v = PyObject_GetAttr(obj, name);
+        if (v == nullptr) {
+            throw py::error_already_set();
+        }
+        return v;
+    }
+
+    // 比特元组 -> set(tuple) 的迭代顺序（去重）。只接受由 [0, 2^40] 内的 int 组成的 tuple，
+    // 否则返回 false。一两个比特时直接推出（两个比特落在 8 槽小表的不同槽位时按槽位排列），
+    // 其余情形构造一个 set 取它的顺序。
+    static bool SetOrder(PyObject* tuple, std::vector<std::int64_t>& out) {
+        out.clear();
+        if (!PyTuple_CheckExact(tuple)) {
+            return false;
+        }
+        const Py_ssize_t n = PyTuple_GET_SIZE(tuple);
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            PyObject* item = PyTuple_GET_ITEM(tuple, i);
+            if (!PyLong_CheckExact(item)) {
+                return false;
+            }
+            int overflow = 0;
+            const long long v = PyLong_AsLongLongAndOverflow(item, &overflow);
+            if (overflow != 0 || v < 0 || v > (std::int64_t{1} << 40)) {
+                return false;
+            }
+            out.push_back(v);
+        }
+        if (n <= 1) {
+            return true;
+        }
+        if (n == 2) {
+            if (out[0] == out[1]) {
+                out.pop_back();
+                return true;
+            }
+            if (Registry().pair_order_by_slot && (out[0] & 7) != (out[1] & 7)) {
+                if ((out[0] & 7) > (out[1] & 7)) {
+                    std::swap(out[0], out[1]);
+                }
+                return true;
+            }
+        }
+        py::object set = py::reinterpret_steal<py::object>(PySet_New(tuple));
+        if (!set) {
+            throw py::error_already_set();
+        }
+        set_items(set.ptr(), out);
+        return true;
+    }
+
+    // 两条指令的 qubits、clbits 是否分别是逐项相同的 int 元组（替换指令时可以不创建节点对象）。
+    static bool SameBits(PyObject* a, PyObject* b) {
+        DagRegistry& reg = Registry();
+        if (Py_TYPE(b) != reinterpret_cast<PyTypeObject*>(reg.instr_cls.ptr())) {
+            return false;
+        }
+        for (PyObject* name : {N().qubits.ptr(), N().clbits.ptr()}) {
+            py::object ta = py::reinterpret_steal<py::object>(GetAttrOrThrow(a, name));
+            py::object tb = py::reinterpret_steal<py::object>(GetAttrOrThrow(b, name));
+            if (ta.ptr() == tb.ptr()) {
+                continue;
+            }
+            if (!PyTuple_CheckExact(tb.ptr()) || PyTuple_GET_SIZE(ta.ptr()) != PyTuple_GET_SIZE(tb.ptr())) {
+                return false;
+            }
+            for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(ta.ptr()); ++i) {
+                PyObject* x = PyTuple_GET_ITEM(ta.ptr(), i);
+                PyObject* y = PyTuple_GET_ITEM(tb.ptr(), i);
+                if (!PyLong_CheckExact(y) || PyObject_RichCompareBool(x, y, Py_EQ) != 1) {
+                    PyErr_Clear();
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // 指令的比特元组（必须是非负 int）对应的线，追加到 out。
+    static void append_tuple_wires(PyObject* instr, PyObject* attr, char kind, std::vector<WireId>& out) {
+        py::object t = py::reinterpret_steal<py::object>(GetAttrOrThrow(instr, attr));
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(t.ptr()); ++i) {
+            const long long v = PyLong_AsLongLong(PyTuple_GET_ITEM(t.ptr(), i));
+            out.push_back(kind == 'q' ? ir::QubitWire(v) : ir::ClbitWire(v));
+        }
+    }
+
+    // wires[w].append(key)
+    static void append_wire_key(py::dict& wires, std::int64_t wire, const py::object& key) {
+        py::object w = py::reinterpret_steal<py::object>(PyLong_FromLongLong(wire));
+        PyObject* seq = PyDict_GetItemWithError(wires.ptr(), w.ptr());
+        if (seq == nullptr) {
+            if (PyErr_Occurred()) {
+                throw py::error_already_set();
+            }
+            py::list fresh;
+            if (PyDict_SetItem(wires.ptr(), w.ptr(), fresh.ptr()) != 0) {
+                throw py::error_already_set();
+            }
+            seq = fresh.ptr();
+        }
+        if (PyList_Append(seq, key.ptr()) != 0) {
+            throw py::error_already_set();
+        }
+    }
+
+    py::object table_;
     ir::IdMap<NodeEntry> objects_;
     std::unordered_map<std::string, WireId> other_ids_;
     ir::IdMap<py::object> labels_;
