@@ -14,3 +14,11 @@ This product includes software developed by third parties:
   Copyright (c) 2012 Massachusetts Institute of Technology,
   Copyright (c) 2013 Forschungszentrum Jülich GmbH; see
   cpp/third_party/libcerf/LICENSE.
+
+* CORE-MATH (https://core-math.gitlabpages.inria.fr/, source
+  https://gitlab.inria.fr/core-math/core-math, commit 0ce0cbc), a subset of
+  whose correctly rounded binary64 functions is vendored in
+  cpp/third_party/core-math, is licensed under the MIT License,
+  Copyright (c) 2022 INRIA and CERN, Copyright (c) 2022-2026 Paul Zimmermann,
+  Tom Hubrecht and Alexei Sibidanov (per-file notices in the sources); see
+  cpp/third_party/core-math/LICENSE.

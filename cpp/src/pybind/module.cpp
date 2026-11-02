@@ -18,6 +18,7 @@
 #include <pybind11/stl.h>
 
 #include "quspect_native/common/parallel.hpp"
+#include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/executor/executor.hpp"
 #include "quspect_native/executor/gradient_executor.hpp"
 #include "quspect_native/ir/program_builder.hpp"
@@ -42,6 +43,7 @@
 #include "quspect_native/transpiler/su4_routing.hpp"
 
 #include "dag_bindings.hpp"
+#include "detmath_bindings.hpp"
 #include "ir_bindings.hpp"
 #include "consolidate_bindings.hpp"
 #include "gauge_bindings.hpp"
@@ -280,6 +282,7 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
     quspect::native::pybind::BindIr(m);
     quspect::native::pybind::BindDagCore(m);
     quspect::native::pybind::BindSynthesis(m);
+    quspect::native::pybind::BindDetmath(m);
     quspect::native::pybind::BindSchedule(m);
     quspect::native::pybind::BindConsolidate(m);
     quspect::native::pybind::BindGauge(m);
@@ -1038,6 +1041,49 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
             return out;
         },
         py::arg("axes"), py::arg("phis"), "_rot(axis, phi) for each pair (axis 0 = z, 1 = x, 2 = y).");
+
+    m.def(
+        "_gauge_matmul",
+        [](const ComplexArray& a, const ComplexArray& b) {
+            // a @ b for (2, 2) / (N, 2, 2) stacks (broadcast like numpy), on the deterministic numerics layer
+            auto count = [](const ComplexArray& x) -> py::ssize_t {
+                if (x.ndim() == 2 && x.shape(0) == 2 && x.shape(1) == 2) {
+                    return -1;
+                }
+                if (x.ndim() == 3 && x.shape(1) == 2 && x.shape(2) == 2) {
+                    return x.shape(0);
+                }
+                throw std::invalid_argument("expected a (2, 2) matrix or an (N, 2, 2) stack");
+            };
+            const py::ssize_t na = count(a);
+            const py::ssize_t nb = count(b);
+            if (na >= 0 && nb >= 0 && na != nb) {
+                throw std::invalid_argument("stack sizes differ");
+            }
+            const py::ssize_t n = std::max(na, nb);
+            // numpy 缓冲区与 Cx 之间按字节拷贝（不做类型双关）
+            const auto copy = [](const ComplexArray& x) {
+                std::vector<detmath::Cx> v(static_cast<std::size_t>(x.size()));
+                std::memcpy(v.data(), x.data(), v.size() * sizeof(detmath::Cx));
+                return v;
+            };
+            const std::vector<detmath::Cx> va = copy(a);
+            const std::vector<detmath::Cx> vb = copy(b);
+            const std::size_t stacks = static_cast<std::size_t>(n < 0 ? 1 : n);
+            std::vector<detmath::Cx> vo(4 * stacks);
+            for (std::size_t i = 0; i < stacks; ++i) {
+                detmath::MatMul(2, va.data() + (na < 0 ? 0 : 4 * i), vb.data() + (nb < 0 ? 0 : 4 * i),
+                                vo.data() + 4 * i);
+            }
+            py::array_t<std::complex<double>> out =
+                n < 0 ? py::array_t<std::complex<double>>({static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)})
+                      : py::array_t<std::complex<double>>(
+                            {n, static_cast<py::ssize_t>(2), static_cast<py::ssize_t>(2)});
+            std::memcpy(out.mutable_data(), vo.data(), vo.size() * sizeof(detmath::Cx));
+            return out;
+        },
+        py::arg("a"), py::arg("b"),
+        "a @ b for 2x2 matrices or (N, 2, 2) stacks (deterministic products, bit-identical on all platforms).");
 
     // ---- 精度枚举 ----
     py::enum_<executor::PrecisionKind>(m, "PrecisionKind", py::module_local())

@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "quspect_native/detmath/scalar.hpp"
+
 #include <algorithm>
 #include <deque>
 #include <set>
@@ -334,7 +336,7 @@ class Embedder {
             const std::int64_t delta = part(t, q, u) + part(u, p, t) - part(t, p, u) - part(u, q, t);
             if (delta > 0) {
                 const double temp = t0 * static_cast<double>(moves - k) / static_cast<double>(moves);
-                if (!(rng->Unit() < std::exp(-static_cast<double>(delta) / temp))) {
+                if (!(rng->Unit() < detmath::Exp(-static_cast<double>(delta) / temp))) {
                     continue;
                 }
             }

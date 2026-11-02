@@ -101,5 +101,13 @@ QUSPECT_EXPECT_OPENMP=1 bash tools/sde_chip_check.sh smoke -nhm -- \
 bash tools/sde_chip_check.sh native-tests -nhm -- \
   python -m pytest tests/native -q -p no:cacheprovider -o addopts="" \
   || failed=1
+# 跨平台金标准（scalar 模块在无 AVX2 的 CPU 上也必须给出完全相同的编译结果）；
+# SDE 下运行很慢，完整 transpile 只跑 O1。
+bash tools/sde_chip_check.sh golden -nhm -- \
+  python -m pytest -q -p no:cacheprovider -o addopts="" \
+    tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent \
+    tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics \
+    "tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests[1]" \
+  || failed=1
 
 exit "$failed"

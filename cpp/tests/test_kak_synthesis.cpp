@@ -1,10 +1,8 @@
-// 两比特 KAK 合成（synthesis/kak_synthesis）的 gtest。
+// 合成（synthesis/：两比特 KAK、单比特合成、门矩阵、块合并的辅助函数，均在确定性数值层上）的 gtest。
 //
-// 生产环境中 BLAS / LAPACK 函数地址来自 numpy 链接的库，与 Python 参考实现的逐位一致性由
-// tests/synthesis/test_native_kak.py 检查。这里用测试内的朴素实现（三重循环乘法、Jacobi 特征分解与
-// 奇异值分解、部分主元 LU，接口与 Fortran / CBLAS 相同）代替，检查算法本身：KAK 分解能重建输入、
-// 坐标落在 Weyl 室内、合成出的门序列等于输入（相差全局相位）且纠缠门数最少、欧拉合成正确、
-// 各种逐元素运算顺序的定义正确。
+// 这里直接检查算法：KAK 分解能重建输入、坐标落在 Weyl 室内、合成出的门序列等于输入（相差全局相位）
+// 且纠缠门数最少、欧拉合成正确、门矩阵与定义一致。跨平台逐位一致性由 tools/det_fingerprint.py 与
+// Python 测试中的金标准摘要检查。
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -16,8 +14,10 @@
 #include <gtest/gtest.h>
 
 #include "quspect_native/synthesis/kak_synthesis.hpp"
-#include "quspect_native/synthesis/numpy_compat.hpp"
+#include "quspect_native/detmath/linalg.hpp"
+#include "quspect_native/synthesis/gate_matrices.hpp"
 #include "quspect_native/synthesis/one_qubit_synthesis.hpp"
+#include "quspect_native/synthesis/three_qubit.hpp"
 
 namespace {
 
@@ -30,327 +30,6 @@ C ToC(const Cx& z) {
 }
 Cx FromC(const C& z) {
     return {z.real(), z.imag()};
-}
-
-// ---- 测试用 BLAS / LAPACK（ILP64，行列约定与 CBLAS / Fortran 相同）----------------
-
-// 行主序下按转置标志取 op(A)(i, k)。
-C OpAt(const Cx* a, I lda, int trans, I i, I k) {
-    return trans == 111 ? ToC(a[i * lda + k]) : ToC(a[k * lda + i]);
-}
-
-void TestZgemm(int /*order*/, int ta, int tb, I m, I n, I k, const void* alpha, const void* a, I lda, const void* b,
-               I ldb, const void* beta, void* c, I ldc) {
-    const C al = ToC(*static_cast<const Cx*>(alpha));
-    const C be = ToC(*static_cast<const Cx*>(beta));
-    const auto* pa = static_cast<const Cx*>(a);
-    const auto* pb = static_cast<const Cx*>(b);
-    auto* pc = static_cast<Cx*>(c);
-    for (I i = 0; i < m; ++i) {
-        for (I j = 0; j < n; ++j) {
-            C s = 0;
-            for (I l = 0; l < k; ++l) {
-                s += OpAt(pa, lda, ta, i, l) * OpAt(pb, ldb, tb, l, j);
-            }
-            const C prev = be == C(0) ? C(0) : be * ToC(pc[i * ldc + j]);
-            pc[i * ldc + j] = FromC(al * s + prev);
-        }
-    }
-}
-
-void TestZsyrk(int /*order*/, int /*uplo*/, int trans, I n, I k, const void* alpha, const void* a, I lda,
-               const void* /*beta*/, void* c, I ldc) {
-    // C = alpha · op(A) · op(A)^T（只写上三角）
-    const C al = ToC(*static_cast<const Cx*>(alpha));
-    const auto* pa = static_cast<const Cx*>(a);
-    auto* pc = static_cast<Cx*>(c);
-    for (I i = 0; i < n; ++i) {
-        for (I j = i; j < n; ++j) {
-            C s = 0;
-            for (I l = 0; l < k; ++l) {
-                s += OpAt(pa, lda, trans, i, l) * OpAt(pa, lda, trans, j, l);
-            }
-            pc[i * ldc + j] = FromC(al * s);
-        }
-    }
-}
-
-void TestDgemv(int /*order*/, int /*trans*/, I n, I m, double alpha, const double* a, I lda, const double* x, I incx,
-               double beta, double* y, I incy) {
-    // 行主序 Trans：y = alpha · A^T x，A 为 n×m
-    for (I j = 0; j < m; ++j) {
-        double s = 0;
-        for (I i = 0; i < n; ++i) {
-            s += a[i * lda + j] * x[i * incx];
-        }
-        y[j * incy] = alpha * s + (beta == 0 ? 0.0 : beta * y[j * incy]);
-    }
-}
-
-void TestZdotc(I n, const void* x, I incx, const void* y, I incy, void* out) {
-    const auto* px = static_cast<const Cx*>(x);
-    const auto* py = static_cast<const Cx*>(y);
-    C s = 0;
-    for (I i = 0; i < n; ++i) {
-        s += std::conj(ToC(px[i * incx])) * ToC(py[i * incy]);
-    }
-    *static_cast<Cx*>(out) = FromC(s);
-}
-
-template <typename T>
-I TestGetrf(I* m, I* /*n*/, T* a, I* lda, I* ipiv, I* info) {
-    // 部分主元 LU（列主序）
-    *info = 0;
-    for (I k = 0; k < *m; ++k) {
-        I p = k;
-        for (I i = k + 1; i < *m; ++i) {
-            if (std::abs(a[i + k * *lda]) > std::abs(a[p + k * *lda])) {
-                p = i;
-            }
-        }
-        ipiv[k] = p + 1;
-        if (a[p + k * *lda] == T(0)) {
-            if (*info == 0) {
-                *info = k + 1;
-            }
-            continue;
-        }
-        if (p != k) {
-            for (I j = 0; j < *m; ++j) {
-                std::swap(a[k + j * *lda], a[p + j * *lda]);
-            }
-        }
-        for (I i = k + 1; i < *m; ++i) {
-            a[i + k * *lda] /= a[k + k * *lda];
-            for (I j = k + 1; j < *m; ++j) {
-                a[i + j * *lda] -= a[i + k * *lda] * a[k + j * *lda];
-            }
-        }
-    }
-    return 0;
-}
-
-I TestZgetrf(I* m, I* n, Cx* a, I* lda, I* ipiv, I* info) {
-    return TestGetrf(m, n, reinterpret_cast<C*>(a), lda, ipiv, info);
-}
-
-I TestDgetrf(I* m, I* n, double* a, I* lda, I* ipiv, I* info) {
-    return TestGetrf(m, n, a, lda, ipiv, info);
-}
-
-I TestDsyevd(char* /*jobz*/, char* /*uplo*/, I* n, double* a, I* lda, double* w, double* work, I* lwork, I* iwork,
-             I* liwork, I* info) {
-    *info = 0;
-    if (*lwork == -1 || *liwork == -1) {
-        work[0] = 64;
-        iwork[0] = 32;
-        return 0;
-    }
-    // 循环 Jacobi（列主序，下三角有效）
-    const I nn = *n;
-    std::vector<double> m(static_cast<std::size_t>(nn * nn));
-    std::vector<double> v(static_cast<std::size_t>(nn * nn), 0.0);
-    for (I i = 0; i < nn; ++i) {
-        for (I j = 0; j < nn; ++j) {
-            m[i * nn + j] = i >= j ? a[i + j * *lda] : a[j + i * *lda];
-        }
-        v[i * nn + i] = 1.0;
-    }
-    for (int sweep = 0; sweep < 100; ++sweep) {
-        double off = 0;
-        for (I p = 0; p < nn; ++p) {
-            for (I q = p + 1; q < nn; ++q) {
-                off += m[p * nn + q] * m[p * nn + q];
-            }
-        }
-        if (off < 1e-30) {
-            break;
-        }
-        for (I p = 0; p < nn; ++p) {
-            for (I q = p + 1; q < nn; ++q) {
-                if (std::fabs(m[p * nn + q]) < 1e-300) {
-                    continue;
-                }
-                const double theta = (m[q * nn + q] - m[p * nn + p]) / (2 * m[p * nn + q]);
-                const double t = (theta >= 0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1));
-                const double c = 1 / std::sqrt(t * t + 1);
-                const double s = t * c;
-                for (I k = 0; k < nn; ++k) {
-                    const double mkp = m[k * nn + p];
-                    const double mkq = m[k * nn + q];
-                    m[k * nn + p] = c * mkp - s * mkq;
-                    m[k * nn + q] = s * mkp + c * mkq;
-                }
-                for (I k = 0; k < nn; ++k) {
-                    const double mpk = m[p * nn + k];
-                    const double mqk = m[q * nn + k];
-                    m[p * nn + k] = c * mpk - s * mqk;
-                    m[q * nn + k] = s * mpk + c * mqk;
-                }
-                for (I k = 0; k < nn; ++k) {
-                    const double vkp = v[k * nn + p];
-                    const double vkq = v[k * nn + q];
-                    v[k * nn + p] = c * vkp - s * vkq;
-                    v[k * nn + q] = s * vkp + c * vkq;
-                }
-            }
-        }
-    }
-    std::vector<I> order(static_cast<std::size_t>(nn));
-    for (I i = 0; i < nn; ++i) {
-        order[i] = i;
-    }
-    std::sort(order.begin(), order.end(), [&](I x, I y) { return m[x * nn + x] < m[y * nn + y]; });
-    for (I j = 0; j < nn; ++j) {
-        w[j] = m[order[j] * nn + order[j]];
-        for (I i = 0; i < nn; ++i) {
-            a[i + j * *lda] = v[i * nn + order[j]];
-        }
-    }
-    return 0;
-}
-
-I TestZgesdd(char* /*jobz*/, I* m, I* /*n*/, Cx* a, I* lda, double* s, Cx* u, I* ldu, Cx* vt, I* ldvt, Cx* work,
-             I* lwork, double* /*rwork*/, I* /*iwork*/, I* info) {
-    *info = 0;
-    if (*lwork == -1) {
-        work[0] = Cx{64.0, 0.0};
-        return 0;
-    }
-    // A = U Σ V^H：对 A^H A 做 Hermite Jacobi 特征分解（实数化为 2n×2n 对称矩阵），按奇异值降序
-    const I nn = *m;
-    std::vector<C> am(static_cast<std::size_t>(nn * nn));
-    for (I i = 0; i < nn; ++i) {
-        for (I j = 0; j < nn; ++j) {
-            am[i * nn + j] = ToC(a[i + j * *lda]);
-        }
-    }
-    // H = A^H A
-    std::vector<C> h(static_cast<std::size_t>(nn * nn), 0.0);
-    for (I i = 0; i < nn; ++i) {
-        for (I j = 0; j < nn; ++j) {
-            for (I k = 0; k < nn; ++k) {
-                h[i * nn + j] += std::conj(am[k * nn + i]) * am[k * nn + j];
-            }
-        }
-    }
-    // [[Re, -Im], [Im, Re]] 的特征向量 (x, y) 给出复特征向量 x + iy（每个特征值出现两次）
-    const I r = 2 * nn;
-    std::vector<double> big(static_cast<std::size_t>(r * r));
-    for (I i = 0; i < nn; ++i) {
-        for (I j = 0; j < nn; ++j) {
-            big[i + j * r] = h[i * nn + j].real();
-            big[(i + nn) + (j + nn) * r] = h[i * nn + j].real();
-            big[(i + nn) + j * r] = h[i * nn + j].imag();
-            big[i + (j + nn) * r] = -h[i * nn + j].imag();
-        }
-    }
-    std::vector<double> w(static_cast<std::size_t>(r));
-    std::vector<double> wk(64);
-    std::vector<I> iw(32);
-    I lw = 64;
-    I liw = 32;
-    I inf = 0;
-    char jz = 'V';
-    char ul = 'L';
-    I rr = r;
-    TestDsyevd(&jz, &ul, &rr, big.data(), &rr, w.data(), wk.data(), &lw, iw.data(), &liw, &inf);
-    // 从大到小取 nn 个互相正交的复向量
-    std::vector<std::vector<C>> vecs;
-    std::vector<double> vals;
-    for (I j = r - 1; j >= 0 && static_cast<I>(vecs.size()) < nn; --j) {
-        std::vector<C> x(static_cast<std::size_t>(nn));
-        for (I i = 0; i < nn; ++i) {
-            x[i] = C(big[i + j * r], big[(i + nn) + j * r]);
-        }
-        for (const auto& y : vecs) {
-            C d = 0;
-            for (I i = 0; i < nn; ++i) {
-                d += std::conj(y[i]) * x[i];
-            }
-            for (I i = 0; i < nn; ++i) {
-                x[i] -= d * y[i];
-            }
-        }
-        double norm = 0;
-        for (const C& z : x) {
-            norm += std::norm(z);
-        }
-        if (norm < 1e-12) {
-            continue;
-        }
-        norm = std::sqrt(norm);
-        for (C& z : x) {
-            z /= norm;
-        }
-        vecs.push_back(x);
-        vals.push_back(std::sqrt(std::max(0.0, w[j])));
-    }
-    if (static_cast<I>(vecs.size()) < nn) {
-        *info = 1;
-        return 0;
-    }
-    // U 的列：A v / σ（σ = 0 时用 Gram–Schmidt 补全）
-    std::vector<std::vector<C>> ucols;
-    for (I j = 0; j < nn; ++j) {
-        std::vector<C> col(static_cast<std::size_t>(nn), 0.0);
-        if (vals[j] > 1e-12) {
-            for (I i = 0; i < nn; ++i) {
-                for (I k = 0; k < nn; ++k) {
-                    col[i] += am[i * nn + k] * vecs[j][k];
-                }
-                col[i] /= vals[j];
-            }
-        } else {
-            for (I e = 0; e < nn; ++e) {
-                std::vector<C> x(static_cast<std::size_t>(nn), 0.0);
-                x[e] = 1.0;
-                for (const auto& y : ucols) {
-                    C d = 0;
-                    for (I i = 0; i < nn; ++i) {
-                        d += std::conj(y[i]) * x[i];
-                    }
-                    for (I i = 0; i < nn; ++i) {
-                        x[i] -= d * y[i];
-                    }
-                }
-                double norm = 0;
-                for (const C& z : x) {
-                    norm += std::norm(z);
-                }
-                if (norm > 1e-6) {
-                    for (C& z : x) {
-                        z /= std::sqrt(norm);
-                    }
-                    col = x;
-                    break;
-                }
-            }
-        }
-        ucols.push_back(col);
-    }
-    for (I j = 0; j < nn; ++j) {
-        s[j] = vals[j];
-        for (I i = 0; i < nn; ++i) {
-            u[i + j * *ldu] = FromC(ucols[j][i]);
-            vt[j + i * *ldvt] = FromC(std::conj(vecs[j][i]));  // VT 的第 j 行 = v_j^H
-        }
-    }
-    return 0;
-}
-
-LinalgFunctions TestFunctions() {
-    LinalgFunctions f;
-    f.ilp64 = true;
-    f.zgemm = reinterpret_cast<std::uintptr_t>(&TestZgemm);
-    f.zsyrk = reinterpret_cast<std::uintptr_t>(&TestZsyrk);
-    f.dgemv = reinterpret_cast<std::uintptr_t>(&TestDgemv);
-    f.zdotc_sub = reinterpret_cast<std::uintptr_t>(&TestZdotc);
-    f.zgesdd = reinterpret_cast<std::uintptr_t>(&TestZgesdd);
-    f.dsyevd = reinterpret_cast<std::uintptr_t>(&TestDsyevd);
-    f.zgetrf = reinterpret_cast<std::uintptr_t>(&TestZgetrf);
-    f.dgetrf = reinterpret_cast<std::uintptr_t>(&TestDgetrf);
-    return f;
 }
 
 // ---- 常量（与 two_qubit.py 相同的定义）--------------------------------------------
@@ -427,47 +106,36 @@ const CM kCZ{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1};
 const CM kCX{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0};
 const CM kSwap{1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1};
 
-KakConstants TestConstants() {
-    KakConstants c;
-    c.magic = ToArr<16>(kMagic);
-    CM mc = kMagic;
-    for (C& z : mc) {
-        z = std::conj(z);
-    }
-    c.magic_conj = ToArr<16>(mc);
-    c.i2 = ToArr<4>(kI2);
-    c.x = ToArr<4>(kX);
-    c.y = ToArr<4>(kY);
-    c.z = ToArr<4>(kZ);
-    c.h = ToArr<4>(kH);
-    c.sx = ToArr<4>(kSX);
-    c.cz4 = ToArr<16>(kCZ);
-    c.swap4 = ToArr<16>(kSwap);
-    c.pauli_pairs = {ToArr<16>(Kron(kX, kX)), ToArr<16>(Kron(kY, kY)), ToArr<16>(Kron(kZ, kZ))};
-    c.swap_ab = ToArr<16>(Kron(kSg, kSg));
-    c.swap_bc = ToArr<16>(Kron(kRx90, kRx90));
-    c.flip_ab = ToArr<16>(Kron(kZ, kI2));
-    c.flip_ac = ToArr<16>(Kron(kY, kI2));
-    c.flip_bc = ToArr<16>(Kron(kX, kI2));
+// KakConstants::Make() 与 two_qubit.py 的常量矩阵数值相同。
+TEST(KakConstants, MatchTheModuleConstants) {
+    const KakConstants c = KakConstants::Make();
+    auto same = [](const auto& got, const CM& want) {
+        for (std::size_t i = 0; i < want.size(); ++i) {
+            EXPECT_EQ(ToC(got[i]), want[i]) << i;
+        }
+    };
+    same(c.magic, kMagic);
+    same(c.magic_dag, Dagger(kMagic));
+    same(c.h, kH);
+    same(c.sx, kSX);
+    same(c.cz4, kCZ);
+    same(c.swap4, kSwap);
+    same(c.pauli_pairs[1], Kron(kY, kY));
+    same(c.swap_ab, Kron(kSg, kSg));
+    same(c.swap_bc, Kron(kRx90, kRx90));
+    same(c.flip_ac, Kron(kY, kI2));
     const double phases[4][3] = {{1, -1, 1}, {1, 1, -1}, {-1, -1, -1}, {-1, 1, 1}};
     for (int r = 0; r < 4; ++r) {
-        c.phase_map[static_cast<std::size_t>(r * 4)] = 1.0;
+        EXPECT_EQ(c.phase_map[static_cast<std::size_t>(r * 4)], 1.0);
         for (int k = 0; k < 3; ++k) {
-            c.phase_map[static_cast<std::size_t>(r * 4 + 1 + k)] = phases[r][k];
-            c.can_phases[static_cast<std::size_t>(r * 3 + k)] = phases[r][k];
+            EXPECT_EQ(c.phase_map[static_cast<std::size_t>(r * 4 + 1 + k)], phases[r][k]);
+            EXPECT_EQ(c.can_phases[static_cast<std::size_t>(r * 3 + k)], phases[r][k]);
         }
     }
-    std::mt19937_64 rng(1234567);
-    std::normal_distribution<double> normal;
-    for (int i = 0; i < 196; ++i) {
-        c.normals.push_back(normal(rng));
-    }
-    return c;
 }
 
-// 平台无关的运算顺序（测试 BLAS 本身没有精确语义，这里只检查数学正确性）。
 KakSynthesizer MakeSynth() {
-    KakSynthesizer s(TestFunctions(), ArithModes{}, TestConstants());
+    KakSynthesizer s;
     EntanglerSpec cz;
     cz.name = "cz";
     cz.matrix = ToArr<16>(kCZ);
@@ -571,91 +239,90 @@ int CountEntanglers(const std::vector<Op>& ops) {
 
 // ---- 测试 ----------------------------------------------------------------------
 
-TEST(NumpyCompat, MultiplicationOrders) {
-    const Cx a{1.0 / 3.0, -2.0 / 7.0};
-    const Cx b{5.0 / 11.0, 3.0 / 13.0};
-    const Cx p = Mul(MulMode::kPlain, a, b);
-    const Cx f1 = Mul(MulMode::kFma1, a, b);
-    const Cx f2 = Mul(MulMode::kFma2, a, b);
-    const C ref = ToC(a) * ToC(b);
-    for (const Cx& z : {p, f1, f2}) {
-        EXPECT_NEAR(z.re, ref.real(), 1e-15);
-        EXPECT_NEAR(z.im, ref.imag(), 1e-15);
+TEST(GateMatrices, MatchTheDefinitions) {
+    std::mt19937_64 rng(3);
+    std::uniform_real_distribution<double> ang(-7.0, 7.0);
+    auto close = [](const Cx* got, const CM& want) {
+        for (std::size_t i = 0; i < want.size(); ++i) {
+            EXPECT_LT(std::abs(ToC(got[i]) - want[i]), 1e-15) << i;
+        }
+    };
+    Cx out[64];
+    int dim = 0;
+    for (int trial = 0; trial < 20; ++trial) {
+        const double t = ang(rng);
+        const double p = ang(rng);
+        const double l = ang(rng);
+        const double c = std::cos(t / 2);
+        const double s = std::sin(t / 2);
+        ASSERT_TRUE(GateMatrix("rx", &t, 1, out, &dim));
+        EXPECT_EQ(dim, 2);
+        close(out, {c, C(0, -s), C(0, -s), c});
+        ASSERT_TRUE(GateMatrix("ry", &t, 1, out, &dim));
+        close(out, {c, -s, s, c});
+        ASSERT_TRUE(GateMatrix("rz", &t, 1, out, &dim));
+        close(out, {std::exp(C(0, -t / 2)), 0, 0, std::exp(C(0, t / 2))});
+        ASSERT_TRUE(GateMatrix("p", &t, 1, out, &dim));
+        close(out, {1, 0, 0, std::exp(C(0, t))});
+        const double u3p[3] = {t, p, l};
+        const CM u3{c, -s * std::exp(C(0, l)), s * std::exp(C(0, p)), c * std::exp(C(0, p + l))};
+        ASSERT_TRUE(GateMatrix("u3", u3p, 3, out, &dim));
+        close(out, u3);
+        ASSERT_TRUE(GateMatrix("cu3", u3p, 3, out, &dim));
+        EXPECT_EQ(dim, 4);
+        close(out, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, u3[0], u3[1], 0, 0, u3[2], u3[3]});
+        ASSERT_TRUE(GateMatrix("cp", &t, 1, out, &dim));
+        close(out, {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, std::exp(C(0, t))});
     }
-    EXPECT_EQ(f1.re, std::fma(a.re, b.re, -(a.im * b.im)));
-    EXPECT_EQ(f2.im, std::fma(a.im, b.re, a.re * b.im));
-    // 实数乘法与混合运算
-    ArithModes m;
-    m.py_mixed = true;
-    const Cx mixed = PyMulReal(m, Cx{-0.0, -1.0}, 0.5);
-    EXPECT_TRUE(std::signbit(mixed.re));
-    EXPECT_EQ(mixed.im, -0.5);
+    ASSERT_TRUE(GateMatrix("h", nullptr, 0, out, &dim));
+    close(out, kH);
+    ASSERT_TRUE(GateMatrix("sx", nullptr, 0, out, &dim));
+    close(out, kSX);
+    ASSERT_TRUE(GateMatrix("cx", nullptr, 0, out, &dim));
+    close(out, kCX);
+    ASSERT_TRUE(GateMatrix("ccx", nullptr, 0, out, &dim));
+    EXPECT_EQ(dim, 8);
+    EXPECT_EQ(out[55].re, 1.0);
+    EXPECT_EQ(out[63].re, 0.0);
+    // T = diag(1, e^{iπ/4})：正确舍入的常数
+    ASSERT_TRUE(GateMatrix("t", nullptr, 0, out, &dim));
+    EXPECT_EQ(out[3].re, 0x1.6a09e667f3bcdp-1);
+    EXPECT_EQ(out[3].im, 0x1.6a09e667f3bccp-1);
+    // 未知门名与参数个数不对
+    EXPECT_FALSE(GateMatrix("foo", nullptr, 0, out, &dim));
+    EXPECT_FALSE(GateMatrix("rx", nullptr, 0, out, &dim));
+    const double one = 1.0;
+    EXPECT_FALSE(GateMatrix("h", &one, 1, out, &dim));
 }
 
-TEST(NumpyCompat, DivisionAndScalarFunctions) {
-    for (DivMode mode : {DivMode::kPlain, DivMode::kFma}) {
-        const Cx q = NpDiv(mode, Cx{1.0, 2.0}, Cx{3.0, -4.0});
-        const C ref = C(1, 2) / C(3, -4);
-        EXPECT_NEAR(q.re, ref.real(), 1e-15);
-        EXPECT_NEAR(q.im, ref.imag(), 1e-15);
-    }
-    const Cx r = PySqrt(Cx{-4.0, 0.0});
-    EXPECT_EQ(r.re, 0.0);
-    EXPECT_EQ(r.im, 2.0);
-    const Cx z = PySqrt(Cx{0.0, -0.0});
-    EXPECT_TRUE(std::signbit(z.im));
-    ArithModes m;
-    const Cx e = PyExp(m, Cx{0.0, 3.141592653589793 / 2});
-    EXPECT_NEAR(e.re, 0.0, 1e-15);
-    EXPECT_EQ(e.im, 1.0);
-    EXPECT_EQ(PyAtan2(-0.0, -1.0), -3.141592653589793);
-    EXPECT_EQ(PyAtan2(0.0, 1.0), 0.0);
-    EXPECT_EQ(PyPow(3.0, 2.0), 9.0);
-    EXPECT_EQ(PyPow(0.0, 2.0), 0.0);
-}
-
-TEST(NumpyLinalg, MatMulSyrkAndDecompositions) {
+TEST(KakSynthesizer, VerifiedEulerAndBlockUnitary) {
     const KakSynthesizer s = MakeSynth();
-    const NumpyLinalg& np = s.linalg();
-    std::mt19937_64 rng(7);
-    const M4 a = ToArr<16>(RandomUnitary(rng, 4));
-    const M4 b = ToArr<16>(RandomUnitary(rng, 4));
-    M4 c;
-    np.MatMul(4, View(a), ViewT(b), c.data());
-    CM bt(16);
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            bt[i * 4 + j] = ToC(b[j * 4 + i]);
+    std::mt19937_64 rng(31);
+    for (int i = 0; i < 20; ++i) {
+        const CM m = RandomUnitary(rng, 2);
+        for (int basis : {0, 1}) {
+            const auto ops = s.VerifiedEuler(ToArr<4>(m), 1e-9, basis);
+            ASSERT_TRUE(ops.has_value());
+            EXPECT_LT(DistanceUpToPhase(FromArr(s.OpsLayerMatrix(*ops, 0, ops->size())), m), 1e-9);
         }
     }
-    const CM ref = MatMul(FromArr(a), bt);
+    // 块：4×4 门、两个单比特门、反向的 4×4 门、swap4 共轭
+    const CM g4 = RandomUnitary(rng, 4);
+    const CM a = RandomUnitary(rng, 2);
+    const CM b = RandomUnitary(rng, 2);
+    const M4 g4a = ToArr<16>(g4);
+    const M2 aa = ToArr<4>(a);
+    const M2 ba = ToArr<4>(b);
+    const std::vector<KakSynthesizer::BlockMember> members = {
+        {g4a.data(), 0}, {aa.data(), 1}, {ba.data(), 2}, {g4a.data(), 3}, {g4a.data(), 4}};
+    const CM swapped = MatMul(MatMul(kSwap, g4), kSwap);
+    CM ref = MatMul(Kron(kI2, b), MatMul(Kron(a, kI2), g4));
+    ref = MatMul(swapped, ref);
+    ref = MatMul(swapped, ref);
+    const M4 got = s.BlockUnitary(members);
     for (int i = 0; i < 16; ++i) {
-        EXPECT_NEAR(std::abs(ToC(c[i]) - ref[i]), 0.0, 1e-12);
+        EXPECT_LT(std::abs(ToC(got[i]) - ref[i]), 1e-14);
     }
-    // a.T @ a（syrk 分支，结果对称）
-    np.MatMul(4, ViewT(a), View(a), c.data());
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            EXPECT_EQ(c[i * 4 + j].re, c[j * 4 + i].re);
-            EXPECT_EQ(c[i * 4 + j].im, c[j * 4 + i].im);
-        }
-    }
-    // det：酉矩阵的行列式模为 1
-    const Cx d = np.Det(4, View(a));
-    EXPECT_NEAR(std::abs(ToC(d)), 1.0, 1e-12);
-    // svd：秩 1 的矩阵
-    M4 u;
-    M4 vh;
-    std::array<double, 4> sv;
-    M4 rank1;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            rank1[i * 4 + j] = FromC(ToC(a[i * 4]) * std::conj(ToC(b[j * 4])) * 2.0);
-        }
-    }
-    ASSERT_TRUE(np.Svd4(rank1, &u, &sv, &vh));
-    EXPECT_NEAR(sv[0], 2.0, 1e-10);
-    EXPECT_NEAR(sv[1], 0.0, 1e-6);  // 测试实现经由 A^H A，零奇异值只精确到 sqrt(eps)
 }
 
 TEST(KakSynthesizer, KakReconstructsAndLiesInTheChamber) {
@@ -790,7 +457,7 @@ TEST(KakSynthesizer, ApproximationFilterAndUnitarityCheck) {
     EXPECT_FALSE(s.ApproximationImpossible(s.Kak4(ToArr<16>(cp)), 1e-12, 1e-9, 2));
     CM bad = kCZ;
     bad[0] = 2.0;
-    EXPECT_THROW(s.CheckUnitary(ToArr<16>(bad)), Fallback);
+    EXPECT_THROW(s.CheckUnitary(ToArr<16>(bad)), NotUnitary);
     EXPECT_NO_THROW(s.CheckUnitary(ToArr<16>(kCZ)));
 }
 
@@ -827,7 +494,7 @@ CM Gate1Matrix(const Gate1& g, const std::array<M2, kNumFixedGates>& fixed) {
 
 TEST(OneQubitSynthesizer, SynthesizesInSeveralBases) {
     const auto fixed = FixedMatrices();
-    const OneQubitSynthesizer synth(ArithModes{}, fixed);
+    const OneQubitSynthesizer synth;
     OneQubitBasis zxz;  // {rz, h, x}
     zxz.rz = zxz.h = zxz.x = true;
     zxz.named = {kGateH, kGateX};
@@ -879,7 +546,7 @@ TEST(OneQubitSynthesizer, SynthesizesInSeveralBases) {
 }
 
 TEST(OneQubitSynthesizer, ZyzAnglesRebuildTheMatrix) {
-    const OneQubitSynthesizer synth(ArithModes{}, FixedMatrices());
+    const OneQubitSynthesizer synth;
     std::mt19937_64 rng(23);
     for (int i = 0; i < 20; ++i) {
         const CM m = RandomUnitary(rng, 2);
@@ -888,6 +555,107 @@ TEST(OneQubitSynthesizer, ZyzAnglesRebuildTheMatrix) {
         EXPECT_LT(DistanceUpToPhase(Gate1Matrix(g, FixedMatrices()), m), 1e-12);
         EXPECT_GE(a[1], 0.0);
         EXPECT_LT(a[1], 2 * 3.141592653589793);
+    }
+}
+
+// 厄米特征分解：随机与简并（重特征值）输入，重构误差与正交性。
+TEST(ThreeQubit, HermitianEigAndUnitaryEig) {
+    namespace dm = quspect::native::detmath;
+    std::mt19937_64 rng(53);
+    for (int trial = 0; trial < 60; ++trial) {
+        const CM q = RandomUnitary(rng, 4);
+        std::vector<double> lam = {0.3, -1.2, 0.7, 2.0};
+        if (trial % 3 == 1) {
+            lam = {0.5, 0.5, -0.25, -0.25};
+        } else if (trial % 3 == 2) {
+            lam = {1.0, 1.0, 1.0, -1.0};
+        }
+        CM d(16, 0.0);
+        for (int i = 0; i < 4; ++i) {
+            d[i * 5] = lam[static_cast<std::size_t>(i)];
+        }
+        const CM h = MatMul(MatMul(q, d), Dagger(q));
+        const M4 ha = ToArr<16>(h);
+        double w[4];
+        M4 v;
+        ASSERT_TRUE(dm::EighHerm(4, ha.data(), w, v.data()));
+        const CM vv = FromArr(v);
+        const CM vhv = MatMul(MatMul(Dagger(vv), h), vv);
+        const CM vdv = MatMul(Dagger(vv), vv);
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                EXPECT_LT(std::abs(vhv[i * 4 + j] - (i == j ? C(w[i]) : C(0.0))), 1e-13);
+                EXPECT_LT(std::abs(vdv[i * 4 + j] - (i == j ? C(1.0) : C(0.0))), 1e-13);
+            }
+        }
+        // 酉矩阵 Q·diag(e^{iλ})·Q† 的特征分解
+        CM e(16, 0.0);
+        for (int i = 0; i < 4; ++i) {
+            e[i * 5] = std::exp(C(0.0, lam[static_cast<std::size_t>(i)]));
+        }
+        const CM m = MatMul(MatMul(q, e), Dagger(q));
+        const auto eig = UnitaryEig(ToArr<16>(m), 1e-9);
+        ASSERT_TRUE(eig.has_value());
+        const CM ev = FromArr(eig->first);
+        const CM evm = MatMul(MatMul(Dagger(ev), m), ev);
+        for (int i = 0; i < 4; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                const C want = i == j ? ToC(eig->second[static_cast<std::size_t>(i)]) : C(0.0);
+                EXPECT_LT(std::abs(evm[i * 4 + j] - want), 1e-13);
+            }
+        }
+    }
+}
+
+// 多路复用分解与余弦–正弦分解重建输入。
+TEST(ThreeQubit, DemultiplexAndCosSinReconstruct) {
+    std::mt19937_64 rng(59);
+    for (int trial = 0; trial < 40; ++trial) {
+        const CM a = RandomUnitary(rng, 4);
+        const CM b = trial % 4 == 0 ? a : RandomUnitary(rng, 4);
+        const auto dmx = Demultiplex(ToArr<16>(a), ToArr<16>(b));
+        ASSERT_TRUE(dmx.has_value());
+        CM d(16, 0.0);
+        CM dd(16, 0.0);
+        for (int k = 0; k < 4; ++k) {
+            d[k * 5] = std::exp(C(0.0, dmx->phases[static_cast<std::size_t>(k)]));
+            dd[k * 5] = std::conj(d[k * 5]);
+        }
+        const CM v = FromArr(dmx->v);
+        const CM w = FromArr(dmx->w);
+        const CM ra = MatMul(MatMul(v, d), w);
+        const CM rb = MatMul(MatMul(v, dd), w);
+        for (int i = 0; i < 16; ++i) {
+            EXPECT_LT(std::abs(ra[i] - a[i]), 1e-12);
+            EXPECT_LT(std::abs(rb[i] - b[i]), 1e-12);
+        }
+        const CM u8 = RandomUnitary(rng, 8);
+        M8 u;
+        for (int i = 0; i < 64; ++i) {
+            u[static_cast<std::size_t>(i)] = Cx{u8[i].real(), u8[i].imag()};
+        }
+        const auto cs = CosSinDecompose(u);
+        ASSERT_TRUE(cs.has_value());
+        CM left(64, 0.0);
+        CM mid(64, 0.0);
+        CM right(64, 0.0);
+        for (int i = 0; i < 4; ++i) {
+            const double t = cs->theta[static_cast<std::size_t>(i)];
+            mid[i * 8 + i] = std::cos(t);
+            mid[(i + 4) * 8 + i + 4] = std::cos(t);
+            mid[i * 8 + i + 4] = -std::sin(t);
+            mid[(i + 4) * 8 + i] = std::sin(t);
+            for (int j = 0; j < 4; ++j) {
+                left[i * 8 + j] = ToC(cs->u1[static_cast<std::size_t>(i * 4 + j)]);
+                left[(i + 4) * 8 + j + 4] = ToC(cs->u2[static_cast<std::size_t>(i * 4 + j)]);
+                right[i * 8 + j] = ToC(cs->v1h[static_cast<std::size_t>(i * 4 + j)]);
+                right[(i + 4) * 8 + j + 4] = ToC(cs->v2h[static_cast<std::size_t>(i * 4 + j)]);
+            }
+        }
+        const CM rebuilt = MatMul(MatMul(left, mid), right);
+        for (int i = 0; i < 64; ++i) {
+            EXPECT_LT(std::abs(rebuilt[i] - u8[i]), 1e-12);
+        }
     }
 }
 

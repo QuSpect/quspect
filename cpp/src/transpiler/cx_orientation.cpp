@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -46,93 +47,240 @@ std::uint64_t Bits(double x) {
     return b;
 }
 
-struct MemoKey {
-    int run;
-    int left;  // 左侧 CX 朝向（-1：无）
+// 链求解器的选项表。一个"条目"是一个运行在给定上下文（入射朝向 / 轴 / 角、本运行右侧 CX 的
+// 朝向与带出轴）下的全部选项：(带出角, 代价)，带出角 0 表示不带出。条目只依赖运行矩阵的内容与
+// 上下文，按内容去重（布线后的线路里大多数运行是单位阵）；束中的状态指向它来自的选项，下一个
+// 运行的条目由 (选项, 运行矩阵, 朝向, 带出轴) 经转移表直接找到。
+struct Option {
+    double phi;
+    int cost;
+    std::int8_t right;     // 产生这个选项的条目右侧 CX 的朝向（-1：链尾 / 链首的虚拟选项）
+    std::int8_t axis_out;  // 带入下一个运行的旋转轴
+};
+
+struct EntryKey {
+    int matrix;
+    int left;
     int axis_in;
     std::uint64_t phi_in;
-    int right;  // 右侧 CX 朝向（-1：无）
-    bool operator==(const MemoKey& o) const {
-        return run == o.run && left == o.left && axis_in == o.axis_in && phi_in == o.phi_in && right == o.right;
+    int right;
+    int axis_out;
+    bool operator==(const EntryKey& o) const {
+        return matrix == o.matrix && left == o.left && axis_in == o.axis_in && phi_in == o.phi_in && right == o.right
+               && axis_out == o.axis_out;
     }
 };
 
-struct MemoKeyHash {
-    std::size_t operator()(const MemoKey& k) const {
-        std::size_t h = std::hash<std::uint64_t>()(k.phi_in);
-        h ^= static_cast<std::size_t>(k.run) * 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
-        h ^= static_cast<std::size_t>((k.left + 1) * 9 + (k.axis_in + 1) * 3 + (k.right + 1)) + (h << 6) + (h >> 2);
-        return h;
+struct EntryKeyHash {
+    std::size_t operator()(const EntryKey& k) const {
+        std::uint64_t h = k.phi_in * 0x9E3779B97F4A7C15ULL;
+        h ^= (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.matrix)) << 8)
+             ^ static_cast<std::uint64_t>((k.left + 1) * 27 + (k.axis_in + 1) * 9 + (k.right + 1) * 3
+                                          + (k.axis_out + 1));
+        h *= 0xBF58476D1CE4E5B9ULL;
+        return static_cast<std::size_t>(h ^ (h >> 31));
     }
 };
 
-// 一个运行在给定入射旋转与两侧朝向下的选项：(带出角, 代价)；带出角 0 表示不带出。
-using Options = std::vector<std::pair<double, int>>;
+struct MatrixKeyHash {
+    std::size_t operator()(const std::array<std::uint64_t, 8>& k) const {
+        std::uint64_t h = 0;
+        for (std::uint64_t v : k) {
+            h = (h ^ v) * 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 29;
+        }
+        return static_cast<std::size_t>(h);
+    }
+};
+
+// (选项, 运行矩阵, 朝向, 带出轴) → 条目的开放寻址表（键打包成 64 位）。
+class TransitionTable {
+ public:
+    static constexpr std::uint32_t kMissing = 0xFFFFFFFFu;
+
+    TransitionTable() {
+        Rehash(1024);
+    }
+
+    static std::uint64_t Key(std::uint32_t option, int matrix, int right, int axis_out) {
+        return (static_cast<std::uint64_t>(option) << 32) | (static_cast<std::uint64_t>(matrix) << 4)
+               | static_cast<std::uint64_t>((right + 1) * 3 + (axis_out + 1));
+    }
+
+    std::uint32_t Find(std::uint64_t key) const {
+        for (std::size_t i = Slot(key);; i = (i + 1) & mask_) {
+            if (keys_[i] == key) {
+                return values_[i];
+            }
+            if (keys_[i] == kEmpty) {
+                return kMissing;
+            }
+        }
+    }
+
+    void Insert(std::uint64_t key, std::uint32_t value) {
+        if (2 * (size_ + 1) > keys_.size()) {
+            Rehash(2 * keys_.size());
+        }
+        std::size_t i = Slot(key);
+        while (keys_[i] != kEmpty) {
+            i = (i + 1) & mask_;
+        }
+        keys_[i] = key;
+        values_[i] = value;
+        ++size_;
+    }
+
+ private:
+    static constexpr std::uint64_t kEmpty = ~std::uint64_t{0};
+
+    std::size_t Slot(std::uint64_t key) const {
+        return static_cast<std::size_t>((key * 0x9E3779B97F4A7C15ULL) >> shift_) & mask_;
+    }
+
+    void Rehash(std::size_t capacity) {
+        std::vector<std::uint64_t> keys(capacity, kEmpty);
+        std::vector<std::uint32_t> values(capacity, 0);
+        keys.swap(keys_);
+        values.swap(values_);
+        mask_ = capacity - 1;
+        shift_ = 64;
+        for (std::size_t c = capacity; c > 1; c >>= 1) {
+            --shift_;
+        }
+        size_ = 0;
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            if (keys[i] != kEmpty) {
+                std::size_t s = Slot(keys[i]);
+                while (keys_[s] != kEmpty) {
+                    s = (s + 1) & mask_;
+                }
+                keys_[s] = keys[i];
+                values_[s] = values[i];
+                ++size_;
+            }
+        }
+    }
+
+    std::vector<std::uint64_t> keys_;
+    std::vector<std::uint32_t> values_;
+    std::size_t mask_ = 0;
+    int shift_ = 64;
+    std::size_t size_ = 0;
+};
 
 class ChainSolver {
  public:
     ChainSolver(const OrientationProblem& problem, const LengthModel& model, const OrientationOptions& options)
-        : problem_(problem), model_(model), options_(options), h_(Hadamard()) {
-        runs_offset_.resize(problem.wire_runs.size() + 1, 0);
-        for (std::size_t w = 0; w < problem.wire_runs.size(); ++w) {
-            runs_offset_[w + 1] = runs_offset_[w] + static_cast<int>(problem.wire_runs[w].size());
+        : problem_(problem)
+        , model_(model)
+        , options_(options)
+        , h_(Hadamard())
+        , monotone_(options.gate_weight >= 0 && options.run_weight >= 0) {
+        // 运行矩阵按内容（逐位）编号（转移表的键里占 28 位）
+        std::size_t num_runs = 0;
+        for (const auto& runs : problem.wire_runs) {
+            num_runs += runs.size();
         }
+        if (num_runs >= (std::size_t{1} << 28)) {
+            throw std::invalid_argument("too many single-qubit runs");
+        }
+        std::unordered_map<std::array<std::uint64_t, 8>, int, MatrixKeyHash> ids;
+        wire_matrix_.resize(problem.wire_runs.size());
+        for (std::size_t w = 0; w < problem.wire_runs.size(); ++w) {
+            for (const Matrix2& m : problem.wire_runs[w]) {
+                std::array<std::uint64_t, 8> key{};
+                for (int i = 0; i < 4; ++i) {
+                    key[static_cast<std::size_t>(2 * i)] = Bits(m[static_cast<std::size_t>(i)].re);
+                    key[static_cast<std::size_t>(2 * i + 1)] = Bits(m[static_cast<std::size_t>(i)].im);
+                }
+                const auto [it, added] = ids.emplace(key, static_cast<int>(matrices_.size()));
+                if (added) {
+                    matrices_.push_back(m);
+                }
+                wire_matrix_[w].push_back(it->second);
+            }
+        }
+        // 链首的虚拟选项：无朝向、不带旋转
+        options_list_.push_back(Option{0.0, 0, -1, static_cast<std::int8_t>(kNoAxis)});
+        sorted_.push_back(0);
     }
 
     // 线 ``wire`` 的最小代价。``fixed`` 非空时朝向取 fixed[g]；否则自由，``linear[j]`` 为第 j 个 CX
     // 反向时附加的代价。``chosen`` 返回沿线各 CX 的朝向。
+    //
+    // ``budget``（只用于固定朝向、代价非负时）：某一层的最低代价已经不低于它时提前停止，返回这个
+    // 下界（状态代价沿链不减，最终代价不会更低），``Aborted()`` 为真。
     double Solve(int wire, const std::vector<std::uint8_t>* fixed, const std::vector<double>* linear,
-                 std::vector<std::uint8_t>* chosen) {
-        const auto& gates = problem_.wire_gates[wire];
-        const auto& is_control = problem_.wire_is_control[wire];
-        const auto& runs = problem_.wire_runs[wire];
+                 std::vector<std::uint8_t>* chosen, double budget = std::numeric_limits<double>::infinity()) {
+        aborted_ = false;
+        const bool bounded = budget < std::numeric_limits<double>::infinity();
+        const auto& gates = problem_.wire_gates[static_cast<std::size_t>(wire)];
+        const auto& is_control = problem_.wire_is_control[static_cast<std::size_t>(wire)];
+        const auto& matrix = wire_matrix_[static_cast<std::size_t>(wire)];
         const int n = static_cast<int>(gates.size());
-        if (static_cast<int>(runs.size()) != n + 1) {
+        if (static_cast<int>(matrix.size()) != n + 1) {
             throw std::invalid_argument("each wire needs one more run than gates");
         }
-        layers_.assign(static_cast<std::size_t>(n) + 1, {});
-        std::vector<State> current = {State{0.0, -1, kNoAxis, 0.0, -1}};
+        // 第 j 层（运行 j 之后）的状态是 states_[offset_[j + 1], offset_[j + 2])；第 0 段是链首。
+        states_.clear();
+        offset_.assign(static_cast<std::size_t>(n) + 3, 0);
+        states_.push_back(State{0.0, -1, 0});
+        offset_[1] = 1;
         for (int j = 0; j <= n; ++j) {
-            std::vector<State> next;
             int choices[2] = {0, 1};
             int num_choices = 2;
             if (j == n) {
                 choices[0] = -1;
                 num_choices = 1;
             } else if (fixed != nullptr) {
-                choices[0] = (*fixed)[static_cast<std::size_t>(gates[j])] ? 1 : 0;
+                choices[0] = (*fixed)[static_cast<std::size_t>(gates[static_cast<std::size_t>(j)])] ? 1 : 0;
                 num_choices = 1;
             }
-            for (int si = 0; si < static_cast<int>(current.size()); ++si) {
-                const State& st = current[static_cast<std::size_t>(si)];
-                for (int c = 0; c < num_choices; ++c) {
-                    const int right = choices[c];
-                    const int axis_out = right < 0 ? kNoAxis : CommutingAxis(is_control[j] != 0, right == 1);
-                    const Options& opts = RunOptions(runs_offset_[wire] + j, runs[j], st, right, axis_out);
-                    const double extra = (right == 1 && linear != nullptr) ? (*linear)[static_cast<std::size_t>(j)]
-                                                                           : 0.0;
-                    for (const auto& [phi, cost] : opts) {
-                        next.push_back(State{st.cost + cost + extra, right, axis_out, phi, si});
-                    }
-                }
+            const std::size_t begin = offset_[static_cast<std::size_t>(j)];
+            const std::size_t end = offset_[static_cast<std::size_t>(j) + 1];
+            Layer layer{begin, end, matrix[static_cast<std::size_t>(j)], num_choices, {}, {}, {}};
+            bool ordinary = true;
+            for (int c = 0; c < num_choices; ++c) {
+                const int right = choices[c];
+                layer.right[c] = right;
+                layer.axis_out[c] = right < 0 ? kNoAxis
+                                              : CommutingAxis(is_control[static_cast<std::size_t>(j)] != 0, right == 1);
+                layer.extra[c] = (right == 1 && linear != nullptr) ? (*linear)[static_cast<std::size_t>(j)] : 0.0;
+                ordinary = ordinary && std::fabs(layer.extra[c]) < kOrdinary;
             }
-            current = Prune(std::move(next));
-            layers_[static_cast<std::size_t>(j)] = current;
+            for (std::size_t si = begin; si < end; ++si) {
+                ordinary = ordinary && std::fabs(states_[si].cost) < kOrdinary;
+            }
+            const std::size_t first = states_.size();
+            if (ordinary) {
+                Prune(layer);
+            } else {
+                PruneSorted(layer);
+            }
+            offset_[static_cast<std::size_t>(j) + 2] = states_.size();
+            // 层内状态按代价升序，第一个就是这一层的最低代价
+            if (bounded && states_[first].cost >= budget) {
+                aborted_ = true;
+                return states_[first].cost;
+            }
         }
-        int best = 0;
-        for (int i = 1; i < static_cast<int>(current.size()); ++i) {
-            if (current[static_cast<std::size_t>(i)].cost < current[static_cast<std::size_t>(best)].cost) {
+        const std::size_t last = offset_[static_cast<std::size_t>(n) + 1];
+        std::size_t best = last;
+        for (std::size_t i = last + 1; i < states_.size(); ++i) {
+            if (states_[i].cost < states_[best].cost) {
                 best = i;
             }
         }
-        const double value = current[static_cast<std::size_t>(best)].cost;
+        const double value = states_[best].cost;
         if (chosen != nullptr) {
             chosen->assign(static_cast<std::size_t>(n), 0);
-            int idx = best;
+            int idx = static_cast<int>(best - last);
             for (int j = n; j >= 0; --j) {
-                const State& st = layers_[static_cast<std::size_t>(j)][static_cast<std::size_t>(idx)];
+                const State& st = states_[offset_[static_cast<std::size_t>(j) + 1] + static_cast<std::size_t>(idx)];
                 if (j < n) {
-                    (*chosen)[static_cast<std::size_t>(j)] = static_cast<std::uint8_t>(st.flip == 1);
+                    (*chosen)[static_cast<std::size_t>(j)] = static_cast<std::uint8_t>(options_list_[st.option].right
+                                                                                       == 1);
                 }
                 idx = st.parent;
             }
@@ -140,14 +288,41 @@ class ChainSolver {
         return value;
     }
 
+    bool Aborted() const {
+        return aborted_;
+    }
+
  private:
     struct State {
         double cost;
-        int flip;  // 本状态之前（左侧）CX 的朝向；-1：链首
-        int axis;  // 带入下一个运行的旋转轴
-        double phi;
-        int parent;
+        int parent;            // 上一层状态的下标（层内）
+        std::uint32_t option;  // 状态来自的选项（朝向、带出轴与带出角）
     };
+    struct Candidate {
+        double cost;
+        int parent;
+        std::uint32_t option;
+    };
+    struct Entry {
+        std::uint32_t begin;
+        std::uint32_t count;
+    };
+    struct Cursor {
+        double head;        // 列表当前位置的代价
+        double base;        // 状态的代价
+        std::uint64_t key;  // 当前位置的生成序号：(层内状态 << 32) | (朝向选择 << 16) | 条目内选项
+        std::uint32_t begin;
+        std::uint32_t count;
+        std::uint32_t pos;
+    };
+    struct Accepted {
+        double cost;
+        std::uint64_t key;
+        int parent;
+        std::uint32_t option;
+    };
+    // 候选代价的"正常"量级：低于它时 (base + 选项代价) + extra 随选项代价严格单调。
+    static constexpr double kOrdinary = 1099511627776.0;  // 2^40
 
     int Score(const Matrix2& m) const {
         const std::optional<int> len = FastLength(m, model_);
@@ -155,24 +330,37 @@ class ChainSolver {
         return options_.gate_weight * n + (n > 0 ? options_.run_weight : 0);
     }
 
-    const Options& RunOptions(int run_id, const Matrix2& run, const State& st, int right, int axis_out) {
-        const MemoKey key{run_id, st.flip, st.axis, Bits(st.phi), right};
-        auto it = memo_.find(key);
-        if (it != memo_.end()) {
+    std::uint32_t Transition(std::uint32_t option, int mat, int right, int axis_out) {
+        const std::uint64_t key = TransitionTable::Key(option, mat, right, axis_out);
+        std::uint32_t e = transitions_.Find(key);
+        if (e == TransitionTable::kMissing) {
+            const Option& o = options_list_[option];
+            e = FindEntry(mat, o.right, o.axis_out, o.phi, right, axis_out);
+            transitions_.Insert(key, e);
+        }
+        return e;
+    }
+
+    std::uint32_t FindEntry(int mat, int left, int axis_in, double phi_in, int right, int axis_out) {
+        const EntryKey key{mat, left, axis_in, Bits(phi_in), right, axis_out};
+        auto it = entry_ids_.find(key);
+        if (it != entry_ids_.end()) {
             return it->second;
         }
-        Matrix2 base = run;
-        if (st.flip == 1) {
+        Matrix2 base = matrices_[static_cast<std::size_t>(mat)];
+        if (left == 1) {
             base = Mul(base, h_);
         }
-        if (st.axis != kNoAxis && st.phi != 0.0) {
-            base = Mul(base, AxisRotation(st.axis, st.phi));
+        if (axis_in != kNoAxis && phi_in != 0.0) {
+            base = Mul(base, AxisRotation(axis_in, phi_in));
         }
         if (right == 1) {
             base = Mul(h_, base);
         }
-        Options opts;
-        opts.emplace_back(0.0, Score(base));
+        const auto r = static_cast<std::int8_t>(right);
+        const auto a = static_cast<std::int8_t>(axis_out);
+        Entry entry{static_cast<std::uint32_t>(options_list_.size()), 0};
+        options_list_.push_back(Option{0.0, Score(base), r, a});
         if (axis_out != kNoAxis) {
             const Matrix2 z = axis_out == kAxisZ ? base : Mul(h_, Mul(base, h_));
             const std::optional<LeadingAngles> lead = LeadingAnglesInZFrame(z);
@@ -183,26 +371,154 @@ class ChainSolver {
                         continue;
                     }
                     const Matrix2 rest = Mul(AxisRotation(axis_out, -phi), base);
-                    opts.emplace_back(phi, Score(rest));
+                    options_list_.push_back(Option{phi, Score(rest), r, a});
                 }
             }
         }
-        return memo_.emplace(key, std::move(opts)).first->second;
+        entry.count = static_cast<std::uint32_t>(options_list_.size()) - entry.begin;
+        sorted_.resize(options_list_.size());
+        for (std::uint32_t k = 0; k < entry.count; ++k) {
+            sorted_[entry.begin + k] = static_cast<std::uint8_t>(k);
+        }
+        std::stable_sort(sorted_.begin() + entry.begin, sorted_.end(), [&](std::uint8_t a, std::uint8_t b) {
+            return options_list_[entry.begin + a].cost < options_list_[entry.begin + b].cost;
+        });
+        const auto id = static_cast<std::uint32_t>(entries_.size());
+        entries_.push_back(entry);
+        entry_ids_.emplace(key, id);
+        return id;
     }
 
-    // 每个朝向保留代价最低的 beam 个（角度去重）状态。
-    std::vector<State> Prune(std::vector<State> states) const {
-        std::stable_sort(states.begin(), states.end(), [](const State& a, const State& b) { return a.cost < b.cost; });
-        std::vector<State> out;
+    // 一层的输入：上一层状态 states_[begin, end)（按代价升序）、运行矩阵、各朝向选择的朝向 / 带出轴 /
+    // 反向附加代价。
+    struct Layer {
+        std::size_t begin;
+        std::size_t end;
+        int matrix;
+        int num_choices;
+        std::array<int, 2> right;
+        std::array<int, 2> axis_out;
+        std::array<double, 2> extra;
+    };
+
+    // 每个朝向保留代价最低的 beam 个（角度去重）状态，追加到 states_。参考做法（PruneSorted）是按
+    // (状态, 朝向, 选项) 的生成顺序列出全部候选 (st.cost + 选项代价) + extra，按代价稳定排序后依次
+    // 取用；这里给出相同的结果：
+    //   - 稳定排序 = 按 (代价, 生成序号) 排序，生成序号用 (状态, 朝向, 选项) 的字典序表示；
+    //   - 取用只与同一朝向里排在前面的候选有关，所以各朝向分别处理，最后按 (代价, 生成序号) 合并；
+    //   - 同一 (状态, 朝向) 的候选代价随选项代价严格单调（量级远小于 2^52 时），按条目内预排的选项
+    //     顺序就是有序列表，各列表多路归并、取满即停；
+    //   - 选项代价非负时，状态 s 的候选不低于 st.cost + extra（随 s 不减）：只有它不高于当前最小的
+    //     列表头时才需要展开这个状态（查转移表），其余状态的候选不会被取到。
+    void Prune(const Layer& layer) {
+        accepted_.clear();
+        for (int c = 0; c < layer.num_choices; ++c) {
+            const int right = layer.right[static_cast<std::size_t>(c)];
+            const int axis_out = layer.axis_out[static_cast<std::size_t>(c)];
+            const double extra = layer.extra[static_cast<std::size_t>(c)];
+            cursors_.clear();
+            std::size_t next = layer.begin;
+            const std::size_t group_first = accepted_.size();
+            int count = 0;
+            while (count < options_.beam) {
+                std::size_t best = cursors_.size();
+                for (std::size_t i = 0; i < cursors_.size(); ++i) {
+                    if (best == cursors_.size() || cursors_[i].head < cursors_[best].head
+                        || (cursors_[i].head == cursors_[best].head && cursors_[i].key < cursors_[best].key)) {
+                        best = i;
+                    }
+                }
+                if (next < layer.end
+                    && (best == cursors_.size() || !monotone_ || states_[next].cost + extra <= cursors_[best].head)) {
+                    const State& st = states_[next];
+                    const std::uint32_t e = Transition(st.option, layer.matrix, right, axis_out);
+                    const Entry& entry = entries_[e];
+                    const std::uint8_t k = sorted_[entry.begin];
+                    const auto si = static_cast<std::uint64_t>(next - layer.begin);
+                    cursors_.push_back(Cursor{st.cost + options_list_[entry.begin + k].cost + extra, st.cost,
+                                              (si << 32) | (static_cast<std::uint64_t>(c) << 16) | k, entry.begin,
+                                              entry.count, 0});
+                    ++next;
+                    continue;
+                }
+                if (best == cursors_.size()) {
+                    break;
+                }
+                Cursor& cur = cursors_[best];
+                const double cost = cur.head;
+                const std::uint64_t key = cur.key;
+                const std::uint32_t option = cur.begin + static_cast<std::uint32_t>(key & 0xFFFFu);
+                if (++cur.pos < cur.count) {
+                    const std::uint8_t k = sorted_[cur.begin + cur.pos];
+                    cur.head = cur.base + options_list_[cur.begin + k].cost + extra;
+                    cur.key = (key & ~std::uint64_t{0xFFFF}) | k;
+                } else {
+                    cur = cursors_.back();
+                    cursors_.pop_back();
+                }
+                const Option& o = options_list_[option];
+                bool dup = false;
+                for (std::size_t i = group_first; i < accepted_.size(); ++i) {
+                    const Option& p = options_list_[accepted_[i].option];
+                    if (p.axis_out == o.axis_out && std::abs(p.phi - o.phi) < kAngleTol) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    continue;
+                }
+                accepted_.push_back(Accepted{cost, key, static_cast<int>(key >> 32), option});
+                ++count;
+            }
+        }
+        // 各朝向的结果按 (代价, 生成序号) 合并（插入排序，最多 2·beam 个）
+        for (std::size_t i = 1; i < accepted_.size(); ++i) {
+            const Accepted x = accepted_[i];
+            std::size_t k = i;
+            while (k > 0
+                   && (x.cost < accepted_[k - 1].cost
+                       || (x.cost == accepted_[k - 1].cost && x.key < accepted_[k - 1].key))) {
+                accepted_[k] = accepted_[k - 1];
+                --k;
+            }
+            accepted_[k] = x;
+        }
+        for (const Accepted& x : accepted_) {
+            states_.push_back(State{x.cost, x.parent, x.option});
+        }
+    }
+
+    // 参考做法：全部候选按生成顺序列出，按代价稳定排序，依次取用（代价量级异常或 NaN 时使用）。
+    void PruneSorted(const Layer& layer) {
+        candidates_.clear();
+        for (std::size_t si = layer.begin; si < layer.end; ++si) {
+            const State& st = states_[si];
+            for (int c = 0; c < layer.num_choices; ++c) {
+                const std::uint32_t e = Transition(st.option, layer.matrix, layer.right[static_cast<std::size_t>(c)],
+                                                   layer.axis_out[static_cast<std::size_t>(c)]);
+                const Entry& entry = entries_[e];
+                for (std::uint32_t k = entry.begin; k < entry.begin + entry.count; ++k) {
+                    candidates_.push_back(
+                        Candidate{st.cost + options_list_[k].cost + layer.extra[static_cast<std::size_t>(c)],
+                                  static_cast<int>(si - layer.begin), k});
+                }
+            }
+        }
+        std::stable_sort(candidates_.begin(), candidates_.end(),
+                         [](const Candidate& a, const Candidate& b) { return a.cost < b.cost; });
+        const std::size_t first = states_.size();
         int kept[3] = {0, 0, 0};
-        for (const State& st : states) {
-            int& count = kept[st.flip + 1];
+        for (const Candidate& x : candidates_) {
+            const Option& o = options_list_[x.option];
+            int& count = kept[o.right + 1];
             if (count >= options_.beam) {
                 continue;
             }
             bool dup = false;
-            for (const State& o : out) {
-                if (o.flip == st.flip && o.axis == st.axis && std::abs(o.phi - st.phi) < kAngleTol) {
+            for (std::size_t i = first; i < states_.size(); ++i) {
+                const Option& p = options_list_[states_[i].option];
+                if (p.right == o.right && p.axis_out == o.axis_out && std::abs(p.phi - o.phi) < kAngleTol) {
                     dup = true;
                     break;
                 }
@@ -210,19 +526,29 @@ class ChainSolver {
             if (dup) {
                 continue;
             }
-            out.push_back(st);
+            states_.push_back(State{x.cost, x.parent, x.option});
             ++count;
         }
-        return out;
     }
 
     const OrientationProblem& problem_;
     const LengthModel& model_;
     const OrientationOptions& options_;
     Matrix2 h_;
-    std::vector<int> runs_offset_;
-    std::vector<std::vector<State>> layers_;
-    std::unordered_map<MemoKey, Options, MemoKeyHash> memo_;
+    std::vector<Matrix2> matrices_;
+    std::vector<std::vector<int>> wire_matrix_;
+    std::vector<Option> options_list_;
+    std::vector<Entry> entries_;
+    std::unordered_map<EntryKey, std::uint32_t, EntryKeyHash> entry_ids_;
+    TransitionTable transitions_;
+    std::vector<State> states_;
+    std::vector<std::size_t> offset_;
+    std::vector<Candidate> candidates_;
+    std::vector<Cursor> cursors_;
+    std::vector<Accepted> accepted_;
+    bool aborted_ = false;
+    bool monotone_ = true;              // 选项代价非负（权重非负）
+    std::vector<std::uint8_t> sorted_;  // 与 options_list_ 平行：条目内按代价稳定排序后的选项序号
 };
 
 void CheckProblem(const OrientationProblem& problem) {
@@ -279,28 +605,49 @@ OrientationResult SolveCxOrientation(const OrientationProblem& problem, const Le
     constexpr std::size_t kWireCache = 4;
     std::vector<std::vector<std::pair<std::vector<std::uint8_t>, double>>> wire_cache(
         static_cast<std::size_t>(num_wires));
+    // 固定朝向下的代价都是非负整数（double 表示，求和精确、与次序无关）：候选朝向只需判断是否
+    // 低于当前最优，``energy(flip, bound)`` 在总代价低于 bound 时返回精确值，否则返回某个不低于
+    // bound 的值（先累加缓存命中的线，其余的线逐条求解，部分和或链内某层的下界达到 bound 即停）。
+    const bool monotone = options.gate_weight >= 0 && options.run_weight >= 0;
     std::vector<std::uint8_t> bits;
-    auto energy = [&](const std::vector<std::uint8_t>& flip) {
+    std::vector<int> pending;
+    auto wire_bits = [&](int w, const std::vector<std::uint8_t>& flip) {
+        const auto& gates = problem.wire_gates[static_cast<std::size_t>(w)];
+        bits.resize(gates.size());
+        for (std::size_t j = 0; j < gates.size(); ++j) {
+            bits[j] = flip[static_cast<std::size_t>(gates[j])];
+        }
+    };
+    auto energy = [&](const std::vector<std::uint8_t>& flip, double bound) {
+        if (!monotone) {
+            bound = std::numeric_limits<double>::infinity();
+        }
         double total = 0.0;
+        pending.clear();
         for (int w = 0; w < num_wires; ++w) {
-            const auto& gates = problem.wire_gates[static_cast<std::size_t>(w)];
-            bits.resize(gates.size());
-            for (std::size_t j = 0; j < gates.size(); ++j) {
-                bits[j] = flip[static_cast<std::size_t>(gates[j])];
-            }
-            auto& cache = wire_cache[static_cast<std::size_t>(w)];
+            wire_bits(w, flip);
             bool hit = false;
-            for (const auto& [key, cost] : cache) {
+            for (const auto& [key, cost] : wire_cache[static_cast<std::size_t>(w)]) {
                 if (key == bits) {
                     total += cost;
                     hit = true;
                     break;
                 }
             }
-            if (hit) {
-                continue;
+            if (!hit) {
+                pending.push_back(w);
             }
-            const double cost = solver.Solve(w, &flip, nullptr, nullptr);
+        }
+        for (int w : pending) {
+            if (total >= bound) {
+                return total;
+            }
+            const double cost = solver.Solve(w, &flip, nullptr, nullptr, bound - total);
+            if (solver.Aborted()) {
+                return total + cost;
+            }
+            wire_bits(w, flip);
+            auto& cache = wire_cache[static_cast<std::size_t>(w)];
             if (cache.size() >= kWireCache) {
                 cache.erase(cache.begin());
             }
@@ -312,14 +659,14 @@ OrientationResult SolveCxOrientation(const OrientationProblem& problem, const Le
 
     OrientationResult result;
     result.flip.assign(ng, 0);
-    result.initial_energy = energy(result.flip);
+    result.initial_energy = energy(result.flip, std::numeric_limits<double>::infinity());
     result.energy = result.initial_energy;
     if (ng == 0) {
         return result;
     }
     {
         const std::vector<std::uint8_t> all(ng, 1);
-        const double e = energy(all);
+        const double e = energy(all, result.energy);
         if (e < result.energy) {
             result.energy = e;
             result.flip = all;
@@ -374,7 +721,7 @@ OrientationResult SolveCxOrientation(const OrientationProblem& problem, const Le
         }
         bool improved = false;
         for (const auto* cand : {&ctrl_copy, &tgt_copy}) {
-            const double e = energy(*cand);
+            const double e = energy(*cand, result.energy);
             if (e < result.energy) {
                 result.energy = e;
                 result.flip = *cand;

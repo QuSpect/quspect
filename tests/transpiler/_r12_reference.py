@@ -7,6 +7,12 @@ cache on entry and exit, so a :func:`~quspect.transpiler.transpile` call
 inside the context runs exactly the round-12 code and one outside it runs
 the current code from scratch.  :func:`transpile_signature` reduces a
 result to everything that must stay bit-identical.
+
+Both contexts run the Python numerics (:func:`_python_numerics`): the
+native synthesis, gate matrices, block products and single-qubit
+minimization run on the deterministic numerics layer, which is not bit for
+bit equal to numpy / LAPACK / the platform libm; the differential tests
+check the algorithmic speed-ups, not the numerical implementation.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from typing import Any
 
 import pytest
 
+import quspect.gates._matrix_utils as matrix_utils
 import quspect.synthesis.two_qubit as two_qubit
 import quspect.transpiler._transpile as transpile_module
 from quspect.gates import synthesis as one_qubit_synthesis
@@ -35,6 +42,30 @@ def clear_synthesis_caches() -> None:
     _consolidate._EULER_CACHE.clear()
     _toffoli._CONTEXT_COST_CACHE.clear()
     _toffoli._CCX_CHOICE_CACHE.clear()
+
+
+@contextmanager
+def python_numerics() -> Iterator[pytest.MonkeyPatch]:
+    """:func:`_python_numerics` with the synthesis caches emptied on entry and exit.
+
+    Results computed with the Python numerics must not stay in the caches,
+    where later (native) compilations in the same process would reuse them.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        _python_numerics(mp)
+        clear_synthesis_caches()
+        try:
+            yield mp
+        finally:
+            clear_synthesis_caches()
+
+
+def _python_numerics(mp: pytest.MonkeyPatch) -> None:
+    """Use the Python (numpy) numerics everywhere (see the module docs)."""
+    mp.setattr(two_qubit, "_native_kak", lambda: None)
+    mp.setattr(matrix_utils, "_native_gate_matrix", lambda: None)
+    mp.setenv("QUSPECT_GAUGE_BACKEND", "python")
+    mp.setenv("QUSPECT_TRANSLATE_DRIVER", "python")
 
 
 def _without_round_17(mp: pytest.MonkeyPatch) -> None:
@@ -57,6 +88,7 @@ def current_without_round_17() -> Iterator[None]:
     """Run the current code with the round-17 algorithm changes off."""
     with pytest.MonkeyPatch.context() as mp:
         _without_round_17(mp)
+        _python_numerics(mp)
         clear_synthesis_caches()
         try:
             yield
@@ -73,6 +105,7 @@ def legacy_r12() -> Iterator[None]:
     """Run the round-12 single-qubit minimization and KAK stabilizer choice."""
     with pytest.MonkeyPatch.context() as mp:
         _without_round_17(mp)
+        _python_numerics(mp)
         mp.setattr(transpile_module, "minimize_single_qubit_gates", _legacy_minimize)
         mp.setattr(two_qubit, "_try_synthesize", legacy_try_synthesize)
         clear_synthesis_caches()

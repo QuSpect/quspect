@@ -2174,7 +2174,7 @@ def _block_unitary(
 
     native = two_qubit._native_kak()
     if native is not None:
-        # 与下面的循环逐位相同（同样的 numpy 乘法与 kron）
+        # 原生的确定性块乘积（全平台逐位一致）；下面的循环是没有原生模块时的兜底
         mats: list[np.ndarray] = []
         places: list[int] = []
         for i in block:
@@ -2258,7 +2258,8 @@ def _mirror_cost_arrays(
             if u is None:
                 continue
             before = min(len(two), num_cz_required(u))
-            cost = max(0, num_cz_required(u @ _SWAP_4) - before)
+            # u @ SWAP：列置换（精确）
+            cost = max(0, num_cz_required(u[:, [0, 2, 1, 3]]) - before)
         fwd[last] = cost
         bwd[first] = cost
     return fwd, bwd
@@ -2284,6 +2285,14 @@ def _swap_residual(
         u = _block_unitary(block, a, gates, circuit)
         if u is None:
             return None
+    from quspect.synthesis import two_qubit
+
+    native = two_qubit._native_kak()
+    if native is not None:
+        # 确定性的奇异值分解与行列式（全平台逐位一致）；下面是没有原生模块时的兜底
+        return native.swap_residual(
+            np.ascontiguousarray(u, dtype=complex), _PRODUCT_TOL
+        )
     w = _SWAP_4 @ u
     # 重排 (a_out b_out, a_in b_in) → (a_out a_in, b_out b_in)：秩 1 ⇔ 张量积。
     r = w.reshape(2, 2, 2, 2).transpose(0, 2, 1, 3).reshape(4, 4)
@@ -2318,7 +2327,7 @@ def _cheaper_with_swap(u: np.ndarray, num_2q: int) -> list[SynthOp] | None:
     if num_2q < 2:
         return None
     before = min(num_2q, num_cz_required(u))
-    v = _SWAP_4 @ u
+    v = np.ascontiguousarray(u[[0, 2, 1, 3], :])  # SWAP @ u：行置换（精确）
     if num_cz_required(v) >= before:
         return None
     try:

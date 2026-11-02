@@ -84,6 +84,28 @@ def _gate_to_matrix(gate: Gate) -> np.ndarray:
     return m
 
 
+def _run_matrix(gates: list[Gate]) -> np.ndarray:
+    """``U_n · … · U_1`` of a run of single-qubit gates (circuit order).
+
+    Uses the deterministic products of the native module when it is built
+    (bit-identical on every platform), numpy otherwise.
+    """
+    mats = [_gate_to_matrix(g) for g in gates]
+    native = _native_synthesis()
+    if native is not None:
+        return native.run_unitary(mats)  # type: ignore[no-any-return]
+    combined = np.eye(2, dtype=complex)
+    for m in mats:
+        combined = m @ combined
+    return combined
+
+
+def _native_synthesis() -> Any:
+    from quspect.synthesis.two_qubit import _native_kak
+
+    return _native_kak()
+
+
 def _decompose_u3(matrix: np.ndarray) -> tuple[float, float, float]:
     """Decompose a 2×2 unitary matrix into U3(θ, φ, λ) parameters.
 
@@ -103,7 +125,15 @@ def _decompose_u3(matrix: np.ndarray) -> tuple[float, float, float]:
 
     Returns:
         A tuple ``(theta, phi, lam)`` in radians.
+
+    The native module computes the same formulas on the deterministic
+    numerics layer when it is built; the code below is the fallback.
     """
+    native = _native_synthesis()
+    if native is not None:
+        m = np.asarray(matrix, dtype=complex)
+        if m.shape == (2, 2) and np.isfinite(m).all():
+            return native.zyz_angles(m)  # type: ignore[no-any-return]
     u00 = matrix[0, 0]
     u01 = matrix[0, 1]
     u10 = matrix[1, 0]
@@ -317,9 +347,7 @@ class SingleQubitGateFusion(BasePass):
         if len(gates) == 1 and cost == 1:
             return None
         try:
-            combined = np.eye(2, dtype=complex)
-            for g in gates:
-                combined = _gate_to_matrix(g) @ combined
+            combined = _run_matrix(gates)
         except (ValueError, TypeError):
             return None
         replacement = synthesize_one_qubit(combined, basis)
@@ -566,18 +594,17 @@ class SingleQubitGateFusion(BasePass):
         if len(block) < 2:
             return False
 
-        # Compute the combined matrix
-        combined = np.eye(2, dtype=complex)
+        # Compute the combined matrix U_n · U_{n-1} · ... · U_1
+        gates = []
         for nid in block:
             node = dag.get_node(nid)
             if node.instruction is None or node.instruction.gate is None:
                 return False
-            try:
-                m = _gate_to_matrix(node.instruction.gate)
-                # Apply matrix from left: U_n · U_{n-1} · ... · U_1
-                combined = m @ combined
-            except (ValueError, TypeError):
-                return False
+            gates.append(node.instruction.gate)
+        try:
+            combined = _run_matrix(gates)
+        except (ValueError, TypeError):
+            return False
 
         # Decompose into U3
         try:

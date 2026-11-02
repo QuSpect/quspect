@@ -4,12 +4,19 @@ This module provides the :func:`gate_matrix` function that computes
 the unitary matrix for any :class:`Gate` instance. Standard gates
 use pre-computed constant matrices; parameterized gates compute
 their matrices from gate parameters at call time.
+
+When the C++ extension is built, parameterized matrices come from its
+deterministic implementation (correctly rounded sin / cos, fixed-order
+complex products), so they are bit-identical on every platform; the Python
+formulas below are the fallback (same formulas, platform libm).
 """
 
 from __future__ import annotations
 
+import functools
 import math
 from numbers import Real
+from typing import Any
 
 import numpy as np
 
@@ -26,13 +33,13 @@ Z_MATRIX: np.ndarray = np.array([[1, 0], [0, -1]], dtype=complex)
 H_MATRIX: np.ndarray = np.array([[1, 1], [1, -1]], dtype=complex) / math.sqrt(2)
 S_MATRIX: np.ndarray = np.array([[1, 0], [0, 1j]], dtype=complex)
 SDG_MATRIX: np.ndarray = np.array([[1, 0], [0, -1j]], dtype=complex)
-T_MATRIX: np.ndarray = np.array(
-    [[1, 0], [0, math.cos(math.pi / 4) + 1j * math.sin(math.pi / 4)]],
-    dtype=complex,
-)
+# cos(π/4)、sin(π/4)（π/4 取 math.pi / 4）的正确舍入值，写成常数而不调用平台 libm：
+# 与确定性数值层的 p(π/4) 逐位相同，且在所有平台上一致。
+_COS_PI4 = float.fromhex("0x1.6a09e667f3bcdp-1")
+_SIN_PI4 = float.fromhex("0x1.6a09e667f3bccp-1")
+T_MATRIX: np.ndarray = np.array([[1, 0], [0, _COS_PI4 + 1j * _SIN_PI4]], dtype=complex)
 TDG_MATRIX: np.ndarray = np.array(
-    [[1, 0], [0, math.cos(math.pi / 4) - 1j * math.sin(math.pi / 4)]],
-    dtype=complex,
+    [[1, 0], [0, _COS_PI4 - 1j * _SIN_PI4]], dtype=complex
 )
 SX_MATRIX: np.ndarray = (
     np.array([[1 + 1j, 1 - 1j], [1 - 1j, 1 + 1j]], dtype=complex) / 2
@@ -201,6 +208,12 @@ def _parameterized_matrix(gate: Gate) -> np.ndarray:
         )
     params = [_concrete_param(gate, value) for value in gate.params]
 
+    native = _native_gate_matrix()
+    if native is not None:
+        m = native(name, params)
+        if m is not None:
+            return m  # type: ignore[no-any-return]
+
     if name == "rx":
         return _rx_matrix(params[0])
     if name == "ry":
@@ -224,6 +237,25 @@ def _parameterized_matrix(gate: Gate) -> np.ndarray:
     if name == "cp":
         return _cp_matrix(params[0])
     return _cu3_matrix(params[0], params[1], params[2])
+
+
+@functools.cache
+def _native_gate_matrix() -> Any | None:
+    """The extension module's ``_gate_matrix`` (``None`` without it).
+
+    Honors ``QUSPECT_SYNTHESIS_BACKEND=python`` (pure-Python numerics).
+    """
+    import os
+
+    if os.environ.get("QUSPECT_SYNTHESIS_BACKEND", "auto") == "python":
+        return None
+    from quspect._native_loader import load_core
+
+    try:
+        core = load_core()
+    except ImportError:  # pragma: no cover - broken build
+        return None
+    return getattr(core, "_gate_matrix", None) if core is not None else None
 
 
 # =============================================================================

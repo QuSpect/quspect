@@ -573,9 +573,17 @@ def kak_decompose(unitary: np.ndarray) -> TwoQubitKAK:
         [0.785398, 0.0, 0.0]
     """
     u = _check_unitary_4(unitary)
-    phase, k1, v, k2 = _kak4(u)
-    k1l, k1r = _factor_local(k1)
-    k2l, k2r = _factor_local(k2)
+    native = _native_kak()
+    result = None if native is None else native.kak4(u)
+    if native is not None and result is not None:
+        # 确定性数值层：结果在所有平台上逐位相同
+        phase, k1, v, k2 = result
+        k1l, k1r = (np.asarray(x) for x in native._synth.factor_local(k1))
+        k2l, k2r = (np.asarray(x) for x in native._synth.factor_local(k2))
+    else:
+        phase, k1, v, k2 = _kak4(u)
+        k1l, k1r = _factor_local(k1)
+        k2l, k2r = _factor_local(k2)
     return TwoQubitKAK(
         a=float(v[0]),
         b=float(v[1]),
@@ -610,7 +618,9 @@ def weyl_coordinates(unitary: np.ndarray) -> tuple[float, float, float]:
         [0.785398, 0.785398, 0.785398]
     """
     u = _check_unitary_4(unitary)
-    _, _, v, _ = _kak4(u)
+    native = _native_kak()
+    result = None if native is None else native.kak4(u)
+    _, _, v, _ = _kak4(u) if result is None else result
     return float(v[0]), float(v[1]), float(v[2])
 
 
@@ -1077,17 +1087,29 @@ class Entangler:
             'cy'
         """
         e = _check_unitary_4(matrix)
-        _, k1e, ve, k2e = _kak4(e)
+        native = _native_kak()
+        det = None if native is None else native.kak4(e)
+        _, k1e, ve, k2e = _kak4(e) if det is None else det
         if _count_from_coords(ve, 1e-9) != 1:
             raise ValueError(
                 f"Entangler {name!r} is not locally equivalent to CZ (Weyl point "
                 f"{tuple(round(float(x), 6) for x in ve)}); only CZ-class "
                 "entanglers are supported."
             )
-        _, k1z, _, k2z = _kak4(_CZ4)
         # E ∝ k1e Can k2e and CZ ∝ k1z Can k2z ⇒ CZ ∝ (k1z k1e^†) E (k2e^† k2z).
-        a0, a1 = _factor_local(k1z @ k1e.conj().T)
-        b0, b1 = _factor_local(k2e.conj().T @ k2z)
+        if native is not None and det is not None:
+            # 确定性数值层（KAK、乘积、局部分解），修饰门在所有平台上逐位相同
+            kak_cz = native.kak4(_CZ4)
+            assert kak_cz is not None
+            _, k1z, _, k2z = kak_cz
+            mul = native.core_matmul
+            a0, a1 = native._synth.factor_local(mul(k1z, np.conj(k1e).T))
+            b0, b1 = native._synth.factor_local(mul(np.conj(k2e).T, k2z))
+            a0, a1, b0, b1 = (np.asarray(x) for x in (a0, a1, b0, b1))
+        else:
+            _, k1z, _, k2z = _kak4(_CZ4)
+            a0, a1 = _factor_local(k1z @ k1e.conj().T)
+            b0, b1 = _factor_local(k2e.conj().T @ k2z)
         rebuilt = _kron2(a0, a1) @ e @ _kron2(b0, b1)
         if _distance_up_to_phase(_CZ4, rebuilt) > 1e-12:  # pragma: no cover
             raise ValueError(f"Could not derive the CZ dressing of {name!r}.")
@@ -1405,7 +1427,11 @@ _try_synthesize_reference = _try_synthesize
 
 @functools.cache
 def _native_kak() -> NativeKak | None:
-    """The native KAK backend if it reproduces this module bit for bit here."""
+    """The native KAK backend (``None`` without the extension module).
+
+    Its two-qubit synthesis is the deterministic reference implementation
+    (bit-identical on all platforms); see :mod:`quspect.synthesis._native_kak`.
+    """
     from quspect.synthesis._native_kak import load
 
     return load(sys.modules[__name__])
@@ -1417,9 +1443,10 @@ _EULER_CODE = {"zxz": 0, "zsx": 1}
 def _euler_lengths(mats: np.ndarray, basis: str, atol: float) -> list[int]:
     """``len(euler_ops(m, 0, basis=basis, atol=atol))`` for each matrix.
 
-    Uses the native kernel (bit-identical to the Python arithmetic of
-    :func:`euler_ops`, checked once against it) when available; any matrix
-    it does not reproduce falls back to :func:`euler_ops`.
+    Uses the native kernel when available (the lengths of the native Euler
+    synthesis, on the deterministic numerics layer; numerically equivalent
+    to :func:`euler_ops`); matrices with non-finite entries fall back to
+    :func:`euler_ops`.
     """
     core = _native_euler()
     if core is not None and basis in _EULER_CODE:
@@ -1433,7 +1460,7 @@ def _euler_lengths(mats: np.ndarray, basis: str, atol: float) -> list[int]:
 
 @functools.cache
 def _native_euler() -> Any | None:
-    """The extension module if its Euler-length kernel matches :func:`euler_ops`."""
+    """The extension module if it provides the Euler-length kernel."""
     from quspect._native_loader import load_core
 
     try:
@@ -1442,20 +1469,6 @@ def _native_euler() -> Any | None:
         return None
     if core is None or not hasattr(core, "_euler_lengths"):
         return None
-    rng = np.random.default_rng(2024)
-    raw = rng.normal(size=(48, 2, 2)) + 1j * rng.normal(size=(48, 2, 2))
-    mats = [np.linalg.qr(x)[0] for x in raw]
-    for theta in (0.0, 1e-10, _PI2, math.pi, -_PI2, 2.5):
-        mats.append(_rz(0.3) @ _rx(theta) @ _rz(-1.1))
-        mats.append(_H @ _rz(theta) @ _H)
-    mats += [_I2, _H, _X, _Y, _Z, _S, _SX]
-    arr = np.array(mats)
-    for basis, code in _EULER_CODE.items():
-        for atol in (DEFAULT_ATOL, _EXACT_EULER_ATOL):
-            got = core._euler_lengths(arr, code, atol)
-            ref = [len(euler_ops(m, 0, basis=basis, atol=atol)) for m in mats]
-            if [int(x) for x in got] != ref:  # pragma: no cover - platform specific
-                return None
     return core
 
 
@@ -1903,11 +1916,17 @@ def synthesize_two_qubit_approx(
                 max_entanglers,
                 want_exact,
             )
+            if found is not None and found[0]:
+                # 确定性数值层上的近似（与 _approximate_two_qubit_ops 步骤相同）
+                err = ApproximationError(infidelity=found[2][0], distance=found[2][1])
+                hit = (tuple(found[1] or ()), err)
+                _APPROX_2Q_CACHE.put(key, hit)
+                return list(hit[0]), err
             if found is not None:
                 _APPROX_2Q_CACHE.put(key, False)
-                if found[0] is not None:
-                    ops = tuple(found[0])
-                    flag = _SWAP_FACE_TEMPLATE if found[1] else None
+                if found[1] is not None:
+                    ops = tuple(found[1])
+                    flag = _SWAP_FACE_TEMPLATE if found[2] else None
                     _SYNTH_2Q_CACHE.put((*base, flag), ops)
                     return list(ops), None
                 return list(
@@ -1958,6 +1977,40 @@ def _ops_unitary(ops: list[SynthOp], basis: TwoQubitBasis) -> np.ndarray:
             g = _kron2(m, _I2) if qubits[0] == 0 else _kron2(_I2, m)
         u = g @ u
     return u
+
+
+def _approximate_ops(
+    unitary: np.ndarray,
+    max_infidelity: float,
+    atol: float,
+    basis: TwoQubitBasis,
+    max_entanglers: int = 2,
+) -> tuple[list[SynthOp], ApproximationError] | None:
+    """:func:`_approximate_two_qubit_ops` on the native deterministic layer.
+
+    Falls back to the Python reference without the extension module.
+    """
+    native = _native_kak()
+    if native is not None:
+        found = native.approximate(
+            unitary,
+            max_infidelity,
+            atol,
+            DEFAULT_VERIFY_ATOL,
+            basis,
+            max_entanglers,
+            False,
+        )
+        if found is not None:
+            if not found[0]:
+                return None
+            inf, dist = found[2]
+            return list(found[1] or ()), ApproximationError(
+                infidelity=inf, distance=dist
+            )
+    return _approximate_two_qubit_ops(
+        unitary, max_infidelity, atol, basis, max_entanglers
+    )
 
 
 def _approximate_two_qubit_ops(

@@ -1,6 +1,9 @@
-// 单比特门最小化标量内核的 gtest：期望值由 Python 参考实现生成（十六进制浮点，逐位比较），
-// 生成方式见 tests/transpiler/test_gauge_differential.py（同一批函数的 Python 版本）。
+// 单比特门最小化标量内核的 gtest：期望值由 Python 参考实现生成（十六进制浮点）。内核在确定性
+// 数值层上运算，与 Python（numpy / CPython 的复数运算与平台 libm）不要求逐位一致：门数逐个相等，
+// 角度与矩阵在 1e-15 以内相等。跨平台逐位一致性由 tools/det_fingerprint.py 检查。
 #include <cmath>
+
+#include <algorithm>
 
 #include <cstdint>
 #include <cstring>
@@ -190,14 +193,14 @@ const int kLeadXCount[] = {4, 4, 4, 4, 4, 4, 4, 1, 1, 4, 4, 4, 4};
 
 constexpr int kNumMats = static_cast<int>(sizeof(kMats) / sizeof(kMats[0]));
 
-bool SameBits(double a, double b) {
-    return std::memcmp(&a, &b, sizeof(double)) == 0;
+bool Close(double a, double b) {
+    return std::fabs(a - b) <= 1e-15 * std::max(1.0, std::fabs(b));
 }
 
 void ExpectSameMatrix(const Matrix2& got, const Matrix2& want) {
     for (int i = 0; i < 4; ++i) {
-        EXPECT_TRUE(SameBits(got[i].re, want[i].re)) << "entry " << i;
-        EXPECT_TRUE(SameBits(got[i].im, want[i].im)) << "entry " << i;
+        EXPECT_TRUE(Close(got[i].re, want[i].re)) << "entry " << i;
+        EXPECT_TRUE(Close(got[i].im, want[i].im)) << "entry " << i;
     }
 }
 
@@ -234,19 +237,18 @@ TEST(OneQubitGauge, EulerLengthMatchesPython) {
     EXPECT_FALSE(EulerLength(kMats[0], 7, 1e-9).has_value());
 }
 
-// Rx(θ)：θ 恰好等于 atol 时 θ 的最后几位取决于 atan2 的实现，必须交回 Python。
+// Rx(θ)：阈值附近的判断也是确定的（与 KakSynthesizer::EulerOps 的门数相同）。
 Matrix2 RxMatrix(double theta) {
     const double c = std::cos(theta / 2.0);
     const double s = std::sin(theta / 2.0);
     return {Complex{c, 0.0}, Complex{0.0, -s}, Complex{0.0, -s}, Complex{c, 0.0}};
 }
 
-TEST(OneQubitGauge, EulerLengthDefersNearThreshold) {
+TEST(OneQubitGauge, EulerLengthNearThreshold) {
     for (int basis = 0; basis < 2; ++basis) {
-        EXPECT_FALSE(EulerLength(RxMatrix(1e-9), basis, 1e-9).has_value());
-        EXPECT_FALSE(EulerLength(RxMatrix(1e-12), basis, 1e-12).has_value());
-        EXPECT_FALSE(EulerLength(RxMatrix(std::acos(-1.0) / 2.0 + 1e-9), basis, 1e-9).has_value());
-        // 远离阈值：照常给出长度（与 len(euler_ops(...)) 相同）
+        EXPECT_TRUE(EulerLength(RxMatrix(1e-9), basis, 1e-9).has_value());
+        EXPECT_TRUE(EulerLength(RxMatrix(std::acos(-1.0) / 2.0 + 1e-9), basis, 1e-9).has_value());
+        // 远离阈值：与 len(euler_ops(...)) 相同
         EXPECT_EQ(EulerLength(RxMatrix(1e-7), basis, 1e-9).value(), basis == 0 ? 3 : 5);
         EXPECT_EQ(EulerLength(RxMatrix(1e-11), basis, 1e-9).value(), 0);
     }
@@ -258,7 +260,7 @@ TEST(OneQubitGauge, LeadingAnglesMatchPython) {
         ASSERT_TRUE(lead.has_value());
         ASSERT_EQ(lead->count, kLeadXCount[i]) << "matrix " << i;
         for (int j = 0; j < lead->count; ++j) {
-            EXPECT_TRUE(SameBits(lead->angles[j], kLeadX[i][j])) << "matrix " << i << " angle " << j;
+            EXPECT_TRUE(Close(lead->angles[j], kLeadX[i][j])) << "matrix " << i << " angle " << j;
         }
     }
 }
@@ -375,36 +377,6 @@ TEST(OneQubitGauge, AbsorbMemoKeepsExistingEntries) {
     empty.AbsorbMemo(main);  // 空对象直接接管
     EXPECT_NE(empty.MemoGet(b), nullptr);
     EXPECT_EQ(main.MemoGet(b), nullptr);
-}
-
-// 运算语义的设置：读回、非法取值、恢复默认；单位阵与 Pauli 矩阵的长度与语义无关。
-TEST(OneQubitGauge, ArithmeticSettingsRoundTrip) {
-    using quspect::native::transpiler::GaugeArithmetic;
-    using quspect::native::transpiler::GetGaugeArithmetic;
-    using quspect::native::transpiler::SetGaugeArithmetic;
-    const GaugeArithmetic defaults;
-    GaugeArithmetic plain;
-    plain.py_mul = 0;
-    plain.np_scalar_mul = 0;
-    plain.scalar_arr_mul = 2;
-    plain.py_div_fma = false;
-    plain.np_div_fma = false;
-    SetGaugeArithmetic(plain);
-    const GaugeArithmetic got = GetGaugeArithmetic();
-    EXPECT_EQ(got.py_mul, 0);
-    EXPECT_EQ(got.np_scalar_mul, 0);
-    EXPECT_EQ(got.scalar_arr_mul, 2);
-    EXPECT_FALSE(got.py_div_fma);
-    EXPECT_FALSE(got.np_div_fma);
-    const Matrix2 identity = {Complex{1, 0}, Complex{0, 0}, Complex{0, 0}, Complex{1, 0}};
-    ASSERT_TRUE(FastLength(identity, CzModel()).has_value());
-    EXPECT_EQ(*FastLength(identity, CzModel()), 0);
-    GaugeArithmetic bad;
-    bad.py_mul = 3;
-    EXPECT_THROW(SetGaugeArithmetic(bad), std::invalid_argument);
-    SetGaugeArithmetic(defaults);
-    EXPECT_EQ(GetGaugeArithmetic().py_mul, 1);
-    EXPECT_TRUE(GetGaugeArithmetic().np_div_fma);
 }
 
 TEST(OneQubitGauge, BeamSearchRejectsBadInput) {

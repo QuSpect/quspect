@@ -1,0 +1,218 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, Quspect
+# This file is distributed under the same license as the QuSpect package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: QuSpect 0.5\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-11-01 09:51-0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/reproducibility.rst:2
+msgid "Reproducible compilation"
+msgstr "可复现的编译"
+
+#: ../../source/reproducibility.rst:4
+msgid ""
+"Since 0.6.0, :func:`quspect.transpiler.transpile` gives **bit-identical**"
+" results on every supported platform: for the same input circuit, target,"
+" options and integer ``seed``, the output gates (names, qubits and every "
+"bit of every parameter) and the initial and final layouts are the same on"
+" macOS arm64, Linux x86_64 (both the AVX2 and the scalar extension "
+"module), Linux aarch64 and Windows AMD64, for every supported Python "
+"version, any number of compile threads (``QUSPECT_COMPILE_THREADS``) and "
+"any ``PYTHONHASHSEED``."
+msgstr ""
+"从 0.6.0 起，:func:`quspect.transpiler.transpile` 在所有受支持的平台上给出\\ **逐位一致**\\ "
+"的结果：对相同的输入线路、目标、选项和整数 ``seed``，输出的门（名称、比特以及每个参数的每一位）和初始、最终布局在 macOS "
+"arm64、Linux x86_64（AVX2 与 scalar 两种扩展模块）、Linux aarch64 和 Windows AMD64 "
+"上都相同，与 Python 版本（所有受支持的版本）、编译线程数（``QUSPECT_COMPILE_THREADS``）和 "
+"``PYTHONHASHSEED`` 无关。"
+
+#: ../../source/reproducibility.rst:13
+msgid ""
+"A circuit compiled on a laptop can therefore be reproduced exactly on a "
+"cluster node or in CI, and compilation results can be compared or cached "
+"by their bytes."
+msgstr "因此，在笔记本上编译的线路可以在集群节点或 CI 中精确复现，编译结果也可以按字节比较或缓存。"
+
+#: ../../source/reproducibility.rst:18
+msgid "How it works"
+msgstr "实现方式"
+
+#: ../../source/reproducibility.rst:20
+msgid ""
+"Everything numerical on the compilation path runs in the C++ extension on"
+" a small deterministic numerics layer instead of numpy, BLAS/LAPACK or "
+"the platform math library:"
+msgstr "编译路径上的全部数值计算都在 C++ 扩展中、在一个小型确定性数值层上完成，不再依赖 numpy、BLAS/LAPACK 或平台数学库："
+
+#: ../../source/reproducibility.rst:24
+msgid ""
+"**Fixed floating-point rules.**  The compiler sources are built without "
+"floating-point contraction (``-ffp-contract=off -fno-fast-math``, "
+"``/fp:precise``); fused multiply-adds appear only where they are written "
+"explicitly (``std::fma`` is correctly rounded everywhere).  Every sum and"
+" product is evaluated in a fixed order, so the AVX2 and the scalar "
+"modules execute the same operations."
+msgstr ""
+"**固定的浮点规则。**\\  编译器源文件关闭浮点收缩（``-ffp-contract=off -fno-fast-"
+"math``、``/fp:precise``）；融合乘加只出现在显式写出的地方（``std::fma`` "
+"在所有平台上都是正确舍入的）。所有求和与乘积都按固定顺序计算，因此 AVX2 与 scalar 模块执行完全相同的运算。"
+
+#: ../../source/reproducibility.rst:30
+msgid ""
+"**Own small-matrix linear algebra.**  The compiler only needs 2×2, 4×4 "
+"and 8×8 complex matrices: products, determinants, Jacobi "
+"eigendecompositions (real symmetric and Hermitian), one-sided Jacobi SVD,"
+" Householder QR and the cosine–sine decomposition used by the three-qubit"
+" resynthesis are implemented with fixed sequences of IEEE operations."
+msgstr ""
+"**自带小矩阵线性代数。**\\  编译器只需要 2×2、4×4 和 8×8 复矩阵：矩阵乘积、行列式、Jacobi "
+"特征分解（实对称与厄米）、单边 Jacobi SVD、Householder QR 以及三比特重综合所用的余弦–正弦分解，都由固定步骤的 IEEE"
+" 运算实现。"
+
+#: ../../source/reproducibility.rst:35
+msgid ""
+"**Correctly rounded math functions.**  ``sin``, ``cos``, ``tan``, "
+"``asin``, ``acos``, ``atan``, ``atan2``, ``exp``, ``log`` and ``pow`` "
+"come from the `CORE-MATH <https://core-math.gitlabpages.inria.fr/>`_ "
+"project (correct rounding leaves exactly one admissible result); "
+"``hypot`` and ``atan2`` at extreme ratios use short own implementations "
+"built only from IEEE operations, ``fma`` and ``sqrt``.  This covers gate "
+"matrices, the single- and two-qubit synthesis, block consolidation, gauge"
+" and CX orientation, the three-qubit resynthesis, routing heuristics and "
+"the numeric functions of the OpenQASM 2 parser."
+msgstr ""
+"**正确舍入的数学函数。**\\  "
+"``sin``、``cos``、``tan``、``asin``、``acos``、``atan``、``atan2``、``exp``、``log``"
+" 和 ``pow`` 来自 `CORE-MATH <https://core-math.gitlabpages.inria.fr/>`_ "
+"项目（正确舍入只允许唯一的结果）；``hypot`` 以及极端比值下的 ``atan2`` 使用只由 IEEE 运算、``fma`` 和 "
+"``sqrt`` 构成的简短自有实现。覆盖范围包括门矩阵、单比特与两比特合成、块合并、gauge 与 CX 朝向、三比特重综合、路由启发式以及 "
+"OpenQASM 2 解析器中的数值函数。"
+
+#: ../../source/reproducibility.rst:44
+msgid ""
+"**Deterministic search.**  Routing scores are computed exactly and ties "
+"are broken by a C++ reimplementation of CPython's Mersenne Twister seeded"
+" from ``seed``; parallel work (routing trials, window searches, "
+"scheduling, the gauge search) is written by index and merged in a fixed "
+"order, so the thread count only changes the running time; no result "
+"depends on the iteration order of a hashed container."
+msgstr ""
+"**确定性的搜索。**\\  路由打分精确计算，平局由 CPython 梅森旋转随机数发生器的 C++ 复刻（以 ``seed`` "
+"为种子）打破；并行工作（路由尝试、窗口搜索、调度、gauge "
+"搜索）按下标写入结果并按固定顺序合并，线程数只影响运行时间；没有任何结果依赖哈希容器的迭代顺序。"
+
+#: ../../source/reproducibility.rst:51
+msgid ""
+":func:`~quspect.synthesis.two_qubit.kak_decompose`, "
+":func:`~quspect.synthesis.two_qubit.weyl_coordinates` and "
+":meth:`~quspect.synthesis.two_qubit.Entangler.from_matrix` use the same "
+"deterministic KAK decomposition, and so does the approximate two-qubit "
+"synthesis (``approximation_degree``; its default budget of ``1e-12`` is "
+"always active)."
+msgstr ""
+":func:`~quspect.synthesis.two_qubit.kak_decompose`、:func:`~quspect.synthesis.two_qubit.weyl_coordinates`"
+" 和 :meth:`~quspect.synthesis.two_qubit.Entangler.from_matrix` 使用同一个确定性 "
+"KAK 分解，近似两比特合成（``approximation_degree``；默认预算 ``1e-12`` 总是生效）也一样。"
+
+#: ../../source/reproducibility.rst:59
+msgid "Verification"
+msgstr "验证"
+
+#: ../../source/reproducibility.rst:61
+msgid ""
+"The test suite stores SHA-256 digests of complete compilations "
+"(``tests/transpiler/test_golden_transpile.py``: generated circuits on "
+"line, ring, grid and fully connected targets with three gate sets at "
+"levels 1–3) and of the synthesis kernels on platform-independent inputs "
+"(``tests/synthesis/test_native_kak.py``).  CI checks them on every "
+"platform and with both x86_64 modules, including on an emulated CPU "
+"without AVX2; the same tests also compile with different thread counts "
+"and hash seeds. ``tools/det_fingerprint.py`` produces full dumps "
+"(``float.hex`` of every parameter) for larger cross-machine comparisons."
+msgstr ""
+"测试集保存了完整编译结果的 SHA-256 "
+"摘要（``tests/transpiler/test_golden_transpile.py``：生成的线路在线形、环形、网格和全连接目标上，三种门集，优化级别"
+" 1–3），以及合成内核在平台无关输入上的摘要（``tests/synthesis/test_native_kak.py``）。CI "
+"在每个平台上、并对 x86_64 的两种模块（包括在模拟的无 AVX2 CPU "
+"上）检查这些摘要；同一组测试还会在不同的线程数和哈希种子下编译。``tools/det_fingerprint.py`` "
+"可以输出完整的记录（每个参数的 ``float.hex``），用于更大规模的跨机器比较。"
+
+#: ../../source/reproducibility.rst:72
+msgid "Scope and exceptions"
+msgstr "范围与例外"
+
+#: ../../source/reproducibility.rst:74
+msgid ""
+"The guarantee applies to the same QuSpect version with its compiled "
+"extension module (always present in the published wheels).  It does "
+"**not** cover:"
+msgstr "这一保证适用于同一 QuSpect 版本及其编译好的扩展模块（发布的 wheel 中总是包含）。它\\ **不**\\ 包括："
+
+#: ../../source/reproducibility.rst:78
+msgid ""
+"the pure-Python fallback, used when the extension module is missing or a "
+"backend is forced to Python (``QUSPECT_SYNTHESIS_BACKEND``, "
+"``QUSPECT_ROUTING_BACKEND``, ``QUSPECT_GAUGE_BACKEND``, "
+"``QUSPECT_DAG_PASS_BACKEND`` set to ``python``): it uses numpy and the "
+"platform math library and gives equivalent, but not bit-identical, "
+"results;"
+msgstr ""
+"纯 Python 兜底实现：扩展模块缺失，或把某个后端强制设为 "
+"Python（``QUSPECT_SYNTHESIS_BACKEND``、``QUSPECT_ROUTING_BACKEND``、``QUSPECT_GAUGE_BACKEND``、``QUSPECT_DAG_PASS_BACKEND``"
+" 设为 ``python``）时使用。它依赖 numpy 和平台数学库，结果等价但不逐位一致；"
+
+#: ../../source/reproducibility.rst:83
+msgid ""
+"``seed=None`` (fresh operating-system entropy) and wall-clock limits "
+"(``time_limit``): the result then depends on the run or on the machine "
+"speed;"
+msgstr "``seed=None``\\ （使用新的操作系统熵）和墙钟时间限制（``time_limit``）：此时结果取决于具体运行或机器速度；"
+
+#: ../../source/reproducibility.rst:86
+msgid ""
+"the inputs themselves: parameters computed in Python with :mod:`math` or "
+"numpy may differ in the last bit between platforms; the OpenQASM 2 parser"
+" evaluates parameter expressions with the correctly rounded functions;"
+msgstr ""
+"输入本身：在 Python 中用 :mod:`math` 或 numpy 计算的参数在不同平台上可能有末位差异；OpenQASM 2 "
+"解析器用正确舍入的函数计算参数表达式；"
+
+#: ../../source/reproducibility.rst:89
+msgid ""
+"numerical utilities outside compilation (for example "
+":func:`~quspect.synthesis.two_qubit.approximation_error`, operators and "
+"the simulators);"
+msgstr ""
+"编译之外的数值工具（例如 "
+":func:`~quspect.synthesis.two_qubit.approximation_error`、算符与模拟器）；"
+
+#: ../../source/reproducibility.rst:92
+msgid ""
+"the pulse envelopes of :mod:`quspect.pulse`: Flattop and RippleRect "
+"samples go through the platform ``erf`` and agree across platforms within"
+" one ``float32`` ulp (see :doc:`pulse`)."
+msgstr ""
+":mod:`quspect.pulse` 的脉冲包络：Flattop 与 RippleRect 的采样经过平台的 ``erf``，各平台之间在一个"
+" ``float32`` ulp 内一致（参见 :doc:`pulse`）。"
+
+#: ../../source/reproducibility.rst:96
+msgid ""
+"Compiled outputs changed once, in 0.6.0, on every platform (macOS "
+"included) when the deterministic layer replaced the numpy-based numerics;"
+" the compilation quality is unchanged or better."
+msgstr "编译输出在 0.6.0 中改变了一次（所有平台，包括 macOS）：确定性数值层取代了基于 numpy 的数值计算；编译质量不变或更好。"
+

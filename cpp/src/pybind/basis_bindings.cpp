@@ -1,11 +1,11 @@
 // 目标门集翻译（quspect.transpiler._basis.translate_to_target）的原生实现。
 //
-// 与 Python 实现逐步相同：沿指令顺序收集每条线上的单比特门运行（乘积为 numpy 自己的 BLAS 调用，
-// 见 run_helpers.hpp），每个 cz 换成目标纠缠门并把修饰门并入两侧的运行（非对称纠缠门按同样的
+// 与 Python 实现逐步相同：沿指令顺序收集每条线上的单比特门运行（乘积为确定性数值层的 2×2 乘法，
+// 见 run_helpers.hpp，全平台逐位一致），每个 cz 换成目标纠缠门并把修饰门并入两侧的运行（非对称纠缠门按同样的
 // 代价比较选朝向，向后看的矩阵同样逐门相乘），需要重综合的运行回调 Python 的
 // synthesize_one_qubit（同一矩阵只调用一次），输出指令按数据类 __init__ 的字段顺序直接构造。
-// 门矩阵来自 Python 端同一个按门缓存的 matrix_of。不能逐项复刻的输入（以及 Python 端会抛出异常
-// 的情形）返回 (False, None)，由 Python 实现处理。
+// 门矩阵来自 Python 端同一个按门缓存的 matrix_of（原生模块的确定性门矩阵）。不支持的输入（以及
+// Python 端会抛出异常的情形）返回 (False, None)，由 Python 实现处理。
 #include "basis_bindings.hpp"
 
 #include <algorithm>
@@ -19,7 +19,6 @@
 #include <pybind11/pybind11.h>
 
 #include "run_helpers.hpp"
-#include "synthesis_bindings.hpp"
 
 namespace py = pybind11;
 
@@ -52,11 +51,10 @@ struct PendingRun {
 
 class Translator {
  public:
-    Translator(const synthesis::NumpyLinalg& la, py::object native, py::object matrix_of, py::object synthesize,
+    Translator(py::object native, py::object matrix_of, py::object synthesize,
                runs::InstructionFactory factory, py::object type_gate, py::object type_barrier, bool has_ent,
                bool symmetric, py::object ent_gate, std::array<Dressing, 2> dress, std::vector<Matrix2> far_ends)
-        : mat_(la),
-          native_(std::move(native)),
+        : native_(std::move(native)),
           matrix_of_(std::move(matrix_of)),
           synth_(std::move(synthesize)),
           factory_(std::move(factory)),
@@ -343,14 +341,10 @@ class Translator {
 void BindBasis(py::module_& m) {
     m.def(
         "_translate_to_target",
-        [](const py::sequence& instrs, const py::object& synth, const py::object& native,
+        [](const py::sequence& instrs, const py::object& native,
            const py::object& matrix_of, const py::object& synthesize, const py::object& instr_cls,
            const py::object& type_gate, const py::object& type_barrier, const py::object& gate_cls,
            const py::object& ent) -> py::object {
-            const synthesis::NumpyLinalg* la = KakLinalg(synth);
-            if (la == nullptr) {
-                return py::make_tuple(false, py::none());
-            }
             try {
                 // ent：None，或 (symmetric, gate, [(before0, before1, after0, after1, flags) × 2], far_ends)
                 bool has_ent = !ent.is_none();
@@ -380,7 +374,7 @@ void BindBasis(py::module_& m) {
                 if (!fast) {
                     throw py::error_already_set();
                 }
-                Translator tr(*la, native, matrix_of, synthesize,
+                Translator tr(native, matrix_of, synthesize,
                               runs::InstructionFactory(instr_cls, type_gate, gate_cls), type_gate, type_barrier,
                               has_ent, symmetric, ent_gate, dress, std::move(far_ends));
                 py::list out = tr.Run(PySequence_Fast_ITEMS(fast.ptr()), PySequence_Fast_GET_SIZE(fast.ptr()),
@@ -390,7 +384,7 @@ void BindBasis(py::module_& m) {
                 return py::make_tuple(false, py::none());
             }
         },
-        py::arg("instrs"), py::arg("synth"), py::arg("native"), py::arg("matrix_of"), py::arg("synthesize"),
+        py::arg("instrs"), py::arg("native"), py::arg("matrix_of"), py::arg("synthesize"),
         py::arg("instr_cls"), py::arg("type_gate"), py::arg("type_barrier"), py::arg("gate_cls"), py::arg("ent"),
         "Native body of _basis.translate_to_target: (True, instructions) or (False, None) to use Python.");
 

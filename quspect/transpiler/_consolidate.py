@@ -32,7 +32,7 @@ from quspect.synthesis.two_qubit import (
     DEFAULT_ATOL,
     SynthOp,
     TwoQubitBasis,
-    _approximate_two_qubit_ops,
+    _approximate_ops,
     _ops_layer_matrix,
     euler_ops,
     num_cz_required,
@@ -342,7 +342,7 @@ class ConsolidateBlocksPass:
             if key in memo:
                 found = memo[key]
             else:
-                found = _approximate_two_qubit_ops(
+                found = _approximate_ops(
                     mat,
                     self._max_infidelity,
                     self._atol,
@@ -571,7 +571,7 @@ class ConsolidateBlocksPass:
         qa, _ = block.qubits
         native = _two_qubit._native_kak()
         if native is not None:
-            # 与下面的循环逐位相同（同样的 numpy 乘法、kron 与置换）
+            # 原生的确定性块乘积（全平台逐位一致）；下面的循环是没有原生模块时的兜底
             block_mats: list[np.ndarray] = []
             places: list[int] = []
             for m in block.members:
@@ -635,7 +635,7 @@ class ConsolidateBlocksPass:
                 run_mats.append(mat)
             native = _two_qubit._native_kak()
             u = None if native is None else native.run_unitary(run_mats)
-            if u is None:  # 原生结果与下面的乘法逐位相同
+            if u is None:  # 没有原生模块时的兜底（与原生的确定性乘积数值等价）
                 u = np.eye(2, dtype=complex)
                 for mat in run_mats:
                     u = mat @ u

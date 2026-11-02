@@ -3,97 +3,62 @@
 #include <cmath>
 
 #include <algorithm>
-#include <atomic>
-#include <cfloat>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
 
-// numpy 的复数 exp 直接调用 C99 ``cexp``；C++ 标准库没有声明它，这里按 C ABI 声明。
-#if defined(__GNUC__) || defined(__clang__)
-extern "C" double _Complex cexp(double _Complex z);
-#endif
+#include "quspect_native/detmath/complex.hpp"
+#include "quspect_native/detmath/scalar.hpp"
 
 namespace quspect::native::transpiler {
+
+namespace dm = quspect::native::detmath;
 
 namespace {
 
 constexpr double kPi = 3.141592653589793;
 constexpr double kHalfPi = kPi / 2.0;
 constexpr double kTwoPi = 2.0 * kPi;
-// EulerLength 与 Python 的阈值判断只在离阈值超过该距离时保证一致（角度为 O(π)，约 200 ulp）。
-constexpr double kEulerThresholdMargin = 1e-13;
 constexpr int kInf = 1000000;
 
 bool Finite(const Complex& z) {
     return std::isfinite(z.re) && std::isfinite(z.im);
 }
 
-// ---- 两边共用的运算 -----------------------------------------------------------
+// 复数运算（Mul、Sub、Neg、Conj、Abs 等）直接用 detmath 的（Complex 即 detmath::Cx）。
+using dm::Abs;
+using dm::Conj;
+using dm::Mul;
+using dm::Neg;
+using dm::Sub;
 
-// 各类运算的语义（见 GaugeArithmetic）；只在使用内核之前设置，之后只读。
-std::atomic<int> g_py_mul{1};
-std::atomic<int> g_np_scalar_mul{1};
-std::atomic<int> g_scalar_arr_mul{1};
-std::atomic<bool> g_py_div_fma{true};
-std::atomic<bool> g_np_div_fma{true};
-
-// 复数乘法的三种运算顺序（与 synthesis::MulMode 相同）。
-Complex MulIn(int mode, const Complex& a, const Complex& b) {
-    if (mode == 0) {
-        const double rr = a.re * b.re;
-        const double ii = a.im * b.im;
-        const double ri = a.re * b.im;
-        const double ir = a.im * b.re;
-        return {rr - ii, ri + ir};
-    }
-    if (mode == 2) {
-        return {std::fma(-a.im, b.im, a.re * b.re), std::fma(a.im, b.re, a.re * b.im)};
-    }
-    return {std::fma(a.re, b.re, -(a.im * b.im)), std::fma(a.re, b.im, a.im * b.re)};
+constexpr const Complex& D(const Complex& z) {
+    return z;
 }
 
-// CPython ``_Py_c_prod``（arm64 上 clang 把 a·b − c·d 收缩为 fma(a, b, −(c·d))）。
-Complex Mul(const Complex& a, const Complex& b) {
-    return MulIn(g_py_mul.load(std::memory_order_relaxed), a, b);
-}
-// numpy 复数标量乘法。
-Complex MulNp(const Complex& a, const Complex& b) {
-    return MulIn(g_np_scalar_mul.load(std::memory_order_relaxed), a, b);
-}
-// numpy：复数标量 * 数组。
-Complex MulScalarArr(const Complex& a, const Complex& b) {
-    return MulIn(g_scalar_arr_mul.load(std::memory_order_relaxed), a, b);
+constexpr const Complex& C(const Complex& z) {
+    return z;
 }
 
-Complex Sub(const Complex& a, const Complex& b) {
-    return {a.re - b.re, a.im - b.im};
-}
-
-Complex Neg(const Complex& a) {
-    return {-a.re, -a.im};
-}
-
-Complex Conj(const Complex& a) {
-    return {a.re, -a.im};
-}
-
-// ``abs(complex)`` / numpy 标量 ``abs``：libm hypot。
-double Abs(const Complex& a) {
-    return std::hypot(a.re, a.im);
-}
-
-// ``cmath.phase`` / ``np.angle``：有限输入时即 atan2(im, re)。
+// arg a（atan2(im, re)）。
 double Phase(const Complex& a) {
-    return std::atan2(a.im, a.re);
+    return dm::Arg(D(a));
 }
 
-// ``-1j * x``（CPython 3.13 把 float 转成 (x, 0.0) 后做完整复数乘法）。
-Complex MinusIMul(double x) {
-    return Mul(Complex{-0.0, -1.0}, Complex{x, 0.0});
+// e^{−iθ}。
+Complex ExpMinusI(double theta) {
+    return C(dm::ExpI(-theta));
 }
 
-// CPython ``float % float``（同号余数）；numpy float64 取模与之相同。
+// a / b（Smith 算法）；除以零返回 nullopt（Python 端抛异常）。
+std::optional<Complex> DivChecked(const Complex& a, const Complex& b) {
+    if (b.re == 0.0 && b.im == 0.0) {
+        return std::nullopt;
+    }
+    return C(dm::Div(D(a), D(b)));
+}
+
+// Python ``float % float``（同号余数，精确）。
 double PyMod(double x, double w) {
     double mod = std::fmod(x, w);
     if (mod != 0.0) {
@@ -106,63 +71,10 @@ double PyMod(double x, double w) {
     return mod;
 }
 
-// 防止编译器把同一参数的 sin / cos 合并成 sincos（Python 端是两次独立调用）。
-[[gnu::noinline]] double SeparateSin(double x) {
-    return std::sin(x);
-}
-[[gnu::noinline]] double SeparateCos(double x) {
-    return std::cos(x);
-}
-
-// ---- CPython 复数语义 ---------------------------------------------------------
-
-// CPython ``_Py_c_quot``（Smith 算法，FMA 收缩）；除以零返回 nullopt（Python 端抛异常）。
-std::optional<Complex> PyDiv(const Complex& a, const Complex& b) {
-    const double abs_br = b.re < 0 ? -b.re : b.re;
-    const double abs_bi = b.im < 0 ? -b.im : b.im;
-    const bool fma = g_py_div_fma.load(std::memory_order_relaxed);
-    // x·y + z：收缩成 FMA 或分开舍入
-    auto madd = [fma](double x, double y, double z) {
-        if (fma) {
-            return std::fma(x, y, z);
-        }
-        const double p = x * y;
-        return p + z;
-    };
-    if (abs_br >= abs_bi) {
-        if (abs_br == 0.0) {
-            return std::nullopt;
-        }
-        const double ratio = b.im / b.re;
-        const double denom = madd(b.im, ratio, b.re);
-        return Complex{madd(a.im, ratio, a.re) / denom, madd(-a.re, ratio, a.im) / denom};
-    }
-    if (abs_bi >= abs_br) {
-        const double ratio = b.re / b.im;
-        const double denom = madd(b.re, ratio, b.im);
-        return Complex{madd(a.re, ratio, a.im) / denom, madd(a.im, ratio, -a.re) / denom};
-    }
-    return std::nullopt;  // NaN
-}
-
-// CPython ``cmath.exp``：l = exp(re)，r = (l·cos(im), l·sin(im))；CPython 本身由 clang 编译，
-// cos 与 sin 合并成了一次 sincos。
-std::optional<Complex> PyExp(const Complex& z) {
-    if (!Finite(z) || z.re > 700.0) {
-        return std::nullopt;
-    }
-    const double l = std::exp(z.re);
-#if defined(__APPLE__)
-    const auto sc = __sincos_stret(z.im);
-    return Complex{l * sc.__cosval, l * sc.__sinval};
-#else
-    return Complex{l * std::cos(z.im), l * std::sin(z.im)};
-#endif
-}
-
 // ``_nz``：RZ(theta) 是否不是恒等（容差 1e-9）。
 int Nz(double theta) {
-    double t = std::fmod(theta, kTwoPi);
+    // |θ| < 2π 时 fmod(θ, 2π) = θ（精确），免去库调用
+    double t = std::fabs(theta) < kTwoPi ? theta : std::fmod(theta, kTwoPi);
     if (t <= -kPi) {
         t += kTwoPi;
     } else if (t > kPi) {
@@ -171,20 +83,18 @@ int Nz(double theta) {
     return (std::fabs(t) < 1e-9 || std::fabs(std::fabs(t) - kTwoPi) < 1e-9) ? 0 : 1;
 }
 
-// ``_gauge._zyz``（CPython 复数）。
+// ``_gauge._zyz``。
 std::optional<std::array<double, 3>> PyZyz(Complex u00, Complex u01, Complex u10, Complex u11) {
-    const double c = std::min(Abs(u00), 1.0);
+    const double a00 = Abs(u00);
+    const double c = std::min(a00, 1.0);
     const double s = std::min(Abs(u10), 1.0);
-    const double theta = 2.0 * std::atan2(s, c);
-    if (Abs(u00) >= 1e-10) {
-        const auto corr = PyExp(MinusIMul(Phase(u00)));
-        if (!corr) {
-            return std::nullopt;
-        }
-        u00 = Mul(u00, *corr);
-        u01 = Mul(u01, *corr);
-        u10 = Mul(u10, *corr);
-        u11 = Mul(u11, *corr);
+    const double theta = 2.0 * dm::Atan2(s, c);
+    if (a00 >= 1e-10) {
+        const Complex corr = ExpMinusI(Phase(u00));
+        u00 = Mul(u00, corr);
+        u01 = Mul(u01, corr);
+        u10 = Mul(u10, corr);
+        u11 = Mul(u11, corr);
     }
     double phi;
     double lam;
@@ -199,11 +109,7 @@ std::optional<std::array<double, 3>> PyZyz(Complex u00, Complex u01, Complex u10
         const double diff = Phase(Mul(u10, Conj(Neg(u01))));
         phi = 0.5 * (total + diff);
         lam = 0.5 * (total - diff);
-        const auto e = PyExp(MinusIMul(phi));
-        if (!e) {
-            return std::nullopt;
-        }
-        if (Mul(*e, u10).re < 0.0) {
+        if (Mul(ExpMinusI(phi), u10).re < 0.0) {
             phi += kPi;
             lam += kPi;
         }
@@ -217,9 +123,9 @@ std::optional<std::array<double, 3>> PyZyz(Complex u00, Complex u01, Complex u10
 // ``_LengthModel._named``。
 std::optional<bool> Named(const Matrix2& a, const LengthModel& model) {
     int k = 0;
-    double best = Abs(a[0]);
+    double best = Norm2(a[0]);
     for (int i = 1; i < 4; ++i) {
-        const double v = Abs(a[i]);
+        const double v = Norm2(a[i]);
         if (v > best) {  // Python max(key=...) 保留第一个最大值
             best = v;
             k = i;
@@ -227,100 +133,26 @@ std::optional<bool> Named(const Matrix2& a, const LengthModel& model) {
     }
     for (const Matrix2& g : model.named) {
         const Complex& gk = g[k];
-        if (Abs(gk) < 0.5 * Abs(a[k])) {
+        if (Norm2(gk) < 0.25 * best) {
             continue;
         }
-        auto ph = PyDiv(a[k], gk);
+        auto ph = DivChecked(a[k], gk);
         if (!ph) {
             return std::nullopt;
         }
-        ph = PyDiv(*ph, Complex{Abs(*ph), 0.0});
+        ph = DivChecked(*ph, Complex{Abs(*ph), 0.0});
         if (!ph) {
             return std::nullopt;
         }
         bool all = true;
         for (int i = 0; i < 4 && all; ++i) {
-            all = Abs(Sub(a[i], Mul(*ph, g[i]))) < 1e-9;
+            all = Norm2(Sub(a[i], Mul(*ph, g[i]))) < 1e-18;
         }
         if (all) {
             return true;
         }
     }
     return false;
-}
-
-// ---- numpy 复数语义 -----------------------------------------------------------
-
-// numpy ``CDOUBLE_divide``（Smith 算法，乘以倒数；fma：是否收缩成 FMA）。
-std::optional<Complex> NpDivIn(bool fma, const Complex& a, const Complex& b) {
-    const double abs_br = std::fabs(b.re);
-    const double abs_bi = std::fabs(b.im);
-    auto madd = [fma](double x, double y, double z) {
-        if (fma) {
-            return std::fma(x, y, z);
-        }
-        const double p = x * y;
-        return p + z;
-    };
-    if (abs_br >= abs_bi) {
-        if (abs_br == 0.0) {
-            return std::nullopt;
-        }
-        const double rat = b.im / b.re;
-        const double scl = 1.0 / madd(b.im, rat, b.re);
-        return Complex{madd(a.im, rat, a.re) * scl, madd(-a.re, rat, a.im) * scl};
-    }
-    const double rat = b.re / b.im;
-    const double scl = 1.0 / madd(b.re, rat, b.im);
-    return Complex{madd(a.re, rat, a.im) * scl, madd(a.im, rat, -a.re) * scl};
-}
-
-std::optional<Complex> NpDiv(const Complex& a, const Complex& b) {
-    return NpDivIn(g_np_div_fma.load(std::memory_order_relaxed), a, b);
-}
-
-// ``np.exp`` 的复数版本即 C99 cexp。
-std::optional<Complex> NpExp(const Complex& z) {
-#if defined(__GNUC__) || defined(__clang__)
-    if (!Finite(z)) {
-        return std::nullopt;
-    }
-    double _Complex w;
-    __real__ w = z.re;
-    __imag__ w = z.im;
-    const double _Complex r = cexp(w);
-    return Complex{__real__ r, __imag__ r};
-#else
-    (void) z;
-    return std::nullopt;
-#endif
-}
-
-// CPython ``cmath.sqrt``（Modules/cmathmodule.c，有限输入）。
-std::optional<Complex> PySqrt(const Complex& z) {
-    if (!Finite(z)) {
-        return std::nullopt;
-    }
-    if (z.re == 0.0 && z.im == 0.0) {
-        return Complex{0.0, z.im};
-    }
-    double ax = std::fabs(z.re);
-    const double ay = std::fabs(z.im);
-    double s;
-    if (ax < DBL_MIN && ay < DBL_MIN) {
-        constexpr int kScaleUp = 2 * (DBL_MANT_DIG / 2) + 1;
-        constexpr int kScaleDown = -(kScaleUp + 1) / 2;
-        ax = std::ldexp(ax, kScaleUp);
-        s = std::ldexp(std::sqrt(ax + std::hypot(ax, std::ldexp(ay, kScaleUp))), kScaleDown);
-    } else {
-        ax /= 8.0;
-        s = 2.0 * std::sqrt(ax + std::hypot(ax, ay / 8.0));
-    }
-    const double d = ay / (2.0 * s);
-    if (z.re >= 0.0) {
-        return Complex{s, std::copysign(d, z.im)};
-    }
-    return Complex{d, std::copysign(s, z.im)};
 }
 
 }  // namespace
@@ -335,11 +167,10 @@ std::optional<int> FastLength(const Matrix2& m, const LengthModel& model) {
     const Complex u01 = m[1];
     const Complex u10 = m[2];
     const Complex u11 = m[3];
-    const double sqrt_half = std::sqrt(0.5);
+    const double sqrt_half = dm::Sqrt(0.5);
     const double a00 = Abs(u00);
-    const double a10 = Abs(u10);
-    if (a10 < 1e-9 && Abs(u01) < 1e-9) {
-        if (Abs(Sub(u00, u11)) < 1e-9) {
+    if (Norm2(u10) < 1e-18 && Norm2(u01) < 1e-18) {
+        if (Norm2(Sub(u00, u11)) < 1e-18) {
             return 0;
         }
         return 1;
@@ -354,8 +185,8 @@ std::optional<int> FastLength(const Matrix2& m, const LengthModel& model) {
         }
     }
     int best = kInf;
-    if (a00 < 1e-9 && Abs(u11) < 1e-9) {
-        const auto q = PyDiv(u10, u01);
+    if (a00 < 1e-9 && Norm2(u11) < 1e-18) {
+        const auto q = DivChecked(u10, u01);
         if (!q) {
             return std::nullopt;
         }
@@ -369,8 +200,8 @@ std::optional<int> FastLength(const Matrix2& m, const LengthModel& model) {
         }
     }
     if (model.h && std::fabs(a00 - sqrt_half) < 1e-9) {
-        const auto q1 = PyDiv(u10, u00);
-        const auto q2 = PyDiv(u01, u00);
+        const auto q1 = DivChecked(u10, u00);
+        const auto q2 = DivChecked(u01, u00);
         if (!q1 || !q2) {
             return std::nullopt;
         }
@@ -412,9 +243,9 @@ std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z) {
         }
     }
     LeadingAngles out;
-    if (Abs(z[1]) < 1e-12 && Abs(z[2]) < 1e-12) {
+    if (Norm2(z[1]) < 1e-24 && Norm2(z[2]) < 1e-24) {
         // [float(np.angle(z[1, 1] / z[0, 0]))]
-        const auto q = NpDiv(z[3], z[0]);
+        const auto q = DivChecked(z[3], z[0]);
         if (!q) {
             return std::nullopt;
         }
@@ -422,24 +253,22 @@ std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z) {
         out.angles[0] = Phase(*q);
         return out;
     }
-    // single_qubit_fusion._decompose_u3 的 phi（numpy 标量语义）
+    // single_qubit_fusion._decompose_u3 的 phi
     Complex u00 = z[0];
     Complex u01 = z[1];
     Complex u10 = z[2];
     Complex u11 = z[3];
-    const double c = std::min(Abs(u00), 1.0);
+    const double a00 = Abs(u00);
+    const double c = std::min(a00, 1.0);
     const double s = std::min(Abs(u10), 1.0);
-    const double theta = 2.0 * std::atan2(s, c);
+    const double theta = 2.0 * dm::Atan2(s, c);
     constexpr double kEps = 1e-10;
-    if (Abs(u00) >= kEps) {
-        const auto corr = NpExp(MinusIMul(Phase(u00)));
-        if (!corr) {
-            return std::nullopt;
-        }
-        u00 = MulNp(u00, *corr);
-        u01 = MulNp(u01, *corr);
-        u10 = MulNp(u10, *corr);
-        u11 = MulNp(u11, *corr);
+    if (a00 >= kEps) {
+        const Complex corr = ExpMinusI(Phase(u00));
+        u00 = Mul(u00, corr);
+        u01 = Mul(u01, corr);
+        u10 = Mul(u10, corr);
+        u11 = Mul(u11, corr);
     }
     double phi;
     if (theta < kEps) {
@@ -448,13 +277,9 @@ std::optional<LeadingAngles> LeadingAnglesInZFrame(const Matrix2& z) {
         phi = Phase(u10);
     } else if (c >= s) {
         const double total = Phase(u11);
-        const double diff = Phase(MulNp(u10, Conj(Neg(u01))));
+        const double diff = Phase(Mul(u10, Conj(Neg(u01))));
         phi = 0.5 * (total + diff);
-        const auto e = NpExp(MinusIMul(phi));
-        if (!e) {
-            return std::nullopt;
-        }
-        if (MulNp(*e, u10).re < 0.0) {
+        if (Mul(ExpMinusI(phi), u10).re < 0.0) {
             phi += kPi;
         }
     } else {
@@ -474,15 +299,13 @@ Matrix2 AxisRotation(int axis, double phi) {
         {Complex{0.0, 0.0}, Complex{-0.0, -1.0}, Complex{0.0, 1.0}, Complex{0.0, 0.0}},  // y
     };
     const Matrix2& p = kPaulis[axis];
-    const double c = SeparateCos(phi / 2.0);
-    const double s = SeparateSin(phi / 2.0);
-    // math.cos(...) * _I2：Python float 先转成 (c, 0.0) 再做复数乘法
-    const Complex cc{c, 0.0};
-    // 1j * math.sin(...)：CPython 复数乘法
-    const Complex is = Mul(Complex{0.0, 1.0}, Complex{s, 0.0});
+    const double c = dm::Cos(phi / 2.0);
+    const double s = dm::Sin(phi / 2.0);
+    // cos(φ/2)·I − (i·sin(φ/2))·P
+    const Complex is{0.0, s};
     Matrix2 out;
     for (int i = 0; i < 4; ++i) {
-        out[i] = Sub(MulScalarArr(cc, kIdentity[i]), MulScalarArr(is, p[i]));
+        out[i] = Sub(C(dm::Scale(D(kIdentity[i]), c)), Mul(is, p[i]));
     }
     return out;
 }
@@ -493,32 +316,23 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
             return std::nullopt;
         }
     }
-    // _zxz_angles: m / cmath.sqrt(complex(m00·m11 − m01·m10))（numpy 标量乘法、数组除以标量）
-    const Complex det = Sub(MulIn(1, m[0], m[3]), MulIn(1, m[1], m[2]));
-    const auto root = PySqrt(det);
-    if (!root) {
-        return std::nullopt;
-    }
-    const auto m00 = NpDivIn(true, m[0], *root);
-    const auto m10 = NpDivIn(true, m[2], *root);
-    if (!m00 || !m10 || !Finite(*m00) || !Finite(*m10)) {
-        return std::nullopt;
-    }
-    const double theta = 2.0 * std::atan2(Abs(*m10), Abs(*m00));
-    const double plus = Abs(*m00) > 1e-12 ? -2.0 * Phase(*m00) : 0.0;
-    const double minus = Abs(*m10) > 1e-12 ? 2.0 * Phase(*m10) + kPi : 0.0;
+    // _zxz_angles（与 KakSynthesizer::EulerOps 的运算相同，长度与之一致）
+    const dm::Cx det = dm::Sub(dm::Mul(D(m[0]), D(m[3])), dm::Mul(D(m[1]), D(m[2])));
+    const dm::Cx root = dm::Sqrt(det);
+    const dm::Cx m00 = dm::Div(D(m[0]), root);
+    const dm::Cx m10 = dm::Div(D(m[2]), root);
+    const double a00 = dm::Abs(m00);
+    const double a10 = dm::Abs(m10);
+    const double theta = 2.0 * dm::Atan2(a10, a00);
+    const double plus = a00 > 1e-12 ? -2.0 * dm::Arg(m00) : 0.0;
+    const double minus = a10 > 1e-12 ? 2.0 * dm::Arg(m10) + kPi : 0.0;
     const double phi = (plus + minus) / 2.0;
     const double lam = (plus - minus) / 2.0;
-    // 阈值比较落在边界附近时交回 Python：np.angle 与 libm atan2 的实现可能差 1 ulp
-    // （Linux 上 numpy 用自带的 SIMD atan2），逐位一致只能在远离阈值时保证。
-    bool ambiguous = false;
-    const auto within = [atol, &ambiguous](double dist) {
-        if (std::fabs(dist - atol) <= kEulerThresholdMargin) {
-            ambiguous = true;
-        }
-        return dist <= atol;
-    };
-    const auto zero = [&within](double angle) { return within(std::fabs(std::remainder(angle, kTwoPi))); };
+    if (!std::isfinite(theta) || !std::isfinite(phi) || !std::isfinite(lam)) {
+        return std::nullopt;
+    }
+    const auto within = [atol](double dist) { return dist <= atol; };
+    const auto zero = [&within](double angle) { return within(std::fabs(dm::Remainder(angle, kTwoPi))); };
     const auto rz = [&zero](double angle) { return zero(angle) ? 0 : 1; };
     std::optional<int> length;
     if (basis == 0) {
@@ -542,33 +356,7 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
             length = rz(lam + kHalfPi) + 1 + rz(theta + kPi) + 1 + rz(phi + kHalfPi);
         }
     }
-    if (ambiguous) {
-        return std::nullopt;
-    }
     return length;
-}
-
-void SetGaugeArithmetic(const GaugeArithmetic& arith) {
-    for (int m : {arith.py_mul, arith.np_scalar_mul, arith.scalar_arr_mul}) {
-        if (m < 0 || m > 2) {
-            throw std::invalid_argument("SetGaugeArithmetic: multiplication modes are 0, 1 or 2");
-        }
-    }
-    g_py_mul.store(arith.py_mul);
-    g_np_scalar_mul.store(arith.np_scalar_mul);
-    g_scalar_arr_mul.store(arith.scalar_arr_mul);
-    g_py_div_fma.store(arith.py_div_fma);
-    g_np_div_fma.store(arith.np_div_fma);
-}
-
-GaugeArithmetic GetGaugeArithmetic() {
-    GaugeArithmetic a;
-    a.py_mul = g_py_mul.load();
-    a.np_scalar_mul = g_np_scalar_mul.load();
-    a.scalar_arr_mul = g_scalar_arr_mul.load();
-    a.py_div_fma = g_py_div_fma.load();
-    a.np_div_fma = g_np_div_fma.load();
-    return a;
 }
 
 std::int64_t PyRound(double x) {
@@ -813,7 +601,7 @@ void GaugeBeamSearch::Finish(const std::vector<Matrix2>& m, const std::vector<Ma
             for (std::size_t j = 0; j < opts.phis.size(); ++j) {
                 const double phi = opts.phis[j];
                 const int c = opts.costs[j];
-                const std::int64_t akey = PyRound(std::remainder(phi, kTwoPi) * 1e8);
+                const std::int64_t akey = PyRound(dm::Remainder(phi, kTwoPi) * 1e8);
                 auto it = std::find_if(nxt.begin(), nxt.end(), [akey](const auto& kv) { return kv.first == akey; });
                 const Entry entry{total + c, phi, static_cast<int>(pi), c};
                 if (it == nxt.end()) {

@@ -352,7 +352,13 @@ def _working_circuit(
 def test_native_translation_matches_python(
     basis: str, seed: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The C++ translate_to_target equals the Python body instruction by instruction."""
+    """The C++ translate_to_target follows the Python body instruction by instruction.
+
+    The C++ products run on the deterministic numerics layer and the Python
+    body on numpy, so rotation angles may differ in the last bits (not bit
+    for bit); gates, operands and the instructions reused from the input are
+    identical.
+    """
     from quspect.transpiler import _basis
 
     plan = plan_basis(BASES[basis])
@@ -363,7 +369,21 @@ def test_native_translation_matches_python(
     if _basis._translate_native(qc, plan) is None:
         pytest.skip("native translation not available")
     got = translate_to_target(qc, plan)
-    assert [repr(i) for i in got.instructions] == [repr(i) for i in ref.instructions]
+
+    def key(ins: object) -> tuple[object, ...]:
+        gate = ins.gate  # type: ignore[attr-defined]
+        name = None if gate is None else gate.name
+        return (ins.type, ins.qubits, ins.clbits, name)  # type: ignore[attr-defined]
+
+    assert [key(i) for i in got.instructions] == [key(i) for i in ref.instructions]
+    for a, b in zip(got.instructions, ref.instructions, strict=True):
+        if a.gate is None or not a.gate.params:
+            continue
+        for x, y in zip(a.gate.params, b.gate.params, strict=True):
+            if isinstance(x, float):
+                assert x == pytest.approx(y, abs=1e-12)
+            else:
+                assert x == y
     reused = {id(i) for i in qc.instructions}
     assert [id(i) in reused for i in got.instructions] == [
         id(i) in reused for i in ref.instructions

@@ -4,6 +4,8 @@
 
 #include <cmath>
 
+#include "quspect_native/detmath/scalar.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -281,7 +283,7 @@ class RingChain {
     // 贪心初值：第 l 层按上一层位置的圆周平均排序，再只对左邻居局部搜索。
     void GreedyInit(int passes) {
         const int num = num_layers();
-        const double tau = 2.0 * std::acos(-1.0);
+        constexpr double tau = 2.0 * 3.141592653589793;
         for (int l = 1; l < num; ++l) {
             const int m = static_cast<int>(blocks_[l].size());
             std::vector<double> key(m, 0.0);
@@ -291,11 +293,11 @@ class RingChain {
                 for (int t : blocks_[l][b]) {
                     if (t >= 0) {
                         const double ang = tau * sites_[l - 1][t] / n_;
-                        cx += std::cos(ang);
-                        cy += std::sin(ang);
+                        cx += detmath::Cos(ang);
+                        cy += detmath::Sin(ang);
                     }
                 }
-                double a = std::atan2(cy, cx);
+                double a = detmath::Atan2(cy, cx);
                 if (a < 0) {
                     a += tau;
                 }

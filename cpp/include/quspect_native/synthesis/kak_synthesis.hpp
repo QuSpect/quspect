@@ -7,35 +7,29 @@
 #include <string>
 #include <vector>
 
-#include "quspect_native/synthesis/numpy_compat.hpp"
+#include "quspect_native/detmath/linalg.hpp"
 
 namespace quspect::native::synthesis {
 
 // 两比特 KAK 合成（quspect.synthesis.two_qubit 的 _kak4 / _factor_local / _try_synthesize /
-// _synthesize_two_qubit_ops / _synthesize_swap_face_block）的 C++ 实现。
+// _synthesize_two_qubit_ops / _synthesize_swap_face_block 的算法）的确定性实现。
 //
-// 逐个函数复刻 Python 参考实现：每一步 numpy / CPython 运算都换成 numpy_compat.hpp 中语义相同的
-// 运算（同一个 BLAS / LAPACK、同样的调用方式、探测得到的逐元素运算顺序），因此输出的门序列与参数
-// 和 Python 逐位一致。只有两类量不能保证逐位一致，它们只用于比较（不进入输出）：
+// 全部数值运算走确定性数值层（quspect_native/detmath）：固定顺序的小矩阵乘法、部分主元 LU 行列式、
+// Jacobi 同时对角化与单边 Jacobi 奇异值分解、CORE-MATH 的正确舍入 sin / cos / atan2 / hypot；
+// 不调用 BLAS / LAPACK / 平台 libm。同一输入在所有平台上得到逐位相同的门序列与参数，这是编译
+// 结果的标准答案；Python 参考实现只在原生模块缺失时使用，与本实现不要求逐位一致（算法相同，
+// 数值细节不同）。
 //
-//   * numpy 的复数 ``np.abs``（各平台的 SIMD 实现不同）——用于 ``_distance_up_to_phase`` 与
-//     ``_real_orthogonal_diagonalize`` 的误差；
-//   * 近似合成的预测不保真度。
+// 与 Python 参考实现的算法差异：
 //
-// 比较落在阈值附近（相对误差 1e-9 以内）时抛出 ``Fallback``，由调用方改走 Python 参考实现；
-// LAPACK 失败、输入不是有限值等 Python 会报错的情形同样抛出 ``Fallback``。
+//   * _real_orthogonal_diagonalize：Python 对 Re M、Im M 的随机实组合做 eigh 并验证、失败重试；
+//     这里直接对 (Re M, Im M) 做 Jacobi 同时对角化（简并谱同样稳定，不需要随机数）。同时对角化的
+//     残差超过 1e-13 时（输入不是酉矩阵等）才退回固定系数的组合 + Jacobi 特征分解，取残差最小者；
+//   * _factor_local：秩 1 分解用单边 Jacobi 奇异值分解的最大奇异三元组。
 
-// 需要退回 Python 参考实现。
-class Fallback : public std::runtime_error {
- public:
-    explicit Fallback(const char* what) : std::runtime_error(what) {}
-};
-
-// _real_orthogonal_diagonalize 需要随机组合系数，但尚未提供（见 KakConstants::normals）。
-class NeedNormals : public Fallback {
- public:
-    NeedNormals() : Fallback("need normals") {}
-};
+using Cx = detmath::Cx;
+using M2 = std::array<Cx, 4>;   // 2×2，行主序
+using M4 = std::array<Cx, 16>;  // 4×4，行主序
 
 // 合成出的一个门（局部比特 0 / 1）。
 enum class OpKind : std::uint8_t { kEntangler, kRz, kH, kX, kSX };
@@ -46,21 +40,32 @@ struct Op {
     double param;     // 只对 rz 有效
 };
 
-// Python 端的常量矩阵（直接取自 two_qubit.py 的模块常量，保证逐位相同）。
+// 输入不是酉矩阵（与 Python 的 ``ValueError("Matrix is not unitary.")`` 对应）。
+class NotUnitary : public std::invalid_argument {
+ public:
+    NotUnitary() : std::invalid_argument("Matrix is not unitary.") {}
+};
+
+// 没有模板能在 verify_atol 内重现输入（与 Python 的 RuntimeError 对应；对有效输入不会发生）。
+class SynthesisFailed : public std::runtime_error {
+ public:
+    explicit SynthesisFailed(const std::string& what) : std::runtime_error(what) {}
+};
+
+// 常量矩阵（与 two_qubit.py 的模块常量数值相同；全部是精确值或 1/sqrt(2) 的乘积，各平台相同）。
 struct KakConstants {
     M4 magic{};       // _MAGIC
-    M4 magic_conj{};  // _MAGIC.conj()（_MAGIC_DAG 是它的转置视图）
+    M4 magic_dag{};   // _MAGIC_DAG
     M2 i2{}, x{}, y{}, z{}, h{}, sx{};
     M4 cz4{};
     M4 swap4{};
     std::array<M4, 3> pauli_pairs{};  // _PAULI_PAIRS
     M4 swap_ab{}, swap_bc{};          // _SWAP_AB, _SWAP_BC
     M4 flip_ab{}, flip_ac{}, flip_bc{};
-    std::array<double, 16> phase_map{};    // _PHASE_MAP（4×4，C 连续）
-    std::array<double, 12> can_phases{};   // _CAN_PHASES（4×3）
-    // default_rng(1234567).normal() 的前 2·98 个值（只有前两次尝试都失败时才用到；为空时抛出
-    // NeedNormals，由调用方补上后重试）
-    std::vector<double> normals;
+    std::array<double, 16> phase_map{};   // _PHASE_MAP（4×4）
+    std::array<double, 12> can_phases{};  // _CAN_PHASES（4×3）
+
+    static KakConstants Make();
 };
 
 // 本地纠缠门（quspect.synthesis.two_qubit.Entangler）。
@@ -92,27 +97,28 @@ struct Kak {
 
 class KakSynthesizer {
  public:
-    KakSynthesizer(const LinalgFunctions& fns, const ArithModes& modes, KakConstants constants);
+    KakSynthesizer();
 
     int AddEntangler(EntanglerSpec spec);
-    // 补上 KakConstants::normals（至少 196 个）。
-    void SetNormals(std::vector<double> normals);
-    bool HasNormals() const {
-        return c_.normals.size() >= 196;
-    }
 
-    // ``_check_unitary_4`` 的判断：true = 是酉矩阵；不是酉矩阵或落在容差边界上时抛出 Fallback。
+    // ``_check_unitary_4`` 的判断（np.allclose(u^† u, I, atol=1e-8)）：不是酉矩阵时抛出 NotUnitary。
     void CheckUnitary(const M4& u) const;
 
-    // ``_kak4(u)``。
-    Kak Kak4(const M4& u) const;
+    // ``_kak4(u)``。简并的 Weyl 点上 k1、k2 不唯一（取决于特征向量的基）；variant 选择基的取法：
+    // 0 = (Re M, Im M) 的同时对角化；1 = 依次尝试 Re M、Im M 与固定系数组合的特征分解（特征值
+    // 升序，与 Python 参考实现的尝试顺序相同），都不满足精度时同 0。
+    Kak Kak4(const M4& u, int variant = 0) const;
     // ``_factor_local(k)``。
     std::array<M2, 2> FactorLocal(const M4& k) const;
     // ``_count_from_coords(v, atol)``。
     static int CountFromCoords(const std::array<double, 3>& v, double atol);
 
     // ``_synthesize_two_qubit_ops(u, atol, verify_atol, basis)``；uses_flag：结果是否取决于
-    // ``_SWAP_FACE_TEMPLATE``（三个纠缠门且在 SWAP 面上）。
+    // ``_SWAP_FACE_TEMPLATE``（三个纠缠门且在 SWAP 面上）。失败时抛出 SynthesisFailed。
+    //
+    // 与 Python 参考实现的区别：Weyl 点在室边界附近（简并，k1、k2 不唯一）时，分别用 Kak4 的
+    // 两种基（variant 0、1）合成，取（纠缠门数，门数）较小者（相同时取 variant 0）：两种基给出的
+    // 单比特层长度可能不同，取较短者使结果不依赖特征向量基的偶然选择。
     std::vector<Op> SynthesizeExact(const M4& u, const SynthOptions& opt, bool* uses_flag) const;
     // 同上，但复用已算好的 KAK。
     std::vector<Op> SynthesizeExact(const M4& u, const Kak& kak, const SynthOptions& opt, bool* uses_flag) const;
@@ -120,33 +126,49 @@ class KakSynthesizer {
     // ``_synthesize_swap_face_block(u, basis, verify_atol)``（nullopt：Python 返回 None）。
     std::optional<std::vector<Op>> SynthesizeSwapFace(const M4& u, const SynthOptions& opt) const;
 
-    // ``_approximate_two_qubit_ops`` 是否一定返回 None（每个更少的纠缠门数的预测不保真度都明显
-    // 超出预算）。不能确定时抛出 Fallback。
+    // ``_approximate_two_qubit_ops`` 是否一定返回 None（每个更少的纠缠门数的预测不保真度都超出预算）。
     bool ApproximationImpossible(const Kak& kak, double max_infidelity, double atol, int max_entanglers) const;
 
+    // ``_approximate_two_qubit_ops(u, max_infidelity, atol, basis, max_entanglers, kak)``：纠缠门更少、
+    // 平均门不保真度不超过 max_infidelity 的近似（ops 与 approximation_error 的两个量），nullopt =
+    // 没有可用的近似。与 Python 参考实现的步骤相同（按纠缠门数升序，先看预测的不保真度，再按
+    // Euler 容差依次合成并以实际门序列的误差为准），全部在确定性数值层上计算。
+    struct Approximation {
+        std::vector<Op> ops;
+        double infidelity = 0.0;
+        double distance = 0.0;
+    };
+    std::optional<Approximation> Approximate(const M4& u, const Kak& kak, double max_infidelity, double atol,
+                                             int max_entanglers, const SynthOptions& opt) const;
+    // ``approximation_error(u, v)``（4×4）：平均门不保真度与相位最优的算子范数距离上界，由 u^† v 的
+    // 特征相位计算；特征分解失败时返回 false。
+    static bool ApproximationError(const M4& u, const M4& v, double* infidelity, double* distance);
+
     // quspect.transpiler._consolidate._verified_euler_ops_uncached：先按 atol 去掉零旋转，误差超出
-    // 1e-9 时改用精确角度；都不满足时返回 nullopt（Python 返回 None）。
+    // 1e-9 时改用精确角度（atol 取 min(atol, 1e-12)）；都不满足时返回 nullopt（Python 返回 None）。
     std::optional<std::vector<Op>> VerifiedEuler(const M2& u, double atol, int basis) const;
 
-    // 块的 4×4 酉矩阵：u = I；对每个成员 u = full @ u（numpy 的乘法）。slot 0：4×4 原样；1：
-    // np.kron(m, I2)；2：np.kron(I2, m)；3：交换两个比特的置换副本（m[np.ix_(REV, REV)]）；
-    // 4：swap4 @ m @ swap4。
+    // 块的 4×4 酉矩阵：u = I；对每个成员 u = full @ u。slot 0：4×4 原样；1：kron(m, I2)；
+    // 2：kron(I2, m)；3：交换两个比特的置换副本（m[np.ix_(REV, REV)]）；4：swap4 @ m @ swap4。
     struct BlockMember {
         const Cx* matrix;
         int slot;
     };
-    M4 BlockUnitary(const std::vector<BlockMember>& members, const M4& swap4) const;
+    M4 BlockUnitary(const std::vector<BlockMember>& members) const;
+
+    // quspect.transpiler._mapping._swap_residual 的数值部分：u = SWAP · (A ⊗ B) 时给出 (A, B)（各自
+    // 除以 sqrt(det) 归一到 SU(2)），否则 nullopt。判据与 Python 相同：重排后的矩阵 r 的奇异值
+    // s1 ≤ tol·s0，且 A ⊗ B 与 SWAP·u 逐元素满足 |x − y| ≤ tol + 1e-5·|y|（np.allclose）。
+    static std::optional<std::array<M2, 2>> SwapResidual(const M4& u, double tol);
 
     // 单比特欧拉合成 ``euler_ops(m, qubit, basis, atol)``（公开以便测试）。
     void EulerOps(const M2& m, int qubit, int basis, double atol, std::vector<Op>* out) const;
-    // ``_kron2``、``_axis_rot``、``_axis_angle``（公开以便与 Python 对拍）。
-    M4 Kron2(const M2& left, const M2& right) const;
+    // ``_kron2``、``_axis_rot``、``_axis_angle``、门序列的 2×2 矩阵（公开以便测试）。
+    static M4 Kron2(const M2& left, const M2& right);
     M2 AxisRot(const M2& pauli, double phi) const;
-    double AxisAngle(const M2& w, const M2& pauli) const;
+    static double AxisAngle(const M2& w, const M2& pauli);
+    M2 OpsLayerMatrix(const std::vector<Op>& ops, std::size_t begin, std::size_t end) const;
 
-    const NumpyLinalg& linalg() const {
-        return np_;
-    }
     const KakConstants& constants() const {
         return c_;
     }
@@ -163,21 +185,23 @@ class KakSynthesizer {
     struct TryResult {
         std::vector<Op> ops;
         double err;
+        M4 rebuilt{};  // ops 的 4×4 酉矩阵
     };
+    // ``_projected_infidelity(v, k)``。
+    double ProjectedInfidelity(const std::array<double, 3>& v, int k) const;
     struct UFactors;  // _try_synthesize 中只取决于 u 的部分（同一次合成中复用）
 
-    M2 Mat2(const M2& a, const M2& b) const;
-    M2 Mat2(const CView& a, const CView& b) const;
-    M4 Mat4(const M4& a, const M4& b) const;
-    M2 Rx(double theta) const;
-    M2 Rz(double theta) const;
+    static M2 Rx(double theta);
+    static M2 Rz(double theta);
     M4 LayersUnitary(const std::vector<Layer>& layers) const;
     std::vector<Layer> Template(int k, const std::array<double, 3>& v) const;
     std::vector<Layer> SwapTemplate(double c) const;
 
-    void RawKak(const M4& u, Kak* out) const;
+    void RawKak(const M4& u, int variant, Kak* out) const;
     void Canonicalize(Kak* kak) const;
-    std::array<double, 16> RealOrthogonalDiagonalize(const M4& m2) const;
+    std::array<double, 16> RealOrthogonalDiagonalize(const M4& m2, int variant) const;
+    std::vector<Op> SynthesizeExactOnce(const M4& u, const Kak& kak, const SynthOptions& opt, bool* uses_flag,
+                                        double* best_err) const;
 
     std::vector<Pair> StabilizerCandidates(int k, const std::array<double, 3>& v, const Pair& k1u, const Pair& k1v,
                                            const Pair& k2v, const Pair& k2u, bool fit_cosets,
@@ -194,12 +218,8 @@ class KakSynthesizer {
                               const SynthOptions& opt) const;
     TryResult EmitLayers(const M4& u, const std::vector<Layer>& layers, const std::vector<const M4*>& gates,
                          const std::vector<bool>& reversed, double atol, const SynthOptions& opt) const;
-    M2 OpsLayerMatrix(const std::vector<Op>& ops, std::size_t begin, std::size_t end) const;
-    double DistanceUpToPhase(const M4& u, const M4& v) const;
-    // ``err <= verify_atol``（err 的最后几位可能与 numpy 不同：落在边界附近时抛出 Fallback）。
-    static bool Verified(double err, double verify_atol);
+    static double DistanceUpToPhase(const M4& u, const M4& v);
 
-    NumpyLinalg np_;
     KakConstants c_;
     std::vector<EntanglerSpec> entanglers_;
     std::vector<M4> entangler_reversed_;  // _SWAP4 @ E @ _SWAP4
