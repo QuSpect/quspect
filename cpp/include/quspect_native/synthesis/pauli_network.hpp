@@ -42,6 +42,7 @@ struct PauliNetworkOptions {
     int block_bias = 1024;     // 块代价的权重（单位 1/1024；> 1024 偏向框架约化）
     bool finalize_permutation = false;  // 收尾只还原到比特置换（final_perm），由布局吸收
     int cx_limit = 0;          // > 0：CX 数超过它时提前停止（aborted，输出不完整）
+    std::int64_t work_limit = 0;  // > 0：计分工作量（见 PauliNetworkResult::work）超过它时提前停止（aborted）
 };
 
 enum class NetGateKind : std::uint8_t { kH = 0, kS = 1, kSdg = 2, kCX = 3, kX = 4, kY = 5, kZ = 6, kRotation = 7, kSwap = 8 };
@@ -66,7 +67,8 @@ struct PauliNetworkResult {
     int swap_blocks = 0;
     // 收尾后的置换：初始在物理比特 q 上的态最终在 final_perm[q] 上（finalize_permutation 为假时恒等）
     std::vector<int> final_perm;
-    bool aborted = false;  // 超过 cx_limit 提前停止
+    bool aborted = false;  // 超过 cx_limit 或 work_limit 提前停止
+    bool work_exceeded = false;  // 其中因超过 work_limit 停止
     // 计分工作量：支集 Steiner 代价估计的内层迭代次数之和（确定性，只用于预算，不影响综合结果）
     std::int64_t work = 0;
 };
