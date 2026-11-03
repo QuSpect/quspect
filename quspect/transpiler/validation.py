@@ -2,16 +2,17 @@
 
 This module compares QuSpect statevectors with an independent Qiskit
 interpretation of exported OpenQASM 2, and checks whether a compiler preserves
-the input circuit's state up to global phase.
+the input circuit's state up to global phase, following the final qubit layout
+when the compiler reports one.
 """
 
 from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from numbers import Real
+from numbers import Integral, Real
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -20,6 +21,7 @@ from numpy.typing import NDArray
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.ir.qasm2 import QASM2Exporter
 from quspect.simulation.simulator import Simulator
+from quspect.transpiler._transpile import TranspileResult
 
 if TYPE_CHECKING:
     from quspect.circuit.instruction import CircuitInstruction
@@ -36,15 +38,22 @@ class CompilationConsistencyResult:
         original_qasm: OpenQASM 2 exported from ``original_circuit``.
         quspect_statevector: Original state computed by QuSpect.
         qiskit_statevector: Original-QASM state computed by Qiskit.
-        compiled_statevector: Compiled-circuit state computed by QuSpect.
+        compiled_statevector: Compiled-circuit state computed by QuSpect, on
+            the compiled circuit's own qubits (physical qubits when the
+            compiler returns a :class:`~quspect.transpiler.TranspileResult`).
         quspect_qiskit_fidelity: Fidelity between the QuSpect and Qiskit
             interpretations of the original circuit.
-        compilation_fidelity: Fidelity between the original and compiled
-            QuSpect states.
+        compilation_fidelity: Fidelity between the original QuSpect state,
+            with logical qubit ``q`` moved to ``final_layout[q]``, and the
+            compiled QuSpect state.
         quspect_qiskit_consistent: Whether the first fidelity is within the
             requested tolerance of one.
         compilation_consistent: Whether compilation preserved the state within
             the requested tolerance.
+        final_layout: ``final_layout[logical] = physical`` taken from a
+            :class:`~quspect.transpiler.TranspileResult`, or ``None`` when the
+            compiler returned a bare circuit, whose qubit ``q`` is then
+            compared with original qubit ``q``.
     """
 
     original_circuit: QuantumCircuit
@@ -57,6 +66,7 @@ class CompilationConsistencyResult:
     compilation_fidelity: float
     quspect_qiskit_consistent: bool
     compilation_consistent: bool
+    final_layout: tuple[int, ...] | None = None
 
     @property
     def consistent(self) -> bool:
@@ -149,7 +159,8 @@ def generate_random_circuit(
 def check_compilation_consistency(
     circuit: QuantumCircuit,
     *,
-    compiler: Callable[[QuantumCircuit], QuantumCircuit] | None = None,
+    compiler: Callable[[QuantumCircuit], QuantumCircuit | TranspileResult]
+    | None = None,
     atol: float = 1e-8,
 ) -> CompilationConsistencyResult:
     """Check QASM interoperability and compiler state preservation.
@@ -161,6 +172,17 @@ def check_compilation_consistency(
     2. Compile the original circuit and compare QuSpect's compiled statevector
        with its pre-compilation statevector.
 
+    Routing moves logical qubits, so a compiler that maps to a device should
+    return the whole :class:`~quspect.transpiler.TranspileResult`, for
+    example ``compiler=lambda c: transpile(c, target, seed=0)``. The original
+    state is then compared with logical qubit ``q`` on physical qubit
+    ``final_layout[q]`` and every other physical qubit in ``|0>``. Both
+    states start from ``|0...0>``, which every initial layout prepares
+    alike, so ``initial_layout`` does not enter this check. A bare
+    :class:`QuantumCircuit` is compared qubit for qubit, so passing only
+    ``transpile(...).circuit`` reports a correct but permuted output as
+    inconsistent.
+
     State fidelity is used instead of element-wise equality, so physically
     irrelevant global phase differences pass. Terminal measurements are
     removed before all statevector paths. Mid-circuit measurements and noise
@@ -170,19 +192,22 @@ def check_compilation_consistency(
     Args:
         circuit: Bound QuSpect circuit to validate.
         compiler: Optional compiler callable. It receives a circuit copy and
-            must return a :class:`QuantumCircuit`. Defaults to
+            must return a :class:`QuantumCircuit` or a
+            :class:`~quspect.transpiler.TranspileResult`. Defaults to
             :class:`~quspect.transpiler._passes.OptimizePass`.
         atol: Absolute tolerance applied to ``1 - fidelity``.
 
     Returns:
         A :class:`CompilationConsistencyResult` containing both booleans,
-        fidelities, circuits, QASM, and statevectors.
+        fidelities, circuits, QASM, statevectors, and the final layout used.
 
     Raises:
         ImportError: If Qiskit is not installed.
         TypeError: If arguments or compiler output have invalid types.
         ValueError: If the circuit is empty, parameterized, non-unitary, or
-            contains a mid-circuit measurement.
+            contains a mid-circuit measurement, or if a returned
+            ``final_layout`` does not place every logical qubit on its own
+            physical qubit.
     """
     if not isinstance(circuit, QuantumCircuit):
         raise TypeError(
@@ -230,15 +255,27 @@ def check_compilation_consistency(
         raise TypeError("compiler must be callable.")
 
     compiled = compiler(original.copy())
+    final_layout: tuple[int, ...] | None = None
+    if isinstance(compiled, TranspileResult):
+        final_layout = _checked_final_layout(compiled.final_layout, original.num_qubits)
+        compiled = compiled.circuit
     if not isinstance(compiled, QuantumCircuit):
         raise TypeError(
-            f"compiler must return QuantumCircuit, got {type(compiled).__name__}."
+            "compiler must return QuantumCircuit or TranspileResult, "
+            f"got {type(compiled).__name__}."
         )
-    compiled = _unitary_view(compiled)
+
+    expected_state = quspect_state
+    if final_layout is None:
+        compiled = _unitary_view(compiled)
+    else:
+        width = max(compiled.num_qubits, max(final_layout, default=-1) + 1)
+        compiled = _unitary_view(compiled, num_qubits=width)
+        expected_state = _place_state(quspect_state, final_layout, width)
     compiled_state = np.asarray(simulator.statevector(compiled), dtype=complex)
 
     qasm_fidelity = _state_fidelity(quspect_state, qiskit_state)
-    compilation_fidelity = _state_fidelity(quspect_state, compiled_state)
+    compilation_fidelity = _state_fidelity(expected_state, compiled_state)
 
     return CompilationConsistencyResult(
         original_circuit=original,
@@ -251,11 +288,54 @@ def check_compilation_consistency(
         compilation_fidelity=compilation_fidelity,
         quspect_qiskit_consistent=(1.0 - qasm_fidelity <= tolerance),
         compilation_consistent=(1.0 - compilation_fidelity <= tolerance),
+        final_layout=final_layout,
     )
 
 
-def _unitary_view(circuit: QuantumCircuit) -> QuantumCircuit:
-    """Return a measurement-free view while preserving the circuit width."""
+def _checked_final_layout(layout: Sequence[int], num_qubits: int) -> tuple[int, ...]:
+    """Return ``layout`` once it places each logical qubit on its own qubit."""
+    checked = tuple(layout)
+    if (
+        len(checked) != num_qubits
+        or not all(
+            isinstance(physical, Integral)
+            and not isinstance(physical, bool)
+            and physical >= 0
+            for physical in checked
+        )
+        or len(set(checked)) != len(checked)
+    ):
+        raise ValueError(
+            f"final_layout must place each of the {num_qubits} logical qubits "
+            f"on a distinct non-negative physical qubit, got {list(checked)}."
+        )
+    return tuple(int(physical) for physical in checked)
+
+
+def _place_state(
+    state: NDArray[np.complex128],
+    layout: tuple[int, ...],
+    num_qubits: int,
+) -> NDArray[np.complex128]:
+    """Move qubit ``q`` of ``state`` to qubit ``layout[q]`` of a wider register.
+
+    Qubits of the ``num_qubits``-wide register outside ``layout`` are
+    ``|0>``. Basis indices are little-endian: bit ``q`` is qubit ``q``.
+    """
+    indices = np.arange(state.size)
+    placed_indices = np.zeros_like(indices)
+    for logical, physical in enumerate(layout):
+        placed_indices |= ((indices >> logical) & 1) << physical
+    placed = np.zeros(1 << num_qubits, dtype=complex)
+    placed[placed_indices] = state
+    return placed
+
+
+def _unitary_view(circuit: QuantumCircuit, num_qubits: int = 0) -> QuantumCircuit:
+    """Return a measurement-free view at least ``num_qubits`` wide.
+
+    The view is never narrower than ``circuit`` itself.
+    """
     instructions: list[CircuitInstruction] = []
     measurement_started = False
 
@@ -281,8 +361,9 @@ def _unitary_view(circuit: QuantumCircuit) -> QuantumCircuit:
         instructions,
         name=circuit.name,
     )
-    if circuit.num_qubits > 0 and unitary.num_qubits < circuit.num_qubits:
-        unitary.id(circuit.num_qubits - 1)
+    width = max(circuit.num_qubits, num_qubits)
+    if width > 0 and unitary.num_qubits < width:
+        unitary.id(width - 1)
     if len(unitary) == 0:
         raise ValueError("Circuit must contain at least one unitary instruction.")
     return unitary
