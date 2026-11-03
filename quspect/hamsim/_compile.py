@@ -489,12 +489,14 @@ def _formula_cost(
     steps: int,
     order: int,
     seed: int,
+    target: CompilationTarget | None = None,
     cap: int = 20000,
 ) -> int:
-    """Estimated two-qubit count of the ``steps``-step formula on all-to-all
-    connectivity (network with two settings and the ladder at level 1; the
-    count of large formulas is extrapolated from one and two steps)."""
-    target = _full_target(n)
+    """Estimated two-qubit count of the ``steps``-step formula on ``target``
+    (default all-to-all; network with two settings and the ladder at level
+    1; the count of large formulas is extrapolated from one and two steps)."""
+    if target is None:
+        target = _full_target(n)
 
     def count(k: int, dt: float) -> int:
         merged = merge_commuting(product_formula(terms, dt, k, order), n)
@@ -554,6 +556,7 @@ def select_term_order(
     num_qubits: int | None = None,
     seed: int = 0,
     max_steps: int = 4096,
+    target: CompilationTarget | None = None,
 ) -> TermOrderChoice:
     """Choose the term order of a product formula by its own error estimate and cost.
 
@@ -562,9 +565,11 @@ def select_term_order(
     candidate order this finds the fewest steps meeting ``eps`` by this
     module's error estimate (``error_metric``: simulated state error on its
     own random states, or the commutator bound) and estimates the
-    two-qubit count of that formula on all-to-all connectivity (Pauli
-    network and ladder, see :func:`compile_evolution`); the cheapest order
-    wins (ties: the earlier candidate).
+    two-qubit count of that formula on ``target`` (default all-to-all
+    connectivity; Pauli network and ladder, see :func:`compile_evolution`);
+    the cheapest order wins (ties: the earlier candidate).  The best order
+    can depend on the target: a support-grouped order that saves gates on
+    all-to-all connectivity may need far more routing on a sparse device.
 
     Args:
         hamiltonian: Pauli sum (see :func:`quspect.hamsim.pauli_terms`).
@@ -577,6 +582,8 @@ def select_term_order(
         num_qubits: Number of qubits (default from the Hamiltonian).
         seed: Seed of the cost estimate.
         max_steps: Largest step count tried.
+        target: Compilation target of the cost estimate (default
+            all-to-all connectivity on the Hamiltonian's qubits).
 
     Returns:
         The selected order and the comparison table.
@@ -601,7 +608,7 @@ def select_term_order(
             )
         except ValueError:  # no step count up to max_steps meets eps
             continue
-        cost = _formula_cost(n, ordered, time, r, order, seed)
+        cost = _formula_cost(n, ordered, time, r, order, seed, target)
         table[name] = (r, e, cost)
         if best is None or cost < table[best][2]:
             best = name
@@ -668,7 +675,8 @@ def compile_evolution(
     worst simulated state error over random states and ``|0101…⟩``, up to
     16 qubits), ``"bound"`` (commutator bound, orders 1 and 2) or
     ``"auto"`` (``"state"`` when possible).  ``term_order="auto"`` (needs
-    ``eps``) picks the term order by :func:`select_term_order`.
+    ``eps``) picks the term order by :func:`select_term_order` (with the
+    cost estimated on ``target``).
 
     Args:
         hamiltonian: Pauli sum (see :func:`quspect.hamsim.pauli_terms`).
@@ -740,6 +748,7 @@ def compile_evolution(
             num_qubits=n,
             seed=seed,
             max_steps=max_steps,
+            target=target,
         )
         term_order = choice.term_order
         if steps is None:

@@ -443,6 +443,15 @@ def test_select_term_order_and_auto() -> None:
     )
     with pytest.raises(ValueError):
         compile_evolution(terms, 1.0, steps=2, term_order="auto")
+    # the cost is estimated on the given target
+    chain = CompilationTarget.from_coupling_map(4, line(4), native_gates=GATES)
+    on_line = select_term_order(terms, 1.0, 1e-3, 2, target=chain)
+    assert {k: v[:2] for k, v in on_line.table.items()} == {
+        k: v[:2] for k, v in ch.table.items()
+    }
+    lres = compile_evolution(terms, 1.0, chain, eps=1e-3, order=2, term_order="auto")
+    assert lres.term_order == on_line.term_order
+    assert lres.term_order_table == on_line.table
 
 
 @native_only
