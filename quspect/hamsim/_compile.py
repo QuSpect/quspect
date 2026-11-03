@@ -36,12 +36,13 @@ METHODS = ("network", "ladder")
 #: tried by the network candidate (the cheapest result is kept; see
 #: :func:`~quspect.hamsim.synthesize_network`).  The greedy synthesis is
 #: sensitive to its look-ahead (the best single setting needs 4–12 % more
-#: CX than the best of a 72–108 setting grid); this portfolio was picked
-#: greedily from such grids (all-to-all and device graphs) and comes within
-#: about 1 % of the whole grid.  The block settings (``block_mode=1``) also
-#: consider emitting two-qubit blocks on coupling edges in place or with a
-#: mirror SWAP.  Runs are pruned by branch and bound, so the portfolio costs
-#: far less than its size suggests.
+#: CX than the best of a 72–108 setting grid); the first twelve were picked
+#: greedily from such grids (all-to-all and device graphs, within about 1 %
+#: of the whole grid), the last four complete the earlier default settings.
+#: The block settings (``block_mode=1``) also consider emitting two-qubit
+#: blocks on coupling edges in place or with a mirror SWAP.  Runs are
+#: pruned by branch and bound, so the portfolio costs far less than its
+#: size suggests.
 NETWORK_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = (
     (32, 256, 1024, 850, 0, 1024),
     (64, 64, 512, 1000, 1, 1024),
@@ -55,6 +56,10 @@ NETWORK_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = (
     (64, 64, 1024, 1000, 1, 1024),
     (16, 64, 512, 850, 0, 1024),
     (16, 16, 1024, 850, 1, 1024),
+    (32, 16, 512, 900, 0, 1024),
+    (16, 16, 1024, 1000, 0, 1024),
+    (32, 64, 512, 800, 0, 1024),
+    (16, 64, 512, 800, 0, 1024),
 )
 
 #: The network candidate is abandoned once its CX count exceeds this
@@ -377,7 +382,12 @@ def _compile_rotations(
     if want_ladder and not (large and want_network):
         out.append(ladder())
     if want_network:
-        limit = int(NETWORK_ABORT_RATIO * (out[0].key[0] if out else naive)) + 1
+        # without a ladder candidate the network is the only result: no abort bound
+        limit = 0
+        if out:
+            limit = int(NETWORK_ABORT_RATIO * out[0].key[0]) + 1
+        elif want_ladder:
+            limit = int(NETWORK_ABORT_RATIO * naive) + 1
         net = _network_candidate(
             n,
             terms,
@@ -431,7 +441,9 @@ def _network_candidate(
         for cfg in configs:
             window, front, next_weight, decay, block_mode, block_bias = cfg
             # branch and bound: a run above the best CX count so far cannot win
-            cap = limit if best is None else min(limit, best[0].num_cx)
+            cap = limit
+            if best is not None:
+                cap = best[0].num_cx if cap == 0 else min(cap, best[0].num_cx)
             net = synthesize_network(
                 merged,
                 target.num_qubits,
@@ -583,14 +595,18 @@ def select_term_order(
     best: str | None = None
     for name in candidates:
         ordered = order_terms(terms, name)
-        r, e = _steps_for_eps(
-            n, ordered, time, order, eps, metric, max_steps, reference
-        )
+        try:
+            r, e = _steps_for_eps(
+                n, ordered, time, order, eps, metric, max_steps, reference
+            )
+        except ValueError:  # no step count up to max_steps meets eps
+            continue
         cost = _formula_cost(n, ordered, time, r, order, seed)
         table[name] = (r, e, cost)
         if best is None or cost < table[best][2]:
             best = name
-    assert best is not None
+    if best is None:
+        raise ValueError(f"no term order reaches eps = {eps} within {max_steps} steps")
     r, e, _ = table[best]
     return TermOrderChoice(best, r, e, metric, table)
 
