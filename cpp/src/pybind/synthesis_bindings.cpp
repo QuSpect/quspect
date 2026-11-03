@@ -473,13 +473,17 @@ void BindSynthesis(py::module_& m) {
         "_pauli_network",
         [](int num_qubits, const std::vector<std::pair<int, int>>& edges, const std::vector<int>& active,
            const std::vector<std::vector<int>>& x_qubits, const std::vector<std::vector<int>>& z_qubits, int window,
-           int front, int next_weight, int decay, bool finalize) {
+           int front, int next_weight, int decay, bool finalize, int block_mode, int block_bias, bool finalize_permutation, int cx_limit) {
             PauliNetworkOptions options;
             options.window = window;
             options.front = front;
             options.next_weight = next_weight;
             options.decay = decay;
             options.finalize = finalize;
+            options.block_mode = block_mode;
+            options.block_bias = block_bias;
+            options.finalize_permutation = finalize_permutation;
+            options.cx_limit = cx_limit;
             PauliNetworkResult res;
             {
                 py::gil_scoped_release release;
@@ -491,12 +495,15 @@ void BindSynthesis(py::module_& m) {
             for (const NetGate& g : res.gates) {
                 gates.emplace_back(static_cast<int>(g.kind), g.q0, g.q1, g.rotation, g.axis, g.negate);
             }
-            return py::make_tuple(gates, res.order, res.num_cx, res.finalize_cx);
+            return py::make_tuple(gates, res.order, res.num_cx, res.finalize_cx, res.blocks, res.swap_blocks,
+                                  res.final_perm, res.aborted);
         },
         py::arg("num_qubits"), py::arg("edges"), py::arg("active"), py::arg("x_qubits"), py::arg("z_qubits"),
         py::arg("window"), py::arg("front"), py::arg("next_weight"), py::arg("decay"), py::arg("finalize"),
+        py::arg("block_mode") = 0, py::arg("block_bias") = 1024, py::arg("finalize_permutation") = false,
+        py::arg("cx_limit") = 0,
         "Clifford-frame synthesis of a Pauli rotation sequence on a coupling graph; returns "
-        "(gates, order, num_cx, finalize_cx).");
+        "(gates, order, num_cx, finalize_cx, blocks, swap_blocks, final_perm, aborted).");
     m.def("_merge_commuting_rotations", &MergeCommutingRotations, py::arg("num_qubits"), py::arg("x_qubits"),
           py::arg("z_qubits"), py::arg("span"),
           "Slot of each rotation after merging identical Paulis separated only by commuting rotations.");

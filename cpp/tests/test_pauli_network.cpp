@@ -69,6 +69,13 @@ void Conj(P& p, const NetGate& g, bool inverse) {
             Set(p, c, pc ^ (zt ? 2 : 0));
             break;
         }
+        case NetGateKind::kSwap: {
+            const int a = g.q0, b = g.q1;
+            const int pa = Local(p, a);
+            Set(p, a, Local(p, b));
+            Set(p, b, pa);
+            break;
+        }
         case NetGateKind::kX:
         case NetGateKind::kY:
         case NetGateKind::kZ: {
@@ -124,7 +131,7 @@ void Verify(int n, const std::vector<std::pair<int, int>>& edges, const std::vec
     int count = 0;
     for (std::size_t i = 0; i < res.gates.size(); ++i) {
         const NetGate& g = res.gates[i];
-        if (g.kind == NetGateKind::kCX) {
+        if (g.kind == NetGateKind::kCX || g.kind == NetGateKind::kSwap) {
             EXPECT_TRUE(eset.count({std::min(g.q0, g.q1), std::max(g.q0, g.q1)})) << g.q0 << "-" << g.q1;
             continue;
         }
@@ -156,6 +163,8 @@ void Verify(int n, const std::vector<std::pair<int, int>>& edges, const std::vec
         }
     }
     if (finalized) {
+        // 收尾后框架为置换 final_perm（默认恒等）：q 上的 X / Z 变成 final_perm[q] 上的 X / Z
+        ASSERT_EQ(res.final_perm.size(), static_cast<std::size_t>(n));
         for (int q = 0; q < n; ++q) {
             for (int v : {1, 2}) {
                 P s;
@@ -164,7 +173,7 @@ void Verify(int n, const std::vector<std::pair<int, int>>& edges, const std::vec
                     Conj(s, g, false);
                 }
                 P want;
-                Set(want, q, v);
+                Set(want, res.final_perm[q], v);
                 EXPECT_EQ(s.x, want.x);
                 EXPECT_EQ(s.z, want.z);
                 EXPECT_FALSE(s.neg);
@@ -283,6 +292,76 @@ TEST(PauliNetwork, RejectsBadInput) {
     // 旋转作用在活动集之外
     EXPECT_THROW(RunNet(3, Line(3), {0, 1}, rots), std::invalid_argument);
     EXPECT_THROW(SynthesizePauliNetwork(0, {}, {}, {}, {}, {}), std::invalid_argument);
+}
+
+// 链上的 Heisenberg（XX + YY + ZZ，加纵场）两个 Strang 步：块模式下同一条边上的项原位成块
+std::vector<P> HeisenbergSteps(int n, int steps) {
+    std::vector<P> one;
+    for (int a = 0; a + 1 < n; ++a) {
+        for (char c : {'X', 'Y', 'Z'}) {
+            std::string s(n, 'I');
+            s[a] = s[a + 1] = c;
+            one.push_back(Parse(s));
+        }
+    }
+    for (int a = 0; a < n; ++a) {
+        std::string s(n, 'I');
+        s[a] = 'Z';
+        one.push_back(Parse(s));
+    }
+    std::vector<P> seq;
+    for (int k = 0; k < steps; ++k) {
+        seq.insert(seq.end(), one.begin(), one.end());
+        seq.insert(seq.end(), one.rbegin(), one.rend());
+    }
+    return seq;
+}
+
+TEST(PauliNetwork, BlockModeExact) {
+    const auto rots = HeisenbergSteps(6, 2);
+    PauliNetworkOptions opt;
+    opt.block_mode = 1;
+    const auto res = RunNet(6, Line(6), Range(6), rots, opt);
+    Verify(6, Line(6), rots, res, true);
+    EXPECT_GT(res.blocks, 0);
+    // 偏向块（bias 很小）时也必须精确，且出现带镜像 SWAP 的块（支集不相邻的项）
+    std::vector<P> hop = HeisenbergSteps(5, 1);
+    hop.push_back(Parse("XIIIX"));
+    hop.push_back(Parse("ZIZII"));
+    opt.block_bias = 200;
+    const auto res2 = RunNet(5, Line(5), Range(5), hop, opt);
+    Verify(5, Line(5), hop, res2, true);
+    EXPECT_GT(res2.blocks, 0);
+}
+
+TEST(PauliNetwork, FinalizePermutationExact) {
+    const auto rots = Hopping(7);
+    PauliNetworkOptions opt;
+    opt.finalize_permutation = true;
+    for (int mode : {0, 1}) {
+        opt.block_mode = mode;
+        const auto res = RunNet(7, Line(7), Range(7), rots, opt);
+        Verify(7, Line(7), rots, res, true);
+        std::vector<int> sorted = res.final_perm;
+        std::sort(sorted.begin(), sorted.end());
+        EXPECT_EQ(sorted, Range(7));
+    }
+    const auto mol = Molecule();
+    const auto full = RunNet(4, Full(4), Range(4), mol, opt);
+    Verify(4, Full(4), mol, full, true);
+}
+
+TEST(PauliNetwork, CxLimitAborts) {
+    const auto rots = Hopping(7);
+    PauliNetworkOptions opt;
+    const auto ref = RunNet(7, Line(7), Range(7), rots, opt);
+    EXPECT_FALSE(ref.aborted);
+    opt.cx_limit = ref.num_cx;  // 恰好等于：不中止，结果相同
+    const auto same = RunNet(7, Line(7), Range(7), rots, opt);
+    EXPECT_FALSE(same.aborted);
+    EXPECT_EQ(same.num_cx, ref.num_cx);
+    opt.cx_limit = ref.num_cx / 2;
+    EXPECT_TRUE(RunNet(7, Line(7), Range(7), rots, opt).aborted);
 }
 
 TEST(MergeCommuting, MergesAcrossCommutingOnly) {

@@ -22,14 +22,14 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.hamsim._formulas import Rotation
 
 # NetGateKind of the native core
-_H, _S, _SDG, _CX, _X, _Y, _Z, _ROT = range(8)
+_H, _S, _SDG, _CX, _X, _Y, _Z, _ROT, _SWAP = range(9)
 
 
 def _core() -> Any:
@@ -105,12 +105,24 @@ class NetworkCircuit:
         num_cx: Number of CX gates.
         finalize_cx: CX gates spent on synthesizing the final frame.
         order: Implementation order (indices into the merged rotations).
+        blocks: Two-qubit blocks emitted in place (counted in ``num_cx`` at
+            their estimated synthesis cost, at most 3 CX each).
+        swap_blocks: Blocks of those followed by a mirror SWAP.
+        final_permutation: ``final_permutation[p]`` is the physical qubit
+            that holds, at the end, the state that started on physical
+            qubit ``p`` (identity unless ``finalize_permutation``).
+        aborted: The synthesis stopped at ``cx_limit``; ``circuit`` is
+            incomplete and must not be used.
     """
 
     circuit: QuantumCircuit
     num_cx: int
     finalize_cx: int
     order: list[int]
+    blocks: int = 0
+    swap_blocks: int = 0
+    final_permutation: list[int] = field(default_factory=list)
+    aborted: bool = False
 
 
 def connected_active_set(
@@ -180,6 +192,10 @@ def synthesize_network(
     next_weight: int = 512,
     decay: int = 614,
     finalize: bool = True,
+    block_mode: int = 0,
+    block_bias: int = 1024,
+    finalize_permutation: bool = False,
+    cx_limit: int = 0,
 ) -> NetworkCircuit:
     """Synthesize ``Π exp(-iθ_k P_k)`` on a coupling graph.
 
@@ -196,6 +212,23 @@ def synthesize_network(
         decay: Weight decay per upcoming rotation (1/1024 units).
         finalize: Synthesize the final Clifford frame (``False`` leaves the
             circuit equal to ``F · U`` for the final frame ``F``).
+        block_mode: ``1``: when the frame image of the next rotation is a
+            two-qubit Pauli on a coupling edge, also consider emitting it,
+            together with the front rotations whose images lie on the same
+            edge, as one two-qubit block in place (frame unchanged; the
+            backend synthesizes it with at most 3 CX), or the block followed
+            by a SWAP that is absorbed into the frame (a generic SU(4) block
+            times SWAP still needs 3 CX, so the move is free); the cheapest of
+            frame reduction, block and block + SWAP by the look-ahead score
+            is taken.  ``0``: frame reduction only.
+        block_bias: Weight of the block cost in the comparison (1/1024
+            units; above 1024 favours frame reduction).
+        finalize_permutation: Synthesize the final frame only up to a qubit
+            permutation (each pair of frame rows is reduced onto the cheapest
+            free qubit instead of its own); the permutation is returned in
+            ``final_permutation`` and is absorbed by the output layout.
+        cx_limit: Stop early (``aborted``) once more than ``cx_limit`` CX
+            have been emitted; ``0``: no limit.
 
     Returns:
         The circuit and gate counts.
@@ -204,22 +237,41 @@ def synthesize_network(
     if active is None:
         active = connected_active_set(num_physical, edges, used or [layout[0]])
     xs, zs = _xz(rotations, layout)
-    gates, order, num_cx, fin_cx = _core()._pauli_network(
-        num_physical,
-        [(int(a), int(b)) for a, b in edges],
-        [int(q) for q in active],
-        xs,
-        zs,
-        window,
-        front,
-        next_weight,
-        decay,
-        finalize,
+    gates, order, num_cx, fin_cx, blocks, swap_blocks, perm, aborted = (
+        _core()._pauli_network(
+            num_physical,
+            [(int(a), int(b)) for a, b in edges],
+            [int(q) for q in active],
+            xs,
+            zs,
+            window,
+            front,
+            next_weight,
+            decay,
+            finalize,
+            block_mode,
+            block_bias,
+            finalize_permutation,
+            cx_limit,
+        )
     )
+    if aborted:
+        return NetworkCircuit(
+            QuantumCircuit(),
+            num_cx,
+            fin_cx,
+            list(order),
+            blocks,
+            swap_blocks,
+            list(perm),
+            True,
+        )
     qc = QuantumCircuit()
     for kind, q0, q1, rot, axis, neg in gates:
         if kind == _CX:
             qc.cx(q0, q1)
+        elif kind == _SWAP:
+            qc.swap(q0, q1)
         elif kind == _ROT:
             theta = 2.0 * rotations[rot][2]
             if neg:
@@ -242,7 +294,9 @@ def synthesize_network(
             qc.y(q0)
         else:
             qc.z(q0)
-    return NetworkCircuit(qc, num_cx, fin_cx, list(order))
+    return NetworkCircuit(
+        qc, num_cx, fin_cx, list(order), blocks, swap_blocks, list(perm)
+    )
 
 
 def ladder_circuit(rotations: Sequence[Rotation], num_qubits: int) -> QuantumCircuit:

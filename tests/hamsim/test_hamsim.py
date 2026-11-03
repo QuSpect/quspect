@@ -18,6 +18,7 @@ from quspect.hamsim import (
     order_terms,
     pauli_terms,
     product_formula,
+    select_term_order,
     state_error,
     synthesize_network,
 )
@@ -292,6 +293,47 @@ def test_synthesize_network_deterministic() -> None:
     ]
 
 
+@native_only
+@pytest.mark.parametrize("block_mode", [0, 1])
+def test_synthesize_network_permutation_and_blocks(block_mode: int) -> None:
+    # final frame reduced to a qubit permutation; blocks / mirror SWAPs on the line
+    rots = merge_commuting(
+        product_formula(heisenberg(5) + hubbard_like(), 0.4, 2, 2), 5
+    )
+    net = synthesize_network(
+        rots,
+        5,
+        line(5),
+        list(range(5)),
+        block_mode=block_mode,
+        block_bias=600,
+        finalize_permutation=True,
+    )
+    assert sorted(net.final_permutation) == list(range(5))
+    if block_mode:
+        assert net.blocks > 0
+    for ins in net.circuit.instructions:
+        if len(ins.qubits) == 2:
+            assert abs(ins.qubits[0] - ins.qubits[1]) == 1
+    err = layout_error(
+        net.circuit,
+        5,
+        rotations_unitary(rots, 5),
+        list(range(5)),
+        net.final_permutation,
+    )
+    assert err < 1e-9
+
+
+@native_only
+def test_synthesize_network_cx_limit() -> None:
+    rots = product_formula(hubbard_like(), 0.7, 2, 2)
+    ref = synthesize_network(rots, 5, line(5), list(range(5)))
+    assert not ref.aborted
+    cut = synthesize_network(rots, 5, line(5), list(range(5)), cx_limit=ref.num_cx // 3)
+    assert cut.aborted and not cut.circuit.instructions
+
+
 def test_ladder_circuit_matches_rotations() -> None:
     rots = product_formula(hubbard_like(), 0.3, 1, 1)
     u = circuit_unitary(ladder_circuit(rots, 5), 5)
@@ -372,6 +414,68 @@ def test_compile_evolution_eps_meets_target() -> None:
     assert bres.error_metric == "bound" and bres.steps >= 1
 
 
+@native_only
+def test_select_term_order_and_auto() -> None:
+    terms = heisenberg(4, periodic=True) + [
+        ("Z", (q,), 0.3 * (q + 1)) for q in range(4)
+    ]
+    ch = select_term_order(terms, 1.0, 1e-3, 2)
+    assert set(ch.table) == {"input", "support"}
+    assert ch.term_order in ch.table and ch.error_metric == "state"
+    steps, err, cost = ch.table[ch.term_order]
+    assert ch.steps == steps and err <= 1e-3
+    assert cost == min(c for _, _, c in ch.table.values())
+    for name, (r, e, _) in ch.table.items():
+        assert e == state_error(
+            4,
+            order_terms(terms, name),
+            1.0,
+            product_formula(order_terms(terms, name), 1.0, r, 2),
+        )
+    res = compile_evolution(terms, 1.0, eps=1e-3, order=2, term_order="auto")
+    assert res.term_order == ch.term_order and res.steps == ch.steps
+    assert res.term_order_table == ch.table
+    big = max(4, 1 + max(max(i.qubits) for i in res.circuit.instructions))
+    exact = hamiltonian_unitary(terms, 1.0, 4)
+    assert (
+        layout_error(res.circuit, big, exact, res.initial_layout, res.final_layout)
+        <= 1.5e-3
+    )
+    with pytest.raises(ValueError):
+        compile_evolution(terms, 1.0, steps=2, term_order="auto")
+
+
+@native_only
+def test_compile_evolution_fixed_layout_and_config() -> None:
+    # the selected network layout and setting reproduce the same circuit
+    terms = hubbard_like()
+    target = CompilationTarget.from_coupling_map(6, line(6), native_gates=GATES)
+    res = compile_evolution(terms, 0.8, target, steps=2, order=2, methods=("network",))
+    assert res.network_layout is not None and res.network_config is not None
+    again = compile_evolution(
+        terms,
+        0.8,
+        target,
+        steps=2,
+        order=2,
+        methods=("network",),
+        layouts=[res.network_layout],
+        network_configs=[res.network_config],
+    )
+    assert again.two_qubit_gates == res.two_qubit_gates
+    assert again.initial_layout == res.initial_layout
+    assert again.final_layout == res.final_layout
+    old = compile_evolution(
+        terms, 0.8, target, steps=2, order=2, finalize_permutation=False
+    )
+    want = rotations_unitary(old.rotations, 5)
+    big = max(6, 1 + max(max(i.qubits) for i in old.circuit.instructions))
+    assert (
+        layout_error(old.circuit, big, want, old.initial_layout, old.final_layout)
+        < 1e-8
+    )
+
+
 def test_compile_evolution_rejects_bad_arguments() -> None:
     terms = [("ZZ", (0, 1), 1.0)]
     small = CompilationTarget.from_coupling_map(1, [], native_gates=GATES)
@@ -432,8 +536,8 @@ def golden_digests() -> dict[str, str]:
 
 # 由 ``python tests/hamsim/test_hamsim.py`` 生成。
 GOLDEN: dict[str, str] = {
-    "hubbard_full_o2": "f198dbb1ec496595",
-    "hubbard_line_o4": "88565bc524020120",
+    "hubbard_full_o2": "79e0ebf6030b9d14",
+    "hubbard_line_o4": "fa2fcb3342db5661",
     "heisenberg_grid_o2": "b398768aca1185ed",
 }
 

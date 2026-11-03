@@ -22,8 +22,14 @@ namespace quspect::native::synthesis {
 //   * 选择：在可选门中取使 Q 与之后 window 个旋转的估计代价（支集在图上的 Steiner 树估计，
 //     相邻 1 个 CX、距离 d 记 2d − 1）加权和最小者；下一个旋转从"对易前沿"（与之前所有未实现
 //     旋转都对易的旋转，限前 front 个）中取代价最小者。
-//   * 收尾（finalize）：最后把框架 F 本身在同一张图上综合掉（逐个取活动子图的非割点 q，把
-//     F X_q F†、F Z_q F† 约化回 X_q、Z_q），线路因此精确等于旋转之积（不留 Clifford 尾巴）。
+//   * 块（block_mode = 1）：当前旋转的像是一条耦合边 (a, b) 上的两比特 Pauli 时，把对易前沿中像也在
+//     {a, b} 上、可以提前的旋转并成一个两比特块，在原位输出（不改变框架，交给后端合成为 ≤ 3 个 CX 的
+//     SU(4) 块）；或者在块后再加一个 SWAP 并把它记进框架（"镜像门"：泛型 SU(4) 块乘 SWAP 仍是 3 个 CX，
+//     等于免费移动两个比特上的 Pauli）。三种做法（框架约化 / 原位块 / 块 + SWAP）按同一个前瞻代价比较。
+//   * 收尾（finalize）：最后把框架 F 本身在同一张图上综合掉（逐个取活动子图的非割点 v，把一对行
+//     F X_q F†、F Z_q F† 约化回 X_v、Z_v），线路因此精确等于旋转之积（不留 Clifford 尾巴）。
+//     finalize_permutation 时 q 可以不等于 v（取约化代价最小的行对），框架只还原到一个比特置换，
+//     由输出布局吸收（final_perm）。
 // 全部计分为整数运算，结果与平台无关（逐位一致）。
 
 struct PauliNetworkOptions {
@@ -32,12 +38,16 @@ struct PauliNetworkOptions {
     int next_weight = 512;     // 第一个向后看旋转的权重（单位 1/1024；当前旋转为 1024）
     int decay = 614;           // 之后每个位置权重乘 decay/1024
     bool finalize = true;      // 是否把最终框架综合掉（false 时输出 E = F·U，框架见 frame）
+    int block_mode = 0;        // 0：只用框架约化；1：边上的两比特块（原位 / 加镜像 SWAP）参与比较
+    int block_bias = 1024;     // 块代价的权重（单位 1/1024；> 1024 偏向框架约化）
+    bool finalize_permutation = false;  // 收尾只还原到比特置换（final_perm），由布局吸收
+    int cx_limit = 0;          // > 0：CX 数超过它时提前停止（aborted，输出不完整）
 };
 
-enum class NetGateKind : std::uint8_t { kH = 0, kS = 1, kSdg = 2, kCX = 3, kX = 4, kY = 5, kZ = 6, kRotation = 7 };
+enum class NetGateKind : std::uint8_t { kH = 0, kS = 1, kSdg = 2, kCX = 3, kX = 4, kY = 5, kZ = 6, kRotation = 7, kSwap = 8 };
 
 // 输出门。kRotation：第 rotation 个输入旋转在比特 q0 上沿 axis（'X'/'Y'/'Z'）实现，
-// negate 为真时角度取反（框架像带负号）。
+// negate 为真时角度取反（框架像带负号）。kSwap：(q0, q1) 上的 SWAP（只出现在块之后，由后端与块合并）。
 struct NetGate {
     NetGateKind kind;
     int q0;
@@ -50,8 +60,13 @@ struct NetGate {
 struct PauliNetworkResult {
     std::vector<NetGate> gates;
     std::vector<int> order;  // 旋转的实际实现顺序（输入编号）
-    int num_cx = 0;
+    int num_cx = 0;       // CX 数；块按估计的合成代价计（≤ 3，块 + SWAP 记 3）
     int finalize_cx = 0;  // 其中收尾框架综合的 CX 数
+    int blocks = 0;       // 原位输出的块数（其中 swap_blocks 个带镜像 SWAP）
+    int swap_blocks = 0;
+    // 收尾后的置换：初始在物理比特 q 上的态最终在 final_perm[q] 上（finalize_permutation 为假时恒等）
+    std::vector<int> final_perm;
+    bool aborted = false;  // 超过 cx_limit 提前停止
 };
 
 // paulis[k] = (x 位, z 位)，比特编号 < num_qubits ≤ 64·words。所有旋转的支集必须在 active 内；

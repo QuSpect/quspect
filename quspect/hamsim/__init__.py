@@ -6,7 +6,9 @@ product formula (order, steps, term order; optionally the fewest steps that
 meet an error target) and compiles its rotations exactly, by Pauli-network
 synthesis on the coupling graph (:func:`synthesize_network`) or by the
 textbook ladder circuit through :func:`~quspect.transpiler.transpile`,
-keeping the cheaper one.
+keeping the cheaper one.  :func:`select_term_order` (``term_order="auto"``)
+chooses the term order of the formula by this module's own error estimate
+(steps for ``eps``) and estimated gate count.
 
 Example:
     >>> from quspect.hamsim import compile_evolution
@@ -20,7 +22,12 @@ Example:
     2
 """
 
-from quspect.hamsim._compile import EvolutionResult, compile_evolution
+from quspect.hamsim._compile import (
+    EvolutionResult,
+    TermOrderChoice,
+    compile_evolution,
+    select_term_order,
+)
 from quspect.hamsim._formulas import (
     Rotation,
     commutator_bound,
@@ -43,6 +50,7 @@ __all__ = [
     "NetworkCircuit",
     "PauliTerm",
     "Rotation",
+    "TermOrderChoice",
     "commutator_bound",
     "compile_evolution",
     "connected_active_set",
@@ -52,6 +60,7 @@ __all__ = [
     "order_terms",
     "pauli_terms",
     "product_formula",
+    "select_term_order",
     "state_error",
     "synthesize_network",
 ]
