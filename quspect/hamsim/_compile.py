@@ -82,26 +82,23 @@ EXTENDED_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = tuple(
     if cfg not in NETWORK_CONFIGS
 )
 
-#: Work budget of the default portfolio for one formula.  A network run's
-#: work is its scoring work (:attr:`~quspect.hamsim.NetworkCircuit.work`,
-#: the inner iterations of the support cost estimates) plus ``(rotations
-#: processed + CX emitted) × (window + 16)``, about a nanosecond per unit
-#: on one core; it is measured after the run from deterministic counts, so
-#: every decision below — and the result — is the same on every machine.  The portfolio runs in two
-#: stages.  Stage 1, within half of the budget: :data:`NETWORK_CONFIGS` on
-#: every graph and layout (setting-major priority), all in full when the
-#: work predicted from the first run fits, otherwise screened: each run on
-#: the first ``1 / divisor`` of the rotations (``divisor`` from
-#: :data:`SCREEN_DIVISOR` up to 16 times it, the smallest that fits; as many
-#: runs as fit) and the :data:`SCREEN_KEEP` cheapest distinct prefixes in
-#: full.  Stage 2, within the rest: the settings of
-#: :data:`EXTENDED_CONFIGS` on the :data:`STAGE2_GROUPS` best graphs and
-#: layouts of stage 1 only, screened the same way.  In every case measured
-#: the best stage-1 layout was the best layout overall and a quarter of the
-#: formula kept the best runs among the survivors, so this keeps the
-#: quality of trying every setting on every layout at a fraction of its
-#: work, and bounds the work of very large formulas (e.g. 100-qubit
-#: lattices on a line) that a fixed portfolio cannot.  Small formulas (see
+#: Work budget of the default portfolio for one formula.  A network run's work is its
+#: scoring work (:attr:`~quspect.hamsim.NetworkCircuit.work`, the inner iterations of
+#: the support cost estimates) plus ``(rotations processed + CX emitted) × (window +
+#: 16)``, about a nanosecond per unit on one core; it is measured after the run from
+#: deterministic counts, so every decision below — and the result — is the same on every
+#: machine.  The portfolio runs in two stages.  Stage 1, within half of the budget:
+#: :data:`NETWORK_CONFIGS` on every graph and layout (setting-major priority), all in
+#: full when the work predicted from the first run fits, otherwise screened: each run on
+#: the first ``1 / divisor`` of the rotations (``divisor`` from :data:`SCREEN_DIVISOR`
+#: up to 16 times it, the smallest that fits; as many runs as fit) and the
+#: :data:`SCREEN_KEEP` cheapest distinct prefixes in full.  Stage 2, within the rest:
+#: the settings of :data:`EXTENDED_CONFIGS` on the :data:`STAGE2_GROUPS` best graphs and
+#: layouts of stage 1 only, screened the same way.  In every case measured the best
+#: stage-1 layout was the best layout overall and a quarter of the formula kept the best
+#: runs among the survivors, so this keeps the quality of trying every setting on every
+#: layout at a fraction of its work, and bounds the work of very large formulas (e.g.
+#: 100-qubit lattices on a line) that a fixed portfolio cannot.  Small formulas (see
 #: :data:`EXHAUSTIVE_WORK`) still try everything.
 WORK_BUDGET = 60_000_000_000
 

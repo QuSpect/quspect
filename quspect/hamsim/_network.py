@@ -472,7 +472,15 @@ def synthesize_network(
         else:
             qc.z(q0)
     return NetworkCircuit(
-        qc, num_cx, fin_cx, list(order), blocks, swap_blocks, list(perm), False, int(work)
+        qc,
+        num_cx,
+        fin_cx,
+        list(order),
+        blocks,
+        swap_blocks,
+        list(perm),
+        False,
+        int(work),
     )
 
 
