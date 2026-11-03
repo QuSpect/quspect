@@ -8,7 +8,10 @@ synthesis on the coupling graph (:func:`synthesize_network`) or by the
 textbook ladder circuit through :func:`~quspect.transpiler.transpile`,
 keeping the cheaper one.  :func:`select_term_order` (``term_order="auto"``)
 chooses the term order of the formula by this module's own error estimate
-(steps for ``eps``) and estimated gate count.
+(steps for ``eps``) and compiled gate count.  The search over synthesis
+settings, layouts and subgraphs (device, a long path, a cycle for periodic
+chains) runs within a deterministic work budget, and very large formulas
+are compiled as repeated one-step blocks, so the compile time is bounded.
 
 Example:
     >>> from quspect.hamsim import compile_evolution
@@ -39,6 +42,7 @@ from quspect.hamsim._formulas import (
 from quspect.hamsim._network import (
     NetworkCircuit,
     connected_active_set,
+    cycle_of_length,
     ladder_circuit,
     long_path,
     merge_commuting,
@@ -55,6 +59,7 @@ __all__ = [
     "commutator_bound",
     "compile_evolution",
     "connected_active_set",
+    "cycle_of_length",
     "ladder_circuit",
     "long_path",
     "merge_commuting",

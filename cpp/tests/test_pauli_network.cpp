@@ -1,6 +1,7 @@
 // Pauli 旋转网络综合的 gtest：每个输出旋转在原始坐标下实现的 Pauli（含符号）等于输入，
 // 实现顺序只交换对易的旋转，CX 只在耦合边上，收尾后框架为恒等；以及精确合并与参数检查。
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <set>
 #include <stdexcept>
@@ -263,6 +264,22 @@ TEST(PauliNetwork, HoppingChainExactAndDeterministic) {
     ASSERT_EQ(a.gates.size(), b.gates.size());
     EXPECT_EQ(a.num_cx, b.num_cx);
     EXPECT_EQ(a.order, b.order);
+}
+
+TEST(PauliNetwork, WorkCounterDeterministicAndGrowing) {
+    // 计分工作量只计数、不影响结果：同一输入相同；序列更长工作量更大
+    const auto rots = Hopping(7);
+    std::vector<P> seq;
+    for (int rep = 0; rep < 3; ++rep) {
+        seq.insert(seq.end(), rots.begin(), rots.end());
+    }
+    const auto a = RunNet(7, Line(7), Range(7), seq);
+    const auto b = RunNet(7, Line(7), Range(7), seq);
+    EXPECT_GT(a.work, 0);
+    EXPECT_EQ(a.work, b.work);
+    const std::vector<P> half(seq.begin(), seq.begin() + static_cast<std::ptrdiff_t>(seq.size() / 2));
+    const auto c = RunNet(7, Line(7), Range(7), half);
+    EXPECT_LT(c.work, a.work);
 }
 
 TEST(PauliNetwork, AncillaInActiveSetAndUnfinalized) {
