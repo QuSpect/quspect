@@ -180,6 +180,62 @@ def connected_active_set(
     return sorted(active)
 
 
+def long_path(
+    num_qubits: int, edges: Sequence[tuple[int, int]], *, starts: int = 8
+) -> list[int]:
+    """A long simple path on a coupling graph (a Hamiltonian path when found).
+
+    Greedy depth-first walks by Warnsdorff's rule (always step to the
+    unvisited neighbour with the fewest unvisited neighbours, smallest
+    index on ties) from the ``starts`` lowest-degree qubits; the longest
+    walk is returned (ties: the first).  On a square grid this is the
+    serpentine path; on heavy-hex lattices it follows the long rows.
+    Deterministic.
+
+    Args:
+        num_qubits: Number of physical qubits.
+        edges: Coupling edges (undirected).
+        starts: Number of start qubits tried.
+
+    Returns:
+        The physical qubits along the path.
+    """
+    adj: list[list[int]] = [[] for _ in range(num_qubits)]
+    for a, b in edges:
+        if a != b:
+            adj[a].append(b)
+            adj[b].append(a)
+    for row in adj:
+        row[:] = sorted(set(row))
+    nodes = [v for v in range(num_qubits) if adj[v]]
+    if not nodes:
+        return [0] if num_qubits else []
+    nodes.sort(key=lambda v: (len(adj[v]), v))
+    best: list[int] = []
+    for s in nodes[: max(1, starts)]:
+        path = [s]
+        seen = [False] * num_qubits
+        seen[s] = True
+        free = [len(adj[v]) for v in range(num_qubits)]  # unvisited neighbours
+        for w in adj[s]:
+            free[w] -= 1
+        while True:
+            u = path[-1]
+            nxt = -1
+            for v in adj[u]:
+                if not seen[v] and (nxt < 0 or free[v] < free[nxt]):
+                    nxt = v
+            if nxt < 0:
+                break
+            path.append(nxt)
+            seen[nxt] = True
+            for w in adj[nxt]:
+                free[w] -= 1
+        if len(path) > len(best):
+            best = path
+    return best
+
+
 def synthesize_network(
     rotations: Sequence[Rotation],
     num_physical: int,

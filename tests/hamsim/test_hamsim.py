@@ -14,6 +14,7 @@ from quspect.hamsim import (
     compile_evolution,
     connected_active_set,
     ladder_circuit,
+    long_path,
     merge_commuting,
     order_terms,
     pauli_terms,
@@ -37,6 +38,10 @@ _PAULI = {
 }
 
 GATES = {"cz", "h", "rz", "s", "sdg", "x", "y", "z"}
+
+#: Fast compile options for the term-order selection tests (it compiles every
+#: candidate formula in full).
+FAST = {"network_configs": [(16, 64, 512, 850, 1, 1024)], "ladder_level": 1}
 
 
 def circuit_unitary(circuit: QuantumCircuit, num_qubits: int) -> np.ndarray:
@@ -419,7 +424,7 @@ def test_select_term_order_and_auto() -> None:
     terms = heisenberg(4, periodic=True) + [
         ("Z", (q,), 0.3 * (q + 1)) for q in range(4)
     ]
-    ch = select_term_order(terms, 1.0, 1e-3, 2)
+    ch = select_term_order(terms, 1.0, 1e-3, 2, compile_options=FAST)
     assert set(ch.table) == {"input", "support"}
     assert ch.term_order in ch.table and ch.error_metric == "state"
     steps, err, cost = ch.table[ch.term_order]
@@ -432,7 +437,7 @@ def test_select_term_order_and_auto() -> None:
             1.0,
             product_formula(order_terms(terms, name), 1.0, r, 2),
         )
-    res = compile_evolution(terms, 1.0, eps=1e-3, order=2, term_order="auto")
+    res = compile_evolution(terms, 1.0, eps=1e-3, order=2, term_order="auto", **FAST)
     assert res.term_order == ch.term_order and res.steps == ch.steps
     assert res.term_order_table == ch.table
     big = max(4, 1 + max(max(i.qubits) for i in res.circuit.instructions))
@@ -445,11 +450,13 @@ def test_select_term_order_and_auto() -> None:
         compile_evolution(terms, 1.0, steps=2, term_order="auto")
     # the cost is estimated on the given target
     chain = CompilationTarget.from_coupling_map(4, line(4), native_gates=GATES)
-    on_line = select_term_order(terms, 1.0, 1e-3, 2, target=chain)
+    on_line = select_term_order(terms, 1.0, 1e-3, 2, target=chain, compile_options=FAST)
     assert {k: v[:2] for k, v in on_line.table.items()} == {
         k: v[:2] for k, v in ch.table.items()
     }
-    lres = compile_evolution(terms, 1.0, chain, eps=1e-3, order=2, term_order="auto")
+    lres = compile_evolution(
+        terms, 1.0, chain, eps=1e-3, order=2, term_order="auto", **FAST
+    )
     assert lres.term_order == on_line.term_order
     assert lres.term_order_table == on_line.table
 
@@ -485,6 +492,162 @@ def test_compile_evolution_fixed_layout_and_config() -> None:
     )
 
 
+def _grid_edges(rows: int, cols: int) -> list[tuple[int, int]]:
+    out = []
+    for r in range(rows):
+        for c in range(cols):
+            q = r * cols + c
+            if c + 1 < cols:
+                out.append((q, q + 1))
+            if r + 1 < rows:
+                out.append((q, q + cols))
+    return out
+
+
+def test_long_path_grid_and_tree() -> None:
+    edges = _grid_edges(3, 4)
+    path = long_path(12, edges)
+    assert sorted(path) == list(range(12))  # Hamiltonian path of the grid
+    es = {frozenset(e) for e in edges}
+    assert all(frozenset(p) in es for p in zip(path, path[1:], strict=False))
+    assert long_path(12, edges) == path  # deterministic
+    star = [(0, 1), (0, 2), (0, 3)]
+    assert len(long_path(4, star)) == 3
+    assert long_path(3, []) == [0]
+
+
+@native_only
+def test_compile_evolution_path_subgraph() -> None:
+    # a Jordan–Wigner chain on a grid: the network may run on a long path of it
+    terms = hubbard_like()
+    edges = _grid_edges(2, 4)
+    grid = CompilationTarget.from_coupling_map(8, edges, native_gates=GATES)
+    res = compile_evolution(
+        terms,
+        0.7,
+        grid,
+        steps=3,
+        order=2,
+        methods=("network",),
+        network_graphs=("path",),
+    )
+    assert res.method == "network" and res.network_graph == "path"
+    path = long_path(8, edges)
+    on_path = {frozenset(e) for e in zip(path, path[1:], strict=False)}
+    for ins in res.circuit.instructions:
+        if len(ins.qubits) == 2:
+            assert frozenset(ins.qubits) in on_path
+    want = rotations_unitary(res.rotations, 5)
+    assert (
+        layout_error(res.circuit, 8, want, res.initial_layout, res.final_layout) < 1e-8
+    )
+    both = compile_evolution(terms, 0.7, grid, steps=3, order=2, methods=("network",))
+    dev = compile_evolution(
+        terms,
+        0.7,
+        grid,
+        steps=3,
+        order=2,
+        methods=("network",),
+        network_graphs=("device",),
+    )
+    assert both.two_qubit_gates <= min(dev.two_qubit_gates, res.two_qubit_gates)
+    again = compile_evolution(
+        terms,
+        0.7,
+        grid,
+        steps=3,
+        order=2,
+        methods=("network",),
+        layouts=[res.network_layout],
+        network_configs=[res.network_config],
+        network_graphs=[res.network_graph],
+    )
+    assert again.two_qubit_gates == res.two_qubit_gates
+    # all-to-all connectivity has no path variant
+    full = compile_evolution(terms, 0.7, steps=1, order=2, network_graphs=("path",))
+    assert full.method == "ladder" or full.network_graph == "device"
+    with pytest.raises(ValueError):
+        compile_evolution(terms, 0.7, grid, steps=1, network_graphs=("tree",))
+
+
+@native_only
+def test_default_portfolio_extends_within_budget() -> None:
+    from quspect.hamsim._compile import NETWORK_CONFIGS
+
+    terms = hubbard_like()
+    base = compile_evolution(
+        terms,
+        0.8,
+        steps=2,
+        order=2,
+        methods=("network",),
+        network_configs=NETWORK_CONFIGS,
+    )
+    ext = compile_evolution(terms, 0.8, steps=2, order=2, methods=("network",))
+    assert ext.two_qubit_gates <= base.two_qubit_gates
+    none = compile_evolution(
+        terms,
+        0.8,
+        steps=2,
+        order=2,
+        methods=("network",),
+        network_configs=None,
+    )
+    assert none.two_qubit_gates == ext.two_qubit_gates
+
+
+@native_only
+def test_select_term_order_compiles_candidates() -> None:
+    terms = heisenberg(4, periodic=True) + [
+        ("Z", (q,), 0.3 * (q + 1)) for q in range(4)
+    ]
+    chain = CompilationTarget.from_coupling_map(4, line(4), native_gates=GATES)
+    ch = select_term_order(terms, 1.0, 1e-3, 2, target=chain, compile_options=FAST)
+    assert ch.cost == "compile"
+    for name, (r, _, c) in ch.table.items():
+        got = ch.results[name]
+        assert got.steps == r and got.term_order == name
+        assert c == got.two_qubit_gates
+        fixed = compile_evolution(
+            terms, 1.0, chain, steps=r, order=2, term_order=name, **FAST
+        )
+        assert fixed.two_qubit_gates == c  # same options, same compilation
+    best = min(ch.table, key=lambda k: (ch.table[k][2], list(ch.table).index(k)))
+    assert ch.term_order == best
+    res = compile_evolution(
+        terms, 1.0, chain, eps=1e-3, order=2, term_order="auto", **FAST
+    )
+    assert res.two_qubit_gates == ch.table[ch.term_order][2]
+    assert res.error_estimate == ch.error_estimate
+    est = select_term_order(terms, 1.0, 1e-3, 2, target=chain, cost="estimate")
+    assert est.cost == "estimate" and not est.results
+    assert {k: v[:2] for k, v in est.table.items()} == {
+        k: v[:2] for k, v in ch.table.items()
+    }
+    with pytest.raises(ValueError):
+        select_term_order(terms, 1.0, 1e-3, 2, cost="exact")
+    with pytest.raises(ValueError):
+        select_term_order(terms, 1.0, 1e-3, 2, compile_options={"window": 3})
+
+
+@native_only
+def test_select_term_order_extrapolates_long_formulas(monkeypatch) -> None:
+    from quspect.hamsim import _compile
+
+    monkeypatch.setattr(_compile, "SELECT_FULL_CX", 10)
+    terms = heisenberg(4) + [("Z", (q,), 0.2) for q in range(4)]
+    ch = select_term_order(terms, 3.0, 1e-4, 2)
+    for name, (r, _, c) in ch.table.items():
+        assert r > 4
+        two, four = ch.results[name]
+        assert (two.steps, four.steps) == (2, 4)
+        assert c == _compile._extrapolate(two.two_qubit_gates, four.two_qubit_gates, r)
+        assert two.method == four.method
+    assert _compile._extrapolate(10, 20, 6) == 30
+    assert _compile._extrapolate(10, 21, 7) == 38  # 10 + 5 * 11 / 2 = 37.5
+
+
 def test_compile_evolution_rejects_bad_arguments() -> None:
     terms = [("ZZ", (0, 1), 1.0)]
     small = CompilationTarget.from_coupling_map(1, [], native_gates=GATES)
@@ -509,6 +672,9 @@ def _golden_cases():
     full = None
     line6 = CompilationTarget.from_coupling_map(6, line(6), native_gates=GATES)
     grid = CompilationTarget.from_coupling_map(6, GRID_2X3, native_gates=GATES)
+    grid8 = CompilationTarget.from_coupling_map(
+        8, _grid_edges(2, 4), native_gates=GATES
+    )
     return {
         "hubbard_full_o2": (hubbard_like(), 0.9, full, 2, 2, "input"),
         "hubbard_line_o4": (hubbard_like(), 0.9, line6, 1, 4, "input"),
@@ -520,6 +686,7 @@ def _golden_cases():
             2,
             "support",
         ),
+        "hubbard_grid8_o2": (hubbard_like(), 0.7, grid8, 3, 2, "input"),
     }
 
 
@@ -546,8 +713,9 @@ def golden_digests() -> dict[str, str]:
 # 由 ``python tests/hamsim/test_hamsim.py`` 生成。
 GOLDEN: dict[str, str] = {
     "hubbard_full_o2": "79e0ebf6030b9d14",
-    "hubbard_line_o4": "fa2fcb3342db5661",
+    "hubbard_line_o4": "43357cacfad3e2b6",
     "heisenberg_grid_o2": "b398768aca1185ed",
+    "hubbard_grid8_o2": "3d32dc83bcb60154",
 }
 
 
