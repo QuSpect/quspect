@@ -13,6 +13,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -129,6 +130,11 @@ public:
         SetLocal(i, c, nc);
         SetLocal(i, t, nt);
     }
+    void Swap(int i, int a, int b) {
+        const int pa = Local(i, a);
+        SetLocal(i, a, Local(i, b));
+        SetLocal(i, b, pa);
+    }
     void PauliGate(int i, int q, int g) {  // 用 Pauli g 共轭：与 g 反对易时变号
         const int p = Local(i, q);
         if (p != kI && Anti1(p, g)) {
@@ -242,6 +248,9 @@ void ApplyElem(PauliTable& t, int i, const Elem& e) {
             break;
         case NetGateKind::kZ:
             t.PauliGate(i, e.q0, kZ);
+            break;
+        case NetGateKind::kSwap:
+            t.Swap(i, e.q0, e.q1);
             break;
         default:
             break;
@@ -422,6 +431,12 @@ std::int64_t SupportCost(const Graph& g, const std::vector<int>& s) {
     return total;
 }
 
+// 计分缓存的键：候选门只改变 (a, b) 两个比特，支集变化由 (行, a, b, a 是否在支集, b 是否在支集) 决定。
+inline std::uint64_t MemoKey(int row, int a, int b, bool ain, bool bin) {
+    return (static_cast<std::uint64_t>(row + 1) << 42) | (static_cast<std::uint64_t>(a) << 22) |
+           (static_cast<std::uint64_t>(b) << 2) | (ain ? 2U : 0U) | (bin ? 1U : 0U);
+}
+
 class Synthesizer {
 public:
     Synthesizer(int n, const std::vector<std::pair<int, int>>& edges, const std::vector<int>& active,
@@ -473,6 +488,9 @@ public:
         std::vector<int> window;
         std::vector<std::int64_t> wcost;
         while (!remaining.empty()) {
+            if (Aborted()) {
+                return std::move(result_);
+            }
             // 对易前沿中代价最小者
             const int lim = std::min(options_.front, static_cast<int>(remaining.size()));
             int pick_pos = -1;
@@ -509,6 +527,10 @@ public:
                 cur_.Support(remaining[pos], supp);
                 wcost.push_back(SupportCost(graph_, supp));
             }
+            if (options_.block_mode != 0 && TryBlock(pick_pos, remaining, window, wcost)) {
+                materialize();
+                continue;
+            }
             ReduceRotation(k, window, wcost);
             cur_.Support(k, supp);
             const int q = supp.front();
@@ -523,6 +545,11 @@ public:
             const int before = result_.num_cx;
             Finalize();
             result_.finalize_cx = result_.num_cx - before;
+        } else {
+            result_.final_perm.resize(graph_.n());
+            for (int q = 0; q < graph_.n(); ++q) {
+                result_.final_perm[q] = q;
+            }
         }
         return std::move(result_);
     }
@@ -696,39 +723,67 @@ private:
         }
     }
 
-    void ReduceRotation(int k, const std::vector<int>& window, std::vector<std::int64_t>& wcost) {
-        std::vector<Candidate> cands;
-        std::vector<int> supp;
-        std::vector<std::int64_t> weights(window.size());
+    std::vector<std::int64_t> Weights(std::size_t count) const {
+        std::vector<std::int64_t> weights(count);
         std::int64_t w = options_.next_weight;
-        for (std::size_t j = 0; j < window.size(); ++j) {
+        for (std::size_t j = 0; j < count; ++j) {
             weights[j] = w;
             w = (w * options_.decay) / 1024;
         }
+        return weights;
+    }
+
+    // 候选门 c 作用后第 i 行（表 t）的支集代价；memo 按 (row, a, b, 成员) 缓存。
+    std::int64_t CostAfter(const PauliTable& t, int i, int row, const Candidate& c,
+                           std::unordered_map<std::uint64_t, std::int64_t>& memo, std::vector<int>& supp) {
+        Preview(t, i, c);
+        const int a = c.g[0].a;
+        const int b = c.g[0].b;
+        const std::uint64_t key = MemoKey(row, a, b, scratch_.Touches(0, a), scratch_.Touches(0, b));
+        const auto it = memo.find(key);
+        if (it != memo.end()) {
+            return it->second;
+        }
+        scratch_.Support(0, supp);
+        const std::int64_t v = SupportCost(graph_, supp);
+        memo.emplace(key, v);
+        return v;
+    }
+
+    // 候选的前瞻代价：1024 × 约化后 k 的代价 + Σ 权重 × 窗口中旋转的代价变化。
+    std::int64_t ScoreCandidate(int k, const Candidate& cand, const std::vector<int>& window,
+                                const std::vector<std::int64_t>& wcost, const std::vector<std::int64_t>& weights,
+                                std::unordered_map<std::uint64_t, std::int64_t>& memo, std::vector<int>& supp) {
+        std::int64_t score = 1024 * CostAfter(cur_, k, -1, cand, memo, supp);
+        for (std::size_t j = 0; j < window.size(); ++j) {
+            const int r = window[j];
+            bool touched = false;
+            for (int s = 0; s < cand.count && !touched; ++s) {
+                touched = cur_.Touches(r, cand.g[s].a) || cur_.Touches(r, cand.g[s].b);
+            }
+            if (!touched) {
+                continue;
+            }
+            score += weights[j] * (CostAfter(cur_, r, static_cast<int>(j), cand, memo, supp) - wcost[j]);
+        }
+        return score;
+    }
+
+    void ReduceRotation(int k, const std::vector<int>& window, std::vector<std::int64_t>& wcost) {
+        std::vector<Candidate> cands;
+        std::vector<int> supp;
+        const std::vector<std::int64_t> weights = Weights(window.size());
+        std::unordered_map<std::uint64_t, std::int64_t> memo;
         while (cur_.Weight(k) > 1) {
             Candidates(cur_, k, -1, -1, cands);
             if (cands.empty()) {
                 throw std::logic_error("pauli network: no reducing gate (disconnected support)");
             }
+            memo.clear();
             std::size_t best = 0;
             std::int64_t best_score = 0;
             for (std::size_t c = 0; c < cands.size(); ++c) {
-                Preview(cur_, k, cands[c]);
-                scratch_.Support(0, supp);
-                std::int64_t score = 1024 * SupportCost(graph_, supp);
-                for (std::size_t j = 0; j < window.size(); ++j) {
-                    const int r = window[j];
-                    bool touched = false;
-                    for (int s = 0; s < cands[c].count && !touched; ++s) {
-                        touched = cur_.Touches(r, cands[c].g[s].a) || cur_.Touches(r, cands[c].g[s].b);
-                    }
-                    if (!touched) {
-                        continue;
-                    }
-                    Preview(cur_, r, cands[c]);
-                    scratch_.Support(0, supp);
-                    score += weights[j] * (SupportCost(graph_, supp) - wcost[j]);
-                }
+                const std::int64_t score = ScoreCandidate(k, cands[c], window, wcost, weights, memo, supp);
                 if (c == 0 || score < best_score) {
                     best = c;
                     best_score = score;
@@ -740,6 +795,169 @@ private:
                 wcost[j] = SupportCost(graph_, supp);
             }
         }
+    }
+
+    // 第 j 个旋转的像是否只作用在 {a, b} 上。
+    bool WithinPair(int j, int a, int b) const {
+        for (int w = 0; w < words_; ++w) {
+            Word m = cur_.x(j)[w] | cur_.z(j)[w];
+            if (a >> 6 == w) {
+                m &= ~(Word{1} << (a & 63));
+            }
+            if (b >> 6 == w) {
+                m &= ~(Word{1} << (b & 63));
+            }
+            if (m != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // 块：当前旋转 k = remaining[pick_pos] 的像是耦合边 (a, b) 上的两比特 Pauli。把对易前沿中像也在
+    // {a, b} 上、能提前到这里的旋转并成一个块，与框架约化比较前瞻代价；块胜出时原位输出（框架不变），
+    // 或输出块 + SWAP（SWAP 记进框架）。返回是否输出了块。
+    bool TryBlock(int pick_pos, std::vector<int>& remaining, const std::vector<int>& window,
+                  const std::vector<std::int64_t>& wcost) {
+        const int k = remaining[pick_pos];
+        std::vector<int> supp;
+        cur_.Support(k, supp);
+        if (supp.size() != 2 || graph_.dist(supp[0], supp[1]) != 1) {
+            return false;
+        }
+        const int a = supp[0];
+        const int b = supp[1];
+        // 块成员（remaining 中的位置，升序）：只作用在 {a, b} 上，且与之前所有非成员的未实现旋转对易
+        const int lim = std::min(options_.front, static_cast<int>(remaining.size()));
+        std::vector<std::uint8_t> member(lim, 0);
+        std::vector<int> group;
+        for (int pos = 0; pos < lim; ++pos) {
+            const int j = remaining[pos];
+            if (pos != pick_pos) {
+                if (!WithinPair(j, a, b)) {
+                    continue;
+                }
+                bool ok = true;
+                for (int p = 0; p < pos && ok; ++p) {
+                    ok = member[p] || !cur_.Anticommute(j, remaining[p]);
+                }
+                if (!ok) {
+                    continue;
+                }
+            }
+            member[pos] = 1;
+            group.push_back(pos);
+        }
+        // 块的 CX 估计：两比特成员的 Pauli 相同且全部对易 → 2；两种且全部对易 → 2；否则 3
+        int m2 = 0;
+        std::vector<int> kinds;
+        bool commute = true;
+        for (std::size_t g1 = 0; g1 < group.size(); ++g1) {
+            const int j = remaining[group[g1]];
+            if (cur_.Weight(j) == 2) {
+                ++m2;
+                const int code = cur_.Local(j, a) * 4 + cur_.Local(j, b);
+                if (std::find(kinds.begin(), kinds.end(), code) == kinds.end()) {
+                    kinds.push_back(code);
+                }
+            }
+            for (std::size_t g2 = 0; g2 < g1 && commute; ++g2) {
+                commute = !cur_.Anticommute(j, remaining[group[g2]]);
+            }
+        }
+        const int block_cx = (commute && kinds.size() <= 2) ? 2 : 3;
+        // 窗口（去掉块成员）
+        std::vector<int> win;
+        std::vector<std::int64_t> wc;
+        for (std::size_t j = 0; j < window.size(); ++j) {
+            bool in_group = false;
+            for (int pos : group) {
+                in_group = in_group || remaining[pos] == window[j];
+            }
+            if (!in_group) {
+                win.push_back(window[j]);
+                wc.push_back(wcost[j]);
+            }
+        }
+        const std::vector<std::int64_t> weights = Weights(win.size());
+        std::unordered_map<std::uint64_t, std::int64_t> memo;
+        // A：框架约化（第一个约化门的前瞻代价；每个两比特成员至少 1 个 CX）
+        std::vector<Candidate> cands;
+        Candidates(cur_, k, -1, -1, cands);
+        std::int64_t delta_a = 0;
+        for (std::size_t c = 0; c < cands.size(); ++c) {
+            const std::int64_t sc = ScoreCandidate(k, cands[c], win, wc, weights, memo, supp);
+            if (c == 0 || sc < delta_a) {
+                delta_a = sc;
+            }
+        }
+        const std::int64_t score_a = 1024 * static_cast<std::int64_t>(m2) + delta_a;
+        // B：原位块；C：块 + 镜像 SWAP（SWAP 的前瞻代价）
+        const std::int64_t bias = options_.block_bias;
+        const std::int64_t score_b = bias * block_cx;
+        std::int64_t delta_c = 0;
+        for (std::size_t j = 0; j < win.size(); ++j) {
+            const int r = win[j];
+            if (!cur_.Touches(r, a) && !cur_.Touches(r, b)) {
+                continue;
+            }
+            scratch_.Copy(0, cur_, r);
+            scratch_.Swap(0, a, b);
+            scratch_.Support(0, supp);
+            delta_c += weights[j] * (SupportCost(graph_, supp) - wc[j]);
+        }
+        const std::int64_t score_c = bias * 3 + delta_c;
+        if (score_a <= score_b && score_a <= score_c) {
+            return false;
+        }
+        const bool swap = score_c < score_b;
+        // 输出块成员（原顺序）：单比特像直接旋转；两比特像 σa σb 用基变换 + CX + rz + CX
+        for (int pos : group) {
+            const int j = remaining[pos];
+            if (cur_.Weight(j) == 1) {
+                const int q = cur_.Touches(j, a) ? a : b;
+                result_.gates.push_back({NetGateKind::kRotation, q, -1, j, "?XZY"[cur_.Local(j, q)], cur_.neg(j) != 0});
+            } else {
+                std::vector<Elem> pre;
+                ToZ(cur_.Local(j, a), a, pre);
+                ToZ(cur_.Local(j, b), b, pre);
+                for (const Elem& e : pre) {
+                    result_.gates.push_back({e.kind, e.q0, e.q1, -1, 0, false});
+                }
+                result_.gates.push_back({NetGateKind::kCX, a, b, -1, 0, false});
+                result_.gates.push_back({NetGateKind::kRotation, b, -1, j, 'Z', cur_.neg(j) != 0});
+                result_.gates.push_back({NetGateKind::kCX, a, b, -1, 0, false});
+                for (auto it = pre.rbegin(); it != pre.rend(); ++it) {
+                    Elem e = *it;
+                    if (e.kind == NetGateKind::kS) {
+                        e.kind = NetGateKind::kSdg;
+                    } else if (e.kind == NetGateKind::kSdg) {
+                        e.kind = NetGateKind::kS;
+                    }
+                    result_.gates.push_back({e.kind, e.q0, e.q1, -1, 0, false});
+                }
+            }
+            result_.order.push_back(j);
+        }
+        result_.num_cx += swap ? 3 : block_cx;
+        ++result_.blocks;
+        if (swap) {
+            ++result_.swap_blocks;
+            const Elem e{NetGateKind::kSwap, a, b};
+            for (int r : live_) {
+                ApplyElem(cur_, r, e);
+            }
+            for (int r = 0; r < frame_.size(); ++r) {
+                ApplyElem(frame_, r, e);
+            }
+            result_.gates.push_back({NetGateKind::kSwap, a, b, -1, 0, false});
+        }
+        for (auto it = group.rbegin(); it != group.rend(); ++it) {
+            const int j = remaining[*it];
+            remaining.erase(remaining.begin() + *it);
+            live_.erase(std::find(live_.begin(), live_.end(), j));
+        }
+        return true;
     }
 
     std::int64_t RootCost(const PauliTable& t, int i, int root) {
@@ -756,6 +974,7 @@ private:
     void ReduceRow(int row, int root, int keep_x) {
         std::vector<Candidate> cands;
         std::vector<int> supp;
+        std::unordered_map<std::uint64_t, std::int64_t> memo;
         for (;;) {
             frame_.Support(row, supp);
             if (supp.size() == 1 && supp.front() == root) {
@@ -767,9 +986,17 @@ private:
             }
             std::size_t best = 0;
             std::int64_t best_score = 0;
+            memo.clear();
             for (std::size_t c = 0; c < cands.size(); ++c) {
                 Preview(frame_, row, cands[c]);
-                const std::int64_t score = RootCost(scratch_, 0, root);
+                const int a = cands[c].g[0].a;
+                const int b = cands[c].g[0].b;
+                const std::uint64_t key = MemoKey(-1, a, b, scratch_.Touches(0, a), scratch_.Touches(0, b));
+                auto it = memo.find(key);
+                if (it == memo.end()) {
+                    it = memo.emplace(key, RootCost(scratch_, 0, root)).first;
+                }
+                const std::int64_t score = it->second;
                 if (c == 0 || score < best_score) {
                     best = c;
                     best_score = score;
@@ -780,7 +1007,8 @@ private:
     }
 
     // 单比特 Clifford（H/S 字 + Pauli）把 (行 X, 行 Z) 在 q 上变回 (+X, +Z)。
-    void FixSingle(int q) {
+    // 单比特 Clifford（H/S 字 + Pauli）把 (行 X, 行 Z) = (2q, 2q+1) 在比特 v 上变回 (+X_v, +Z_v)。
+    void FixSingle(int q, int v) {
         const int rx = 2 * q;
         const int rz = 2 * q + 1;
         for (int len = 0; len <= 6; ++len) {
@@ -788,10 +1016,10 @@ private:
                 for (int pg = 0; pg < 4; ++pg) {
                     std::vector<Elem> elems;
                     for (int b = 0; b < len; ++b) {
-                        elems.push_back({((word >> b) & 1) ? NetGateKind::kS : NetGateKind::kH, q, -1});
+                        elems.push_back({((word >> b) & 1) ? NetGateKind::kS : NetGateKind::kH, v, -1});
                     }
                     if (pg > 0) {
-                        elems.push_back({pg == 1 ? NetGateKind::kX : pg == 2 ? NetGateKind::kZ : NetGateKind::kY, q, -1});
+                        elems.push_back({pg == 1 ? NetGateKind::kX : pg == 2 ? NetGateKind::kZ : NetGateKind::kY, v, -1});
                     }
                     PauliTable t(words_, 2);
                     t.Copy(0, frame_, rx);
@@ -800,8 +1028,8 @@ private:
                         ApplyElem(t, 0, e);
                         ApplyElem(t, 1, e);
                     }
-                    if (t.Weight(0) == 1 && t.Local(0, q) == kX && !t.neg(0) && t.Weight(1) == 1 &&
-                        t.Local(1, q) == kZ && !t.neg(1)) {
+                    if (t.Weight(0) == 1 && t.Local(0, v) == kX && !t.neg(0) && t.Weight(1) == 1 &&
+                        t.Local(1, v) == kZ && !t.neg(1)) {
                         for (const Elem& e : elems) {
                             for (int r = 0; r < frame_.size(); ++r) {
                                 ApplyElem(frame_, r, e);
@@ -816,36 +1044,73 @@ private:
         throw std::logic_error("pauli network: single-qubit fix failed");
     }
 
+    // 收尾：逐个取活动子图的非割点 v，把一对框架行 (F X_q F†, F Z_q F†) 约化回 (X_v, Z_v)。
+    // finalize_permutation 为假时 q = v（框架还原为恒等）；为真时 q 取代价最小的未完成行对，框架只还原到
+    // 一个比特置换（输出 final_perm，由布局吸收）。
     void Finalize() {
         live_.clear();
-        int left = 0;
-        for (int q = 0; q < graph_.n(); ++q) {
-            left += graph_.active(q) ? 1 : 0;
+        const int n = graph_.n();
+        std::vector<int> pending;  // 未完成的行对（物理比特编号）
+        for (int q = 0; q < n; ++q) {
+            if (graph_.active(q)) {
+                pending.push_back(q);
+            }
         }
-        while (left > 0) {
+        result_.final_perm.resize(n);
+        for (int q = 0; q < n; ++q) {
+            result_.final_perm[q] = q;
+        }
+        std::vector<int> supp;
+        while (!pending.empty()) {
+            if (Aborted()) {
+                return;
+            }
             const std::vector<int> cand = graph_.NonCutVertices();
-            int q = -1;
-            std::int64_t qc = 0;
+            int best_v = -1;
+            int best_q = -1;
+            std::int64_t best_c = 0;
             for (int v : cand) {
-                const std::int64_t c = RootCost(frame_, 2 * v, v) + RootCost(frame_, 2 * v + 1, v);
-                if (q < 0 || c < qc) {
-                    q = v;
-                    qc = c;
+                auto consider = [&](int q) {
+                    const std::int64_t c = RootCost(frame_, 2 * q, v) + RootCost(frame_, 2 * q + 1, v);
+                    if (best_v < 0 || c < best_c) {
+                        best_v = v;
+                        best_q = q;
+                        best_c = c;
+                    }
+                };
+                if (!options_.finalize_permutation) {
+                    consider(v);
+                    continue;
+                }
+                // 只考虑在 v 上有支集的行对（其余行对约化到 v 至少多一跳）
+                for (int q : pending) {
+                    if (frame_.Touches(2 * q, v) || frame_.Touches(2 * q + 1, v)) {
+                        consider(q);
+                    }
                 }
             }
-            ReduceRow(2 * q, q, -1);
-            ReduceRow(2 * q + 1, q, 2 * q);
-            FixSingle(q);
-            graph_.Deactivate(q);
-            --left;
+            ReduceRow(2 * best_q, best_v, -1);
+            ReduceRow(2 * best_q + 1, best_v, 2 * best_q);
+            FixSingle(best_q, best_v);
+            graph_.Deactivate(best_v);
+            result_.final_perm[best_q] = best_v;
+            pending.erase(std::find(pending.begin(), pending.end(), best_q));
         }
-        // 检查：框架应为恒等
-        for (int q = 0; q < graph_.n(); ++q) {
-            if (frame_.Weight(2 * q) != 1 || frame_.Local(2 * q, q) != kX || frame_.neg(2 * q) ||
-                frame_.Weight(2 * q + 1) != 1 || frame_.Local(2 * q + 1, q) != kZ || frame_.neg(2 * q + 1)) {
-                throw std::logic_error("pauli network: frame is not the identity after finalization");
+        // 检查：框架应为置换（finalize_permutation 为假时为恒等）
+        for (int q = 0; q < n; ++q) {
+            const int v = result_.final_perm[q];
+            if (frame_.Weight(2 * q) != 1 || frame_.Local(2 * q, v) != kX || frame_.neg(2 * q) ||
+                frame_.Weight(2 * q + 1) != 1 || frame_.Local(2 * q + 1, v) != kZ || frame_.neg(2 * q + 1)) {
+                throw std::logic_error("pauli network: frame is not a permutation after finalization");
             }
         }
+    }
+
+    bool Aborted() {
+        if (options_.cx_limit > 0 && result_.num_cx > options_.cx_limit) {
+            result_.aborted = true;
+        }
+        return result_.aborted;
     }
 
     Graph graph_;

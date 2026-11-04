@@ -283,9 +283,19 @@ def commutator_bound(
     Returns:
         The bound.
     """
+    return commutator_prefactor(num_qubits, terms, time, order) / float(steps**order)
+
+
+def commutator_prefactor(
+    num_qubits: int, terms: Sequence[PauliTerm], time: float, order: int
+) -> float:
+    """The step-independent factor ``C`` of :func:`commutator_bound`
+    (``bound = C / steps**order``)."""
     m = len(terms)
     if m == 0:
         return 0.0
+    if order not in (1, 2):
+        raise ValueError("commutator_bound supports order 1 and 2")
     x, z = _bits(num_qubits, terms)
     c = np.abs(np.array([t[2] for t in terms], dtype=np.float64))
     if order == 1:
@@ -293,9 +303,7 @@ def commutator_bound(
         for i in range(m - 1):
             a = _anti(x[i + 1 :], z[i + 1 :], x[i], z[i])
             total += 2.0 * c[i] * float(c[i + 1 :][a].sum())
-        return time * time / (2.0 * steps) * total
-    if order != 2:
-        raise ValueError("commutator_bound supports order 1 and 2")
+        return time * time / 2.0 * total
     t1 = t2 = 0.0
     for i in range(m - 1):
         later = slice(i + 1, m)
@@ -311,4 +319,4 @@ def commutator_bound(
             t1 += w[r] * 2.0 * float(c[later][ak].sum())
             if _anti(x[i : i + 1], z[i : i + 1], rx[r], rz[r])[0]:
                 t2 += w[r] * 2.0 * c[i]
-    return time**3 / (steps * steps) * (t1 / 12.0 + t2 / 24.0)
+    return time**3 * (t1 / 12.0 + t2 / 24.0)
