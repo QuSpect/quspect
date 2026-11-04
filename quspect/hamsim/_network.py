@@ -21,8 +21,9 @@ equals the rotation product exactly.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from quspect.circuit.circuit import QuantumCircuit
@@ -113,6 +114,8 @@ class NetworkCircuit:
             qubit ``p`` (identity unless ``finalize_permutation``).
         aborted: The synthesis stopped at ``cx_limit``; ``circuit`` is
             incomplete and must not be used.
+        work: Scoring work of the run (inner iterations of the support cost
+            estimates; deterministic, proportional to its run time).
     """
 
     circuit: QuantumCircuit
@@ -123,6 +126,7 @@ class NetworkCircuit:
     swap_blocks: int = 0
     final_permutation: list[int] = field(default_factory=list)
     aborted: bool = False
+    work: int = 0
 
 
 def connected_active_set(
@@ -236,6 +240,122 @@ def long_path(
     return best
 
 
+def cycle_of_length(
+    num_qubits: int,
+    edges: Sequence[tuple[int, int]],
+    length: int,
+    *,
+    starts: int = 8,
+    budget: int = 200_000,
+) -> list[int]:
+    """A simple cycle of exactly ``length`` qubits on a coupling graph, if found.
+
+    Depth-first search for a path of ``length`` qubits that closes back on
+    its start, pruned by the graph distance back to the start (a branch is
+    cut when the start cannot be reached in the remaining steps) and
+    ordered by Warnsdorff's rule (fewest unvisited neighbours first,
+    smallest index on ties); from the ``starts`` lowest-degree qubits of
+    degree ≥ 2, at most ``budget`` search steps each.  A periodic chain of
+    ``length`` logical qubits placed along the cycle has every nearest-
+    neighbour pair (the wrap-around one included) on a coupling edge.
+    Deterministic; returns ``[]`` when no cycle was found (e.g. an odd
+    ``length`` on a bipartite lattice).
+
+    Args:
+        num_qubits: Number of physical qubits.
+        edges: Coupling edges (undirected).
+        length: Cycle length (≥ 3).
+        starts: Number of start qubits tried.
+        budget: Search steps per start.
+
+    Returns:
+        The physical qubits along the cycle (consecutive ones, and the last
+        and the first, are coupled), or ``[]``.
+    """
+    return list(
+        _cycle_of_length(
+            num_qubits,
+            tuple(sorted({(min(a, b), max(a, b)) for a, b in edges if a != b})),
+            length,
+            starts,
+            budget,
+        )
+    )
+
+
+def _cycle_steps(
+    nbrs: list[int], seen: list[bool], dist: list[int], free: list[int], rem: int
+) -> Iterator[int]:
+    """Unvisited neighbours from which the start is within ``rem`` steps,
+    fewest unvisited neighbours first."""
+    cand = [v for v in nbrs if not seen[v] and dist[v] <= rem]
+    cand.sort(key=lambda v: (free[v], v))
+    return iter(cand)
+
+
+@lru_cache(maxsize=64)
+def _cycle_of_length(
+    num_qubits: int,
+    edges: tuple[tuple[int, int], ...],
+    length: int,
+    starts: int,
+    budget: int,
+) -> tuple[int, ...]:
+    adj: list[list[int]] = [[] for _ in range(num_qubits)]
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
+    for row in adj:
+        row.sort()
+    if length < 3 or length > num_qubits:
+        return ()
+    nodes = sorted(
+        (v for v in range(num_qubits) if len(adj[v]) >= 2),
+        key=lambda v: (len(adj[v]), v),
+    )
+    for s in nodes[: max(1, starts)]:
+        dist = [num_qubits + 1] * num_qubits
+        dist[s] = 0
+        dq = deque([s])
+        while dq:
+            u = dq.popleft()
+            for v in adj[u]:
+                if dist[v] > dist[u] + 1:
+                    dist[v] = dist[u] + 1
+                    dq.append(v)
+        seen = [False] * num_qubits
+        seen[s] = True
+        free = [len(adj[v]) for v in range(num_qubits)]  # unvisited neighbours
+        for w in adj[s]:
+            free[w] -= 1
+        path = [s]
+        stack = [_cycle_steps(adj[s], seen, dist, free, length - 1)]
+        steps = 0
+        while stack and steps < budget:
+            steps += 1
+            if len(path) == length:
+                if s in adj[path[-1]]:
+                    return tuple(path)
+                nxt = None
+            else:
+                nxt = next(stack[-1], None)
+            if nxt is None:
+                stack.pop()
+                if len(path) == 1:
+                    break
+                v = path.pop()
+                seen[v] = False
+                for w in adj[v]:
+                    free[w] += 1
+                continue
+            path.append(nxt)
+            seen[nxt] = True
+            for w in adj[nxt]:
+                free[w] -= 1
+            stack.append(_cycle_steps(adj[nxt], seen, dist, free, length - len(path)))
+    return ()
+
+
 def synthesize_network(
     rotations: Sequence[Rotation],
     num_physical: int,
@@ -293,7 +413,7 @@ def synthesize_network(
     if active is None:
         active = connected_active_set(num_physical, edges, used or [layout[0]])
     xs, zs = _xz(rotations, layout)
-    gates, order, num_cx, fin_cx, blocks, swap_blocks, perm, aborted = (
+    gates, order, num_cx, fin_cx, blocks, swap_blocks, perm, aborted, work = (
         _core()._pauli_network(
             num_physical,
             [(int(a), int(b)) for a, b in edges],
@@ -321,6 +441,7 @@ def synthesize_network(
             swap_blocks,
             list(perm),
             True,
+            int(work),
         )
     qc = QuantumCircuit()
     for kind, q0, q1, rot, axis, neg in gates:
@@ -351,7 +472,15 @@ def synthesize_network(
         else:
             qc.z(q0)
     return NetworkCircuit(
-        qc, num_cx, fin_cx, list(order), blocks, swap_blocks, list(perm)
+        qc,
+        num_cx,
+        fin_cx,
+        list(order),
+        blocks,
+        swap_blocks,
+        list(perm),
+        False,
+        int(work),
     )
 
 

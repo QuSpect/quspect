@@ -67,6 +67,8 @@ struct PauliNetworkResult {
     // 收尾后的置换：初始在物理比特 q 上的态最终在 final_perm[q] 上（finalize_permutation 为假时恒等）
     std::vector<int> final_perm;
     bool aborted = false;  // 超过 cx_limit 提前停止
+    // 计分工作量：支集 Steiner 代价估计的内层迭代次数之和（确定性，只用于预算，不影响综合结果）
+    std::int64_t work = 0;
 };
 
 // paulis[k] = (x 位, z 位)，比特编号 < num_qubits ≤ 64·words。所有旋转的支集必须在 active 内；

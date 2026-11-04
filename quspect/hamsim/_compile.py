@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from quspect.circuit.circuit import QuantumCircuit
@@ -18,6 +18,7 @@ from quspect.hamsim._formulas import (
 )
 from quspect.hamsim._network import (
     connected_active_set,
+    cycle_of_length,
     ladder_circuit,
     long_path,
     merge_commuting,
@@ -63,10 +64,11 @@ NETWORK_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = (
     (16, 64, 512, 800, 0, 1024),
 )
 
-#: Further settings of the default portfolio, tried after
-#: :data:`NETWORK_CONFIGS` within :data:`PORTFOLIO_BUDGET`: longer windows
-#: (up to 128) and the full grid of fronts, weights, decays and block modes.
-#: Small formulas (e.g. single-step UCCSD ansätze) gain 2–7 % from them.
+#: Further settings of the default portfolio: longer windows (up to 128)
+#: and the full grid of fronts, weights, decays and block modes.  Small
+#: formulas (e.g. single-step UCCSD ansätze) gain 2–7 % from them.  They
+#: are tried on the best graph and layout of :data:`NETWORK_CONFIGS` only
+#: (screened on a prefix of the formula, see :data:`WORK_BUDGET`).
 EXTENDED_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = tuple(
     cfg
     for cfg in (
@@ -80,10 +82,55 @@ EXTENDED_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = tuple(
     if cfg not in NETWORK_CONFIGS
 )
 
-#: Work budget of the default portfolio, in textbook CX × runs: the
-#: first ``budget // (textbook CX × layouts × graphs)`` settings of
-#: :data:`EXTENDED_CONFIGS` are added to :data:`NETWORK_CONFIGS`.
-PORTFOLIO_BUDGET = 2_000_000
+#: Work budget of the default portfolio for one formula.  A network run's work is its
+#: scoring work (:attr:`~quspect.hamsim.NetworkCircuit.work`, the inner iterations of
+#: the support cost estimates) plus ``(rotations processed + CX emitted) × (window +
+#: 16)``, about a nanosecond per unit on one core; it is measured after the run from
+#: deterministic counts, so every decision below — and the result — is the same on every
+#: machine.  The portfolio runs in two stages.  Stage 1, within half of the budget:
+#: :data:`NETWORK_CONFIGS` on every graph and layout (setting-major priority), all in
+#: full when the work predicted from the first run fits, otherwise screened: each run on
+#: the first ``1 / divisor`` of the rotations (``divisor`` from :data:`SCREEN_DIVISOR`
+#: up to 16 times it, the smallest that fits; as many runs as fit) and the
+#: :data:`SCREEN_KEEP` cheapest distinct prefixes in full.  Stage 2, within the rest:
+#: the settings of :data:`EXTENDED_CONFIGS` on the :data:`STAGE2_GROUPS` best graphs and
+#: layouts of stage 1 only, screened the same way.  In every case measured the best
+#: stage-1 layout was the best layout overall and a quarter of the formula kept the best
+#: runs among the survivors, so this keeps the quality of trying every setting on every
+#: layout at a fraction of its work, and bounds the work of very large formulas (e.g.
+#: 100-qubit lattices on a line) that a fixed portfolio cannot.  Small formulas (see
+#: :data:`EXHAUSTIVE_WORK`) still try everything.
+WORK_BUDGET = 60_000_000_000
+
+#: With ``block_steps=None`` (automatic), a formula of several steps whose
+#: single full network run is predicted (from runs on its first
+#: ``1 / PROBE_DIVISOR``, … ``1 / 2``) to need more than
+#: ``WORK_BUDGET / BLOCK_RATIO`` is compiled as a repeated one-step block
+#: instead (see
+#: :func:`compile_evolution`): its compile time no longer grows with the
+#: number of steps.
+BLOCK_RATIO = 4
+
+#: See :data:`BLOCK_RATIO`.
+PROBE_DIVISOR = 16
+
+#: Formulas whose whole default portfolio (every setting on every graph and
+#: layout, predicted from the first run) needs at most this much work run
+#: it all in full (see :data:`WORK_BUDGET`).
+EXHAUSTIVE_WORK = 1_000_000_000
+
+#: Stage 2 of the default portfolio runs on this many best graphs and
+#: layouts of stage 1 (see :data:`WORK_BUDGET`).
+STAGE2_GROUPS = 2
+
+#: Stage 2 is screened on prefixes (otherwise in full while it fits).
+STAGE2_SCREEN = True
+
+#: Screening runs take the first ``1 / SCREEN_DIVISOR`` of the rotations.
+SCREEN_DIVISOR = 4
+
+#: Distinct screening prefixes compiled in full.
+SCREEN_KEEP = 16
 
 #: Network runs within ``FINALIST_SLACK / 1024`` of the fewest CX are
 #: finalists; the :data:`FINALISTS` cheapest are transpiled and the fewest
@@ -104,7 +151,12 @@ NETWORK_ABORT_RATIO = 1.6
 #: Hubbard chain: 4 629 CX on a serpentine path of a 5×7 grid against
 #: 11 040 on the whole grid for four Trotter steps).  Every CX of the
 #: subgraph is a coupling edge, so its output is valid on the device.
-NETWORK_GRAPHS = ("device", "path")
+#: ``"cycle"``: a cycle of exactly ``n`` qubits (see
+#: :func:`~quspect.hamsim.cycle_of_length`), used when the interaction
+#: graph wraps around (a term couples logical qubits ``0`` and ``n − 1``,
+#: e.g. periodic chains): the logical qubits in index order along it have
+#: every chain bond on a coupling edge.
+NETWORK_GRAPHS = ("device", "path", "cycle")
 
 #: With ``term_order="auto"`` the later term orders' network runs are
 #: abandoned above this multiple of the best two-qubit count so far.
@@ -159,6 +211,10 @@ class EvolutionResult:
             or ``"path"``, for ``network_graphs``).
         term_order_table: With ``term_order="auto"``: ``{term order:
             (steps, error estimate, estimated two-qubit gates)}``.
+        block_steps: Steps of the repeated block when the circuit is copies
+            of one compiled block (``None`` otherwise; see ``block_steps`` of
+            :func:`compile_evolution`).  ``transpile_result`` is then the
+            block's.
     """
 
     circuit: QuantumCircuit
@@ -179,6 +235,7 @@ class EvolutionResult:
     network_config: tuple[int, int, int, int, int, int] | None = None
     network_graph: str | None = None
     term_order_table: dict[str, tuple[int, float, int]] | None = None
+    block_steps: int | None = None
 
 
 def _full_target(n: int) -> CompilationTarget:
@@ -386,41 +443,61 @@ def _naive_cx(rotations: Sequence[Rotation]) -> int:
     return sum(2 * (len(q) - 1) for _, q, _ in rotations)
 
 
+def _wraps(terms: Sequence[PauliTerm], n: int) -> bool:
+    """Some term couples logical qubits ``0`` and ``n − 1`` and nothing between."""
+    if n < 4:
+        return False
+    return any(sorted(qs) == [0, n - 1] for _, qs, _ in terms)
+
+
 def _network_graphs(
-    target: CompilationTarget, n: int, names: Sequence[str]
-) -> list[tuple[str, list[tuple[int, int]], CompilationTarget]]:
-    """``(name, edges, target of those edges)`` for each requested graph.
+    target: CompilationTarget,
+    n: int,
+    names: Sequence[str],
+    terms: Sequence[PauliTerm] = (),
+) -> list[tuple[str, list[tuple[int, int]], CompilationTarget, list[int]]]:
+    """``(name, edges, target of those edges, qubits along it)`` for each graph.
 
     ``"path"`` is skipped on all-to-all connectivity, when the coupling
     graph is itself a path, or when the longest path found has fewer than
-    ``n`` qubits.
+    ``n`` qubits; ``"cycle"`` unless ``terms`` wrap around (see
+    :func:`_wraps`) and a cycle of exactly ``n`` qubits that is not the
+    whole coupling graph is found.  The qubit list is empty for
+    ``"device"``.
     """
     edges = _edges(target)
-    out: list[tuple[str, list[tuple[int, int]], CompilationTarget]] = []
+    out: list[tuple[str, list[tuple[int, int]], CompilationTarget, list[int]]] = []
     for name in names:
         if name == "device":
-            out.append(("device", edges, target))
-        elif name == "path":
-            if _is_full(target, n):
-                continue
-            path = long_path(target.num_qubits, edges)
-            if len(path) < n:
-                continue
-            pe = sorted(
-                {(min(a, b), max(a, b)) for a, b in zip(path, path[1:], strict=False)}
-            )
-            if len(pe) == len(edges):
-                continue
-            sub = CompilationTarget.from_coupling_map(
-                target.num_qubits, pe, native_gates=set(DEFAULT_NATIVE_GATES)
-            )
-            out.append(("path", pe, sub))
-        else:
+            out.append(("device", edges, target, []))
+            continue
+        if name not in ("path", "cycle"):
             raise ValueError(
                 f"unknown network graph {name!r}; expected one of {NETWORK_GRAPHS}"
             )
+        if _is_full(target, n):
+            continue
+        if name == "path":
+            walk = long_path(target.num_qubits, edges)
+            if len(walk) < n:
+                continue
+            pairs = list(zip(walk, walk[1:], strict=False))
+        else:
+            if not _wraps(terms, n):
+                continue
+            walk = cycle_of_length(target.num_qubits, edges, n)
+            if not walk:
+                continue
+            pairs = list(zip(walk, walk[1:] + walk[:1], strict=False))
+        pe = sorted({(min(a, b), max(a, b)) for a, b in pairs})
+        if len(pe) == len(edges):
+            continue
+        sub = CompilationTarget.from_coupling_map(
+            target.num_qubits, pe, native_gates=set(DEFAULT_NATIVE_GATES)
+        )
+        out.append((name, pe, sub, walk))
     if not out:  # e.g. only "path" on all-to-all connectivity
-        out.append(("device", edges, target))
+        out.append(("device", edges, target, []))
     return out
 
 
@@ -440,7 +517,9 @@ def _compile_rotations(
     finalize_permutation: bool,
     network_graphs: Sequence[str] = NETWORK_GRAPHS,
     bound: int = 0,
-    portfolio_budget: int = PORTFOLIO_BUDGET,
+    work_budget: int | None = None,
+    probe: bool = False,
+    repeat: int = 1,
 ) -> list[_Candidate]:
     """Compile a (merged) rotation sequence with every requested method.
 
@@ -450,8 +529,12 @@ def _compile_rotations(
     ``NETWORK_ABORT_RATIO`` times the textbook count) and the expensive
     ladder transpilation is skipped when the network needs fewer than
     ``1 / LADDER_SKIP_RATIO`` of the textbook CX.  ``bound`` (``> 0``)
-    additionally abandons network runs above that CX count.
+    additionally abandons network runs above that CX count.  ``probe``:
+    raise :class:`_TooBigError` (before any expensive work) when one full
+    network run is predicted to exceed ``work_budget / BLOCK_RATIO``.
     """
+    if work_budget is None:
+        work_budget = WORK_BUDGET
     out: list[_Candidate] = []
     naive = _naive_cx(merged)
     want_ladder = "ladder" in methods or not merged
@@ -474,6 +557,8 @@ def _compile_rotations(
             res,
         )
 
+    if probe and want_network:
+        _probe(n, terms, merged, target, layouts, network_graphs, work_budget)
     if want_ladder and not (large and want_network):
         out.append(ladder())
     if want_network:
@@ -498,7 +583,8 @@ def _compile_rotations(
             finalize_permutation=finalize_permutation,
             limit=limit,
             network_graphs=network_graphs,
-            portfolio_budget=portfolio_budget,
+            work_budget=work_budget,
+            repeat=repeat,
         )
         if net is not None:
             out.append(net)
@@ -507,6 +593,246 @@ def _compile_rotations(
         if net_cx is None or net_cx * LADDER_SKIP_RATIO >= naive or not merged:
             out.append(ladder())
     return out
+
+
+class _TooBigError(Exception):
+    """A full network run of the formula would exceed its share of the budget."""
+
+
+#: A completed network run: ``(CX, run number, network, layout, setting, graph
+#: name, group index)``.
+_Run = tuple[int, int, Any, list[int], tuple[int, ...], str, int]
+
+
+class _Portfolio:
+    """Network runs of one formula within a work budget: branch and bound over
+    full runs, screening on prefixes, and the finalists (see
+    :data:`WORK_BUDGET`).
+
+    The work of a run is measured after it, from deterministic counts only
+    (the native core's scoring work plus rotations processed and CX emitted
+    times the window), so the decisions — and the result — are the same on
+    every machine.
+    """
+
+    def __init__(
+        self,
+        merged: Sequence[Rotation],
+        num_physical: int,
+        groups: list[tuple[str, list[tuple[int, int]], list[int], list[int]]],
+        finalize_permutation: bool,
+        limit: int,
+        budget: int,
+    ) -> None:
+        self.merged = merged
+        self.num_physical = num_physical
+        self.groups = groups  # (graph name, edges, layout, active qubits)
+        self.finalize_permutation = finalize_permutation
+        self.limit = limit
+        self.budget = budget
+        self.spent = 0
+        self.rate = 0  # work of a full run per (window + 16), from the first one
+        self.done: list[_Run] = []
+        self.best_cx = 0
+        self.best_group = -1
+        # without a completed run: the group whose abandoned run got furthest
+        self.reach = (0, -1)
+        self.runs = 0  # run counter: stable order of equal CX counts
+        self.seen: set[tuple[Any, ...]] = set()
+        self.group_best: dict[int, int] = {}  # fewest CX of each group's runs
+
+    def _synth(self, gi: int, cfg: tuple[int, ...], length: int, cap: int) -> Any:
+        _, gedges, lay, active = self.groups[gi]
+        window, front, next_weight, decay, block_mode, block_bias = cfg
+        full = length >= len(self.merged)
+        net = synthesize_network(
+            self.merged if full else self.merged[:length],
+            self.num_physical,
+            gedges,
+            lay,
+            active=active,
+            window=window,
+            front=front,
+            next_weight=next_weight,
+            decay=decay,
+            block_mode=block_mode,
+            block_bias=block_bias,
+            finalize=full,
+            finalize_permutation=self.finalize_permutation and full,
+            cx_limit=cap,
+        )
+        work = net.work + (len(net.order) + net.num_cx) * (window + 16)
+        self.spent += work
+        if full and not net.aborted and not self.rate:
+            self.rate = max(1, work // (window + 16))
+        return net
+
+    def estimate(self, cfg: tuple[int, ...]) -> int:
+        """Predicted work of a full run with setting ``cfg``."""
+        return self.rate * (cfg[0] + 16)
+
+    def full(self, gi: int, cfg: tuple[int, ...]) -> None:
+        """One full run, abandoned above the branch-and-bound cap."""
+        cap = self.limit
+        if self.best_cx:
+            slack = self.best_cx * FINALIST_SLACK // 1024
+            cap = self.best_cx + slack if cap == 0 else min(cap, self.best_cx + slack)
+        net = self._synth(gi, cfg, len(self.merged), cap)
+        if net.aborted:
+            if len(net.order) > self.reach[0]:
+                self.reach = (len(net.order), gi)
+            return
+        gname, _, lay, _ = self.groups[gi]
+        # settings that only differ in an unused look-ahead give identical
+        # runs: keep one of each (by CX count, blocks and rotation order)
+        sig = (net.num_cx, net.blocks, net.swap_blocks, tuple(net.order), gi)
+        if sig in self.seen:
+            return
+        self.seen.add(sig)
+        self.runs += 1
+        if net.num_cx < self.group_best.get(gi, net.num_cx + 1):
+            self.group_best[gi] = net.num_cx
+        self.done.append((net.num_cx, self.runs, net, lay, cfg, gname, gi))
+        if not self.best_cx or net.num_cx < self.best_cx:
+            self.best_cx = net.num_cx
+            self.best_group = gi
+            # keep only the runs that can still be finalists (memory)
+            keep = self.best_cx + self.best_cx * FINALIST_SLACK // 1024
+            self.done = sorted(d for d in self.done if d[0] <= keep)[:FINALISTS]
+        elif len(self.done) > 4 * FINALISTS:
+            self.done = sorted(self.done)[:FINALISTS]
+
+    def stage(
+        self, pool: Sequence[tuple[int, tuple[int, ...]]], end: int, screen: bool
+    ) -> None:
+        """Run ``pool`` (in priority order) until the work reaches ``end``.
+
+        In full when the predicted work fits (and not ``screen``), else every
+        run that fits on the first ``1 / divisor`` of the rotations
+        (``divisor`` from :data:`SCREEN_DIVISOR` up to 16 times it, the
+        smallest that fits; at least one per graph and layout) and the
+        cheapest distinct prefixes in full (:data:`SCREEN_KEEP`, halved
+        while their predicted work exceeds three quarters of the rest of the
+        budget).  No run starts once the work has reached ``end``.
+        """
+        pool = list(pool)
+        if not pool:
+            return
+        if not self.rate:  # the first run of the formula measures the work rate
+            self.full(*pool[0])
+            pool = pool[1:]
+        need = [self.estimate(cfg) for _, cfg in pool]
+        if not screen and self.spent + sum(need) <= end or len(pool) <= SCREEN_KEEP:
+            for item in pool:
+                if self.spent >= end:
+                    break
+                self.full(*item)
+            return
+        # survivors: up to SCREEN_KEEP, as many as leave a quarter of the rest
+        # of the budget to the prefixes
+        avg = max(1, sum(need) // len(need))
+        room = end - self.spent
+        survivors = SCREEN_KEEP
+        while survivors > 2 and survivors * avg > room - room // 4:
+            survivors //= 2
+        keep = survivors * avg
+        divisor = SCREEN_DIVISOR
+        while (
+            self.spent + sum(need) // divisor + keep > end
+            and divisor < 16 * SCREEN_DIVISOR
+        ):
+            divisor *= 2
+        length = max(1, len(self.merged) // divisor)
+        stop = end - keep
+        ranked: list[tuple[int, int, int, tuple[int, ...]]] = []
+        sigs: set[tuple[Any, ...]] = set()
+        groups = {gi for gi, _ in pool}
+        for k, (gi, cfg) in enumerate(pool):
+            # every graph and layout of the pool gets at least one prefix
+            if ranked and self.spent >= stop and k >= len(groups):
+                break
+            net = self._synth(gi, cfg, length, self.limit)
+            if net.aborted:  # a prefix above the bound: the full run is too
+                continue
+            sig = (net.num_cx, net.blocks, net.swap_blocks, tuple(net.order), gi)
+            if sig in sigs:
+                continue
+            sigs.add(sig)
+            ranked.append((net.num_cx, k, gi, cfg))
+        for _, _, gi, cfg in sorted(ranked)[:survivors]:
+            if self.spent >= end:
+                break
+            self.full(gi, cfg)
+
+    def top_groups(self, k: int) -> list[int]:
+        """The ``k`` groups with the cheapest completed runs (else the group of
+        the furthest abandoned run)."""
+        if not self.group_best:
+            return [self.reach[1]] if self.reach[1] >= 0 else []
+        return sorted(self.group_best, key=lambda g: (self.group_best[g], g))[:k]
+
+    def finalists(self) -> list[_Run]:
+        if not self.done:
+            return []
+        cut = self.best_cx + self.best_cx * FINALIST_SLACK // 1024
+        return sorted(d for d in self.done if d[0] <= cut)[:FINALISTS]
+
+
+def _probe(
+    n: int,
+    terms: Sequence[PauliTerm],
+    merged: Sequence[Rotation],
+    target: CompilationTarget,
+    layouts: Sequence[Sequence[int]] | None,
+    network_graphs: Sequence[str],
+    work_budget: int,
+) -> None:
+    """Raise :class:`_TooBigError` when a full network run of ``merged`` is
+    predicted to exceed ``work_budget / BLOCK_RATIO``.
+
+    The work of a run grows faster than its length (the frame images of
+    later rotations widen), so the first :data:`NETWORK_CONFIGS` setting
+    runs on the first ``1 / 16``, ``1 / 8``, ``1 / 4`` and ``1 / 2`` of the
+    rotations (first graph and layout) and the work of the whole run is
+    extrapolated from the last prefix with the growth per doubling seen so
+    far (at least 2); the probe stops as soon as the prediction is above
+    the threshold, or far below it.  Formulas of fewer than ``4 ·
+    PROBE_DIVISOR`` rotations are never too big.
+    """
+    if len(merged) < 4 * PROBE_DIVISOR:
+        return
+    gname, gedges, gtarget, walk = _network_graphs(target, n, network_graphs, terms)[0]
+    if layouts is not None:
+        lay = list(layouts[0])
+    elif _is_full(target, n):
+        lay = list(range(n))
+    elif walk:
+        lay = walk[:n]
+    else:
+        lay = _layout_candidates(n, terms, merged, gtarget, 0, 1)[0]
+    used = sorted({lay[q] for _, qs, _ in merged for q in qs})
+    active = connected_active_set(target.num_qubits, gedges, used)
+    group = [(gname, gedges, lay, active)]
+    cfg = _norm_config(NETWORK_CONFIGS[0])
+    limit = work_budget // BLOCK_RATIO
+    prev = 0
+    div = PROBE_DIVISOR
+    while div >= 2:
+        pf = _Portfolio(merged, target.num_qubits, group, True, 0, 0)
+        pf._synth(0, cfg, len(merged) // div, 0)
+        work = max(1, pf.spent)
+        num, den = (work, prev) if prev and work > 2 * prev else (2, 1)
+        pred = work
+        d = div
+        while d > 1:  # one growth factor per doubling up to the whole run
+            pred = pred * num // den
+            d //= 2
+        if pred > limit:
+            raise _TooBigError
+        if pred * 16 <= limit:
+            return
+        prev = work
+        div //= 2
 
 
 def _network_candidate(
@@ -523,103 +849,91 @@ def _network_candidate(
     finalize_permutation: bool,
     limit: int,
     network_graphs: Sequence[str] = NETWORK_GRAPHS,
-    portfolio_budget: int = PORTFOLIO_BUDGET,
+    work_budget: int = 0,
+    repeat: int = 1,
 ) -> _Candidate | None:
-    plan: list[tuple[str, list[tuple[int, int]], list[list[int]]]] = []
-    for gname, gedges, gtarget in _network_graphs(target, n, network_graphs):
+    groups: list[tuple[str, list[tuple[int, int]], list[int], list[int]]] = []
+    for gname, gedges, gtarget, walk in _network_graphs(
+        target, n, network_graphs, terms
+    ):
         if layouts is not None:
             lays = [list(lay) for lay in layouts]
         elif _is_full(target, n):
             lays = [list(range(n))]
-        elif gname == "path":
-            # layouts on the path as a line of its own (the qubits off the path are
-            # not connected to it), mapped back; logical qubits in index order along
-            # the path first (Jordan–Wigner chains)
-            path = long_path(target.num_qubits, _edges(target))
-            line = CompilationTarget.from_coupling_map(
-                len(path),
-                [(k, k + 1) for k in range(len(path) - 1)],
-                native_gates=set(DEFAULT_NATIVE_GATES),
+        elif gname in ("path", "cycle"):
+            # layouts on the path (cycle) as a line (ring) of its own (the qubits
+            # off it are not connected to it), mapped back; logical qubits in
+            # index order along it first (Jordan–Wigner and periodic chains)
+            m = len(walk)
+            ring = [(k, k + 1) for k in range(m - 1)]
+            if gname == "cycle":
+                ring.append((0, m - 1))
+            sub = CompilationTarget.from_coupling_map(
+                m, ring, native_gates=set(DEFAULT_NATIVE_GATES)
             )
-            along = path[:n]
-            lays = [along]
-            for lay in _layout_candidates(n, terms, merged, line, seed, layout_trials):
-                mapped = [path[k] for k in lay]
+            lays = [walk[:n]]
+            for lay in _layout_candidates(n, terms, merged, sub, seed, layout_trials):
+                mapped = [walk[k] for k in lay]
                 if mapped not in lays:
                     lays.append(mapped)
         else:
             lays = _layout_candidates(n, terms, merged, gtarget, seed, layout_trials)
-        plan.append((gname, gedges, lays))
-    if network_configs is None:  # default portfolio within the work budget
-        runs = max(1, _naive_cx(merged) * sum(len(lays) for _, _, lays in plan))
-        extra = min(len(EXTENDED_CONFIGS), max(0, portfolio_budget) // runs)
-        network_configs = NETWORK_CONFIGS + EXTENDED_CONFIGS[:extra]
-    configs = [_norm_config(c) for c in network_configs]
-    if not configs:
-        raise ValueError("network_configs is empty")
-    # branch and bound with a small slack: runs above (1 + slack) times the best CX
-    # count so far cannot be among the finalists; the cheapest few finalists are
-    # all transpiled (the transpiler's savings differ between them) and the
-    # fewest two-qubit gates after transpilation wins
-    done: list[tuple[int, int, Any, list[int], tuple[int, ...], str]] = []
-    best_cx = 0
-    runs = 0  # run counter: stable order of equal CX counts
-    seen: set[tuple[Any, ...]] = set()
-    for gname, gedges, lays in plan:
         for lay in lays:
             used = sorted({lay[q] for _, qs, _ in merged for q in qs})
             active = connected_active_set(target.num_qubits, gedges, used)
+            groups.append((gname, gedges, lay, active))
+    explicit = network_configs is not None
+    configs = [
+        _norm_config(c)
+        for c in (NETWORK_CONFIGS if network_configs is None else network_configs)
+    ]
+    if not configs:
+        raise ValueError("network_configs is empty")
+    pf = _Portfolio(
+        merged, target.num_qubits, groups, finalize_permutation, limit, work_budget
+    )
+    if explicit:
+        # given settings: each on every graph and layout in full, by branch and
+        # bound with a small slack (runs above (1 + slack) times the best CX
+        # count so far cannot be finalists)
+        for gi in range(len(groups)):
             for cfg in configs:
-                window, front, next_weight, decay, block_mode, block_bias = cfg
-                cap = limit
-                if best_cx:
-                    slack = best_cx * FINALIST_SLACK // 1024
-                    cap = best_cx + slack if cap == 0 else min(cap, best_cx + slack)
-                net = synthesize_network(
-                    merged,
-                    target.num_qubits,
-                    gedges,
-                    lay,
-                    active=active,
-                    window=window,
-                    front=front,
-                    next_weight=next_weight,
-                    decay=decay,
-                    block_mode=block_mode,
-                    block_bias=block_bias,
-                    finalize_permutation=finalize_permutation,
-                    cx_limit=cap,
-                )
-                if net.aborted:
-                    continue
-                # settings that only differ in an unused look-ahead give identical
-                # runs: keep one of each (by CX count, blocks and rotation order)
-                sig = (
-                    net.num_cx,
-                    net.blocks,
-                    net.swap_blocks,
-                    tuple(net.order),
-                    tuple(lay),
-                    gname,
-                )
-                if sig in seen:
-                    continue
-                seen.add(sig)
-                runs += 1
-                done.append((net.num_cx, runs, net, lay, cfg, gname))
-                if not best_cx or net.num_cx < best_cx:
-                    best_cx = net.num_cx
-                    # keep only the runs that can still be finalists (memory)
-                    keep = best_cx + best_cx * FINALIST_SLACK // 1024
-                    done = sorted(d for d in done if d[0] <= keep)[:FINALISTS]
-                elif len(done) > 4 * FINALISTS:
-                    done = sorted(done)[:FINALISTS]
-    if not done:
-        return None
-    cut = best_cx + best_cx * FINALIST_SLACK // 1024
-    finalists = sorted(d for d in done if d[0] <= cut)[:FINALISTS]
+                pf.full(gi, cfg)
+    else:
+        # stage 1: the base settings on every graph and layout (setting-major
+        # priority) within half of the budget; stage 2: the extended settings
+        # on the graph and layout of the best run, screened, within the rest
+        pool = [(gi, cfg) for cfg in configs for gi in range(len(groups))]
+        pf.full(*pool[0])  # measures the work rate
+        extended = [_norm_config(c) for c in EXTENDED_CONFIGS]
+        whole = sum(pf.estimate(c) for c in configs + extended) * len(groups)
+        if pf.rate and whole <= EXHAUSTIVE_WORK:
+            # small formulas: every setting on every graph and layout in full
+            for gi in range(len(groups)):
+                for cfg in configs + extended:
+                    if (gi, cfg) != pool[0]:
+                        pf.full(gi, cfg)
+            top = []
+        else:
+            pf.stage(pool[1:], work_budget // 2, False)
+            top = pf.top_groups(STAGE2_GROUPS)
+        if top:
+            pf.stage(
+                [(gi, c) for c in extended for gi in top],
+                work_budget,
+                STAGE2_SCREEN,
+            )
+    finalists = pf.finalists()
+    # the cheapest few finalists are all transpiled (the transpiler's savings
+    # differ between them) and the fewest two-qubit gates after transpilation wins
     out: _Candidate | None = None
-    for _, _, f_net, f_lay, f_cfg, f_graph in finalists:
+    for _, _, f_net, f_lay, f_cfg, f_graph, _ in finalists:
+        if repeat > 1:  # copies of a block with an exact final frame
+            qc = QuantumCircuit()
+            wires = list(range(f_net.circuit.num_qubits))
+            for _ in range(repeat):
+                qc.compose(f_net.circuit, wires, inplace=True)
+            f_net = replace(f_net, circuit=qc, num_cx=repeat * f_net.num_cx)
         cand = _transpile_network(
             n, f_net, f_lay, f_cfg, f_graph, target, optimization_level, seed
         )
@@ -756,19 +1070,101 @@ def _compile_formula(
     options: dict[str, Any],
     bound: int = 0,
 ) -> EvolutionResult | None:
-    """Compile the ``steps``-step formula of ``terms`` (already in term order)."""
+    """Compile the ``steps``-step formula of ``terms`` (already in term order).
+
+    ``options["block_steps"]``: ``None`` (automatic, see :data:`BLOCK_RATIO`),
+    ``0`` (never) or the steps of a repeated block.
+    """
+    opts = dict(options)
+    block = opts.pop("block_steps", None)
     rotations = product_formula(terms, time, steps, order)
+    network = "network" in opts["methods"]
+    if block is None:
+        block = 0
+        if steps >= 2 and network:
+            merged = merge_commuting(rotations, n)
+            try:
+                cands = _compile_rotations(
+                    n, terms, merged, target, bound=bound, probe=True, **opts
+                )
+            except _TooBigError:
+                block = 1
+            else:
+                if not cands:
+                    return None
+                return _result(n, term_order, order, steps, rotations, cands)
+    if block and network:
+        if block > steps:
+            raise ValueError("block_steps must not exceed steps")
+        return _compile_blocks(
+            n, terms, time, steps, order, target, term_order, opts, bound, block
+        )
     merged = merge_commuting(rotations, n)
-    cands = _compile_rotations(n, terms, merged, target, bound=bound, **options)
+    cands = _compile_rotations(n, terms, merged, target, bound=bound, **opts)
     if not cands:
         return None
     return _result(n, term_order, order, steps, rotations, cands)
+
+
+def _compile_blocks(
+    n: int,
+    terms: Sequence[PauliTerm],
+    time: float,
+    steps: int,
+    order: int,
+    target: CompilationTarget,
+    term_order: str,
+    options: dict[str, Any],
+    bound: int,
+    block: int,
+) -> EvolutionResult | None:
+    """The ``steps``-step formula as ``steps / block`` copies of one
+    ``block``-step network circuit.
+
+    The steps of a product formula are identical, so the formula is the
+    block formula repeated (the merges of rotations across block boundaries
+    are given up).  The block is synthesized by the network with its final
+    frame synthesized exactly (no output permutation), so it starts and ends
+    on the same layout; the portfolio runs on the block alone and the copies
+    of the finalists are transpiled together.  The ladder of the whole
+    formula (when requested) is compiled first and competes; it also bounds
+    the block runs (:data:`NETWORK_ABORT_RATIO`).
+    """
+    if steps % block:
+        raise ValueError(f"steps ({steps}) must be a multiple of block_steps ({block})")
+    reps = steps // block
+    rotations = product_formula(terms, time, steps, order)
+    cands: list[_Candidate] = []
+    if "ladder" in options["methods"]:
+        # the ladder of the whole formula competes and bounds the block runs
+        lad = dict(options)
+        lad["methods"] = ("ladder",)
+        whole = merge_commuting(rotations, n)
+        cands += _compile_rotations(n, terms, whole, target, **lad)
+        cap = int(NETWORK_ABORT_RATIO * cands[0].key[0]) + 1
+        bound = cap if bound <= 0 else min(bound, cap)
+    sub = product_formula(terms, time * block / steps, block, order)
+    merged = merge_commuting(sub, n)
+    opts = dict(options)
+    opts["methods"] = ("network",)
+    opts["finalize_permutation"] = False
+    each = 0 if bound <= 0 else bound // reps + 1
+    cands += _compile_rotations(
+        n, terms, merged, target, bound=each, repeat=reps, **opts
+    )
+    if not cands:
+        return None
+    res = _result(n, term_order, order, steps, rotations, cands)
+    if res.method == "network":
+        res.block_steps = block
+    return res
 
 
 def _fixed_options(options: dict[str, Any], res: EvolutionResult) -> dict[str, Any]:
     """``options`` restricted to the candidate selected in ``res``."""
     out = dict(options)
     out["methods"] = (res.method,)
+    out["block_steps"] = res.block_steps or 0
     if res.method == "network":
         out["layouts"] = [res.network_layout]
         out["network_configs"] = [res.network_config]
@@ -952,6 +1348,7 @@ def _compile_defaults(seed: int) -> dict[str, Any]:
         "layouts": None,
         "finalize_permutation": True,
         "network_graphs": NETWORK_GRAPHS,
+        "block_steps": None,
     }
 
 
@@ -977,6 +1374,7 @@ def compile_evolution(
     max_steps: int = 4096,
     network_graphs: Sequence[str] = NETWORK_GRAPHS,
     term_order_cost: str = "compile",
+    block_steps: int | None = None,
 ) -> EvolutionResult:
     """Compile ``exp(-i H t)`` with a product formula for a target.
 
@@ -1047,8 +1445,9 @@ def compile_evolution(
             block_mode, block_bias])`` of
             :func:`~quspect.hamsim.synthesize_network` tried for every
             layout (the fewest CX wins); default (``None``):
-            :data:`NETWORK_CONFIGS` plus as many of :data:`EXTENDED_CONFIGS`
-            as :data:`PORTFOLIO_BUDGET` allows.
+            :data:`NETWORK_CONFIGS` on every graph and layout, then
+            :data:`EXTENDED_CONFIGS` on the best ones, within
+            :data:`WORK_BUDGET` (screened on prefixes when needed).
         layouts: Initial layouts (``layout[logical] = physical``) for the
             network candidate instead of the automatic ones.
         finalize_permutation: Synthesize the network's final frame only up
@@ -1057,6 +1456,14 @@ def compile_evolution(
         network_graphs: Graphs the network candidate is synthesized on
             (subset of :data:`NETWORK_GRAPHS`).
         term_order_cost: ``"compile"`` or ``"estimate"`` (``term_order="auto"``).
+        block_steps: Compile the formula as copies of one compiled
+            ``block_steps``-step circuit (``steps`` must be a multiple; the
+            block's final frame is synthesized exactly so that copies
+            compose; network only).  ``0``: never.  ``None`` (default):
+            a one-step block when a full network run of the whole formula
+            is predicted to exceed ``WORK_BUDGET / BLOCK_RATIO`` (see
+            :data:`BLOCK_RATIO`) — very large formulas then compile in a
+            time independent of ``steps``.
 
     Returns:
         The compiled circuit and its product formula.
@@ -1093,6 +1500,7 @@ def compile_evolution(
         "layouts": layouts,
         "finalize_permutation": finalize_permutation,
         "network_graphs": tuple(network_graphs),
+        "block_steps": block_steps,
     }
     err_est: float | None = None
     metric: str | None = None
@@ -1134,6 +1542,8 @@ def compile_evolution(
         steps, err_est = _steps_for_eps(n, terms, time, order, eps, metric, max_steps)
     elif steps < 1:
         raise ValueError("steps must be >= 1")
+    if block_steps is not None and (block_steps < 0 or block_steps > steps):
+        raise ValueError("block_steps must be None or in [0, steps]")
 
     res = _compile_formula(n, terms, time, steps, order, target, term_order, options)
     if res is None:

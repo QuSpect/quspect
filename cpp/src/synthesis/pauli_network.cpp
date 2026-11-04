@@ -399,9 +399,13 @@ private:
     std::vector<std::vector<int>> dist_;
 };
 
+// 本线程当前综合的计分工作量（见 PauliNetworkResult::work）
+thread_local std::int64_t g_score_work = 0;
+
 // 支集的 Steiner 树代价估计：度量闭包上的最小生成树，边权 2d − 1（相邻 1 个 CX，每多一跳 2 个）。
 std::int64_t SupportCost(const Graph& g, const std::vector<int>& s) {
     const std::size_t k = s.size();
+    g_score_work += static_cast<std::int64_t>(k * k) + 1;
     if (k <= 1) {
         return 0;
     }
@@ -1143,8 +1147,11 @@ PauliNetworkResult SynthesizePauliNetwork(int num_qubits, const std::vector<std:
     if (options.window < 0 || options.front < 1) {
         throw std::invalid_argument("window must be >= 0 and front >= 1");
     }
+    g_score_work = 0;
     Synthesizer s(num_qubits, edges, active, options);
-    return s.Run(x_qubits, z_qubits);
+    PauliNetworkResult res = s.Run(x_qubits, z_qubits);
+    res.work = g_score_work;
+    return res;
 }
 
 std::vector<int> MergeCommutingRotations(int num_qubits, const std::vector<std::vector<int>>& x_qubits,

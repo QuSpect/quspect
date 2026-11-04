@@ -496,14 +496,14 @@ void BindSynthesis(py::module_& m) {
                 gates.emplace_back(static_cast<int>(g.kind), g.q0, g.q1, g.rotation, g.axis, g.negate);
             }
             return py::make_tuple(gates, res.order, res.num_cx, res.finalize_cx, res.blocks, res.swap_blocks,
-                                  res.final_perm, res.aborted);
+                                  res.final_perm, res.aborted, res.work);
         },
         py::arg("num_qubits"), py::arg("edges"), py::arg("active"), py::arg("x_qubits"), py::arg("z_qubits"),
         py::arg("window"), py::arg("front"), py::arg("next_weight"), py::arg("decay"), py::arg("finalize"),
         py::arg("block_mode") = 0, py::arg("block_bias") = 1024, py::arg("finalize_permutation") = false,
         py::arg("cx_limit") = 0,
         "Clifford-frame synthesis of a Pauli rotation sequence on a coupling graph; returns "
-        "(gates, order, num_cx, finalize_cx, blocks, swap_blocks, final_perm, aborted).");
+        "(gates, order, num_cx, finalize_cx, blocks, swap_blocks, final_perm, aborted, work).");
     m.def("_merge_commuting_rotations", &MergeCommutingRotations, py::arg("num_qubits"), py::arg("x_qubits"),
           py::arg("z_qubits"), py::arg("span"),
           "Slot of each rotation after merging identical Paulis separated only by commuting rotations.");

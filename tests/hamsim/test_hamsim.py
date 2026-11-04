@@ -13,6 +13,7 @@ from quspect.hamsim import (
     commutator_bound,
     compile_evolution,
     connected_active_set,
+    cycle_of_length,
     ladder_circuit,
     long_path,
     merge_commuting,
@@ -595,6 +596,132 @@ def test_default_portfolio_extends_within_budget() -> None:
         network_configs=None,
     )
     assert none.two_qubit_gates == ext.two_qubit_gates
+
+
+def test_cycle_of_length_grid() -> None:
+    edges = _grid_edges(2, 4)
+    es = {frozenset(e) for e in edges}
+    for k in (4, 6, 8):
+        cyc = cycle_of_length(8, edges, k)
+        assert len(cyc) == len(set(cyc)) == k
+        assert all(frozenset((cyc[i], cyc[(i + 1) % k])) in es for i in range(k))
+        assert cycle_of_length(8, edges, k) == cyc  # deterministic
+    assert cycle_of_length(8, edges, 5) == []  # odd cycle on a bipartite graph
+    assert cycle_of_length(8, edges, 9) == []
+    assert cycle_of_length(4, [(0, 1), (1, 2), (2, 3)], 4) == []  # a path
+
+
+@native_only
+def test_compile_evolution_cycle_subgraph() -> None:
+    # a periodic chain on a grid: the network may run on a cycle of n qubits
+    terms = heisenberg(6, periodic=True)
+    edges = _grid_edges(2, 4)
+    grid = CompilationTarget.from_coupling_map(8, edges, native_gates=GATES)
+    res = compile_evolution(
+        terms,
+        0.6,
+        grid,
+        steps=2,
+        order=2,
+        methods=("network",),
+        network_graphs=("cycle",),
+    )
+    assert res.network_graph == "cycle"
+    cyc = cycle_of_length(8, edges, 6)
+    ring = {frozenset((cyc[i], cyc[(i + 1) % 6])) for i in range(6)}
+    for ins in res.circuit.instructions:
+        if len(ins.qubits) == 2:
+            assert frozenset(ins.qubits) in ring
+    want = rotations_unitary(res.rotations, 6)
+    assert (
+        layout_error(res.circuit, 8, want, res.initial_layout, res.final_layout) < 1e-8
+    )
+    # without a wrap-around term the cycle is not used
+    open_chain = compile_evolution(
+        heisenberg(6),
+        0.6,
+        grid,
+        steps=2,
+        order=2,
+        methods=("network",),
+        network_graphs=("cycle",),
+    )
+    assert open_chain.network_graph == "device"
+
+
+@native_only
+def test_compile_evolution_block_steps(monkeypatch) -> None:
+    from quspect.hamsim import _compile
+
+    terms = hubbard_like()
+    chain = CompilationTarget.from_coupling_map(6, line(6), native_gates=GATES)
+    res = compile_evolution(terms, 0.9, chain, steps=3, order=2, block_steps=1)
+    assert res.block_steps == 1 and res.method == "network" and res.steps == 3
+    assert res.rotations == product_formula(terms, 0.9, 3, 2)
+    want = rotations_unitary(res.rotations, 5)
+    big = max(6, 1 + max(max(i.qubits) for i in res.circuit.instructions))
+    assert (
+        layout_error(res.circuit, big, want, res.initial_layout, res.final_layout)
+        < 1e-8
+    )
+    assert res.two_qubit_gates == sum(
+        1 for ins in res.circuit.instructions if len(ins.qubits) == 2
+    )
+    plain = compile_evolution(terms, 0.9, chain, steps=3, order=2)
+    never = compile_evolution(terms, 0.9, chain, steps=3, order=2, block_steps=0)
+    assert plain.block_steps is None and never.block_steps is None
+    assert plain.two_qubit_gates == never.two_qubit_gates
+    with pytest.raises(ValueError):
+        compile_evolution(terms, 0.9, chain, steps=3, order=2, block_steps=2)
+    # automatic: a formula whose single network run exceeds its share of the
+    # budget is compiled as a repeated one-step block
+    monkeypatch.setattr(_compile, "PROBE_DIVISOR", 2)
+    auto = compile_evolution(terms, 0.9, chain, steps=4, order=2, block_steps=None)
+    assert auto.block_steps is None
+    monkeypatch.setattr(_compile, "WORK_BUDGET", 1000)
+    small = compile_evolution(terms, 0.9, chain, steps=4, order=2)
+    assert small.block_steps == 1
+    want = rotations_unitary(small.rotations, 5)
+    big = max(6, 1 + max(max(i.qubits) for i in small.circuit.instructions))
+    assert (
+        layout_error(small.circuit, big, want, small.initial_layout, small.final_layout)
+        < 1e-8
+    )
+
+
+@native_only
+def test_default_portfolio_screens_within_budget(monkeypatch) -> None:
+    from quspect.hamsim import _compile
+
+    terms = hubbard_like()
+    grid = CompilationTarget.from_coupling_map(8, _grid_edges(2, 4), native_gates=GATES)
+    calls: list[int] = []
+    real = _compile.synthesize_network
+
+    def counted(rotations, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        calls.append(len(rotations))
+        return real(rotations, *args, **kwargs)
+
+    monkeypatch.setattr(_compile, "synthesize_network", counted)
+    wide = compile_evolution(terms, 0.7, grid, steps=3, order=2, block_steps=0)
+    n_wide = sum(calls)  # rotations processed
+    calls.clear()
+    # a small budget: stage 1 is screened on prefixes, stage 2 is cut short
+    monkeypatch.setattr(_compile, "EXHAUSTIVE_WORK", 0)
+    monkeypatch.setattr(_compile, "WORK_BUDGET", 20_000_000)
+    tight = compile_evolution(terms, 0.7, grid, steps=3, order=2, block_steps=0)
+    assert sum(calls) < n_wide
+    full_len = max(calls)
+    assert any(c < full_len for c in calls)  # prefix runs
+    want = rotations_unitary(tight.rotations, 5)
+    assert (
+        layout_error(tight.circuit, 8, want, tight.initial_layout, tight.final_layout)
+        < 1e-8
+    )
+    again = compile_evolution(terms, 0.7, grid, steps=3, order=2, block_steps=0)
+    assert again.two_qubit_gates == tight.two_qubit_gates  # deterministic
+    assert again.initial_layout == tight.initial_layout
+    assert wide.two_qubit_gates <= int(1.2 * tight.two_qubit_gates)
 
 
 @native_only
