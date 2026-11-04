@@ -401,6 +401,11 @@ private:
 
 // 本线程当前综合的计分工作量（见 PauliNetworkResult::work）
 thread_local std::int64_t g_score_work = 0;
+// 工作量的固定开销项：每次候选计分（预览 + 查表，缓存命中也算）与每个窗口位置的扫描
+constexpr std::int64_t kCostAfterWork = 16;
+constexpr std::int64_t kWindowScanWork = 2;
+// 对易前沿搜索中每次反对易检查
+constexpr std::int64_t kFrontCheckWork = 1;
 
 // 支集的 Steiner 树代价估计：度量闭包上的最小生成树，边权 2d − 1（相邻 1 个 CX，每多一跳 2 个）。
 std::int64_t SupportCost(const Graph& g, const std::vector<int>& s) {
@@ -502,9 +507,11 @@ public:
             for (int pos = 0; pos < lim; ++pos) {
                 const int k = remaining[pos];
                 bool ok = true;
-                for (int prev = 0; prev < pos && ok; ++prev) {
+                int prev = 0;
+                for (; prev < pos && ok; ++prev) {
                     ok = !cur_.Anticommute(k, remaining[prev]);
                 }
+                g_score_work += kFrontCheckWork * (prev + 1);
                 if (!ok) {
                     continue;
                 }
@@ -741,6 +748,8 @@ private:
     std::int64_t CostAfter(const PauliTable& t, int i, int row, const Candidate& c,
                            std::unordered_map<std::uint64_t, std::int64_t>& memo, std::vector<int>& supp) {
         Preview(t, i, c);
+        // 每次计分（缓存命中也算）：预览与查表的固定开销
+        g_score_work += kCostAfterWork;
         const int a = c.g[0].a;
         const int b = c.g[0].b;
         const std::uint64_t key = MemoKey(row, a, b, scratch_.Touches(0, a), scratch_.Touches(0, b));
@@ -759,6 +768,7 @@ private:
                                 const std::vector<std::int64_t>& wcost, const std::vector<std::int64_t>& weights,
                                 std::unordered_map<std::uint64_t, std::int64_t>& memo, std::vector<int>& supp) {
         std::int64_t score = 1024 * CostAfter(cur_, k, -1, cand, memo, supp);
+        g_score_work += kWindowScanWork * static_cast<std::int64_t>(window.size());
         for (std::size_t j = 0; j < window.size(); ++j) {
             const int r = window[j];
             bool touched = false;
@@ -1113,6 +1123,11 @@ private:
     bool Aborted() {
         if (options_.cx_limit > 0 && result_.num_cx > options_.cx_limit) {
             result_.aborted = true;
+        }
+        // 工作量上限：只看确定性的计数，因此在任何机器上停在同一处
+        if (options_.work_limit > 0 && g_score_work > options_.work_limit) {
+            result_.aborted = true;
+            result_.work_exceeded = true;
         }
         return result_.aborted;
     }

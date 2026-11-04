@@ -282,6 +282,31 @@ TEST(PauliNetwork, WorkCounterDeterministicAndGrowing) {
     EXPECT_LT(c.work, a.work);
 }
 
+TEST(PauliNetwork, WorkLimitStopsDeterministically) {
+    // 工作量上限：超过时提前停止（aborted + work_exceeded），停在同一处；上限足够大时与无上限相同
+    const auto rots = Hopping(7);
+    std::vector<P> seq;
+    for (int rep = 0; rep < 3; ++rep) {
+        seq.insert(seq.end(), rots.begin(), rots.end());
+    }
+    const auto full = RunNet(7, Line(7), Range(7), seq);
+    PauliNetworkOptions opt;
+    opt.work_limit = full.work / 3;
+    const auto a = RunNet(7, Line(7), Range(7), seq, opt);
+    const auto b = RunNet(7, Line(7), Range(7), seq, opt);
+    EXPECT_TRUE(a.aborted);
+    EXPECT_TRUE(a.work_exceeded);
+    EXPECT_EQ(a.order, b.order);
+    EXPECT_EQ(a.work, b.work);
+    EXPECT_LT(a.order.size(), full.order.size());
+    opt.work_limit = full.work;
+    const auto c = RunNet(7, Line(7), Range(7), seq, opt);
+    EXPECT_FALSE(c.aborted);
+    EXPECT_FALSE(c.work_exceeded);
+    EXPECT_EQ(c.num_cx, full.num_cx);
+    EXPECT_EQ(c.order, full.order);
+}
+
 TEST(PauliNetwork, AncillaInActiveSetAndUnfinalized) {
     // 比特 1 不在任何旋转上，但在活动集中（连接 0 与 2）
     std::vector<P> rots = {Parse("ZIZ"), Parse("XIX"), Parse("YIY"), Parse("ZIX")};

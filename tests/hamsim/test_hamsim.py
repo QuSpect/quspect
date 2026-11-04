@@ -667,6 +667,20 @@ def test_compile_evolution_block_steps(monkeypatch) -> None:
     assert res.two_qubit_gates == sum(
         1 for ins in res.circuit.instructions if len(ins.qubits) == 2
     )
+    # large repeated blocks: the block is transpiled once and repeated
+    monkeypatch.setattr(_compile, "REPEAT_TRANSPILE_CX", 0)
+    once = compile_evolution(terms, 0.9, chain, steps=3, order=2, block_steps=1)
+    assert once.block_steps == 1
+    big = max(6, 1 + max(max(i.qubits) for i in once.circuit.instructions))
+    assert (
+        layout_error(once.circuit, big, want, once.initial_layout, once.final_layout)
+        < 1e-8
+    )
+    assert once.two_qubit_gates == sum(
+        1 for ins in once.circuit.instructions if len(ins.qubits) == 2
+    )
+    assert once.two_qubit_gates % 3 == 0
+    monkeypatch.undo()
     plain = compile_evolution(terms, 0.9, chain, steps=3, order=2)
     never = compile_evolution(terms, 0.9, chain, steps=3, order=2, block_steps=0)
     assert plain.block_steps is None and never.block_steps is None
@@ -678,7 +692,9 @@ def test_compile_evolution_block_steps(monkeypatch) -> None:
     monkeypatch.setattr(_compile, "PROBE_DIVISOR", 2)
     auto = compile_evolution(terms, 0.9, chain, steps=4, order=2, block_steps=None)
     assert auto.block_steps is None
-    monkeypatch.setattr(_compile, "WORK_BUDGET", 1000)
+    # (a full run of the four-step formula needs about 140 000 work units, a
+    # run of the one-step block about 20 000)
+    monkeypatch.setattr(_compile, "WORK_BUDGET", 160_000)
     small = compile_evolution(terms, 0.9, chain, steps=4, order=2)
     assert small.block_steps == 1
     want = rotations_unitary(small.rotations, 5)
@@ -687,6 +703,27 @@ def test_compile_evolution_block_steps(monkeypatch) -> None:
         layout_error(small.circuit, big, want, small.initial_layout, small.final_layout)
         < 1e-8
     )
+    # without the probe: the first full run stops at half of the budget
+    # (deterministic work limit) and the formula is compiled as blocks too
+    monkeypatch.setattr(_compile, "PROBE_DIVISOR", 1000)
+    monkeypatch.setattr(_compile, "WORK_BUDGET", 240_000)
+    capped = compile_evolution(terms, 0.9, chain, steps=4, order=2)
+    assert capped.block_steps == 1
+    want = rotations_unitary(capped.rotations, 5)
+    big = max(6, 1 + max(max(i.qubits) for i in capped.circuit.instructions))
+    assert (
+        layout_error(
+            capped.circuit, big, want, capped.initial_layout, capped.final_layout
+        )
+        < 1e-8
+    )
+    # a one-step formula has no blocks: a run above the limit leaves the
+    # ladder, or (network only) one run in full
+    monkeypatch.setattr(_compile, "WORK_BUDGET", 2_000)
+    lad = compile_evolution(terms, 0.9, chain, steps=1, order=2)
+    assert lad.method == "ladder"
+    net = compile_evolution(terms, 0.9, chain, steps=1, order=2, methods=("network",))
+    assert net.method == "network"
 
 
 @native_only

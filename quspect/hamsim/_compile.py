@@ -99,7 +99,14 @@ EXTENDED_CONFIGS: tuple[tuple[int, int, int, int, int, int], ...] = tuple(
 #: runs among the survivors, so this keeps the quality of trying every setting on every
 #: layout at a fraction of its work, and bounds the work of very large formulas (e.g.
 #: 100-qubit lattices on a line) that a fixed portfolio cannot.  Small formulas (see
-#: :data:`EXHAUSTIVE_WORK`) still try everything.
+#: :data:`EXHAUSTIVE_WORK`) still try everything.  Every run also stops (and is
+#: abandoned) once the scoring work reaches the end of its stage (the ``work_limit`` of
+#: :func:`~quspect.hamsim.synthesize_network`, a deterministic count): the first run at
+#: half of the budget — when it does not fit there, a formula of several steps is
+#: compiled as repeated one-step blocks (see :data:`BLOCK_RATIO`) and otherwise the
+#: ladder is kept — so no single run can exceed the budget, however much the work of
+#: a run grows once its frame images widen (a prefix of half the formula can need a
+#: thousandth of the work of the whole).
 WORK_BUDGET = 60_000_000_000
 
 #: With ``block_steps=None`` (automatic), a formula of several steps whose
@@ -119,12 +126,20 @@ PROBE_DIVISOR = 16
 #: it all in full (see :data:`WORK_BUDGET`).
 EXHAUSTIVE_WORK = 1_000_000_000
 
-#: Stage 2 of the default portfolio runs on this many best graphs and
-#: layouts of stage 1 (see :data:`WORK_BUDGET`).
+#: Stage 2 of the default portfolio runs on at least this many best graphs
+#: and layouts of stage 1 (see :data:`WORK_BUDGET` and
+#: :data:`STAGE2_FULL_WORK`).
 STAGE2_GROUPS = 2
 
-#: Stage 2 is screened on prefixes (otherwise in full while it fits).
+#: Stage 2 is screened on prefixes when its runs do not fit in the rest of
+#: the budget (``False``: in full while it fits, as stage 1).
 STAGE2_SCREEN = True
+
+#: Stage 2 runs in full (not screened) on as many best groups as fit in
+#: this much work (and in the rest of the budget), when its runs on the
+#: :data:`STAGE2_GROUPS` best groups fit: cheap formulas try every setting
+#: on more layouts, and are not screened.
+STAGE2_FULL_WORK = 20_000_000_000
 
 #: Screening runs take the first ``1 / SCREEN_DIVISOR`` of the rotations.
 SCREEN_DIVISOR = 4
@@ -174,6 +189,22 @@ LARGE_FORMULA_CX = 50_000
 #: ``1 / LADDER_SKIP_RATIO`` of the textbook CX.
 LADDER_SKIP_RATIO = 4
 
+#: Ladders of more textbook CX than this are transpiled at level 1 only:
+#: routing hundreds of thousands of CX at level 3 takes minutes (four steps
+#: of a 20-qubit molecule on heavy-hex, 400 000 CX: 190 s at level 3, 48 s
+#: at level 1).  Such ladders are far behind the network (molecules: by a
+#: factor of 1.5–4), so they remain only a fallback and a bound.
+HUGE_LADDER_CX = 350_000
+
+#: Repeated blocks whose copies have more CX than this are transpiled once
+#: and the transpiled block is repeated (see :func:`_repeat_block`); smaller
+#: ones are transpiled as a whole (the optimizations across the copies save
+#: a few gates).
+REPEAT_TRANSPILE_CX = 100_000
+
+#: ... and only the cheapest ``REPEAT_FINALISTS`` finalists are transpiled.
+REPEAT_FINALISTS = 2
+
 
 @dataclass
 class EvolutionResult:
@@ -213,8 +244,9 @@ class EvolutionResult:
             (steps, error estimate, estimated two-qubit gates)}``.
         block_steps: Steps of the repeated block when the circuit is copies
             of one compiled block (``None`` otherwise; see ``block_steps`` of
-            :func:`compile_evolution`).  ``transpile_result`` is then the
-            block's.
+            :func:`compile_evolution`).  ``transpile_result`` is then that
+            of the copies, or of one block when the transpiled block is
+            repeated (see :data:`REPEAT_TRANSPILE_CX`).
     """
 
     circuit: QuantumCircuit
@@ -544,9 +576,10 @@ def _compile_rotations(
     def ladder() -> _Candidate:
         qc = ladder_circuit(merged, n)
         _pad(qc, range(n))
-        res = transpile(
-            qc, target, optimization_level=ladder_level or optimization_level, seed=seed
-        )
+        level = ladder_level or optimization_level
+        if naive > HUGE_LADDER_CX:
+            level = min(level, 1)
+        res = transpile(qc, target, optimization_level=level, seed=seed)
         key = (res.stats.two_qubit_gates, res.stats.two_qubit_depth)
         return _Candidate(
             key,
@@ -570,22 +603,27 @@ def _compile_rotations(
             limit = int(NETWORK_ABORT_RATIO * naive) + 1
         if bound > 0:
             limit = bound if limit == 0 else min(limit, bound)
-        net = _network_candidate(
-            n,
-            terms,
-            merged,
-            target,
-            optimization_level=optimization_level,
-            seed=seed,
-            layout_trials=layout_trials,
-            network_configs=network_configs,
-            layouts=layouts,
-            finalize_permutation=finalize_permutation,
-            limit=limit,
-            network_graphs=network_graphs,
-            work_budget=work_budget,
-            repeat=repeat,
-        )
+        try:
+            net = _network_candidate(
+                n,
+                terms,
+                merged,
+                target,
+                optimization_level=optimization_level,
+                seed=seed,
+                layout_trials=layout_trials,
+                network_configs=network_configs,
+                layouts=layouts,
+                finalize_permutation=finalize_permutation,
+                limit=limit,
+                network_graphs=network_graphs,
+                work_budget=work_budget,
+                repeat=repeat,
+                too_big=probe,
+            )
+        except _TooBigError as exc:
+            exc.ladder = out  # the ladder already compiled (reused by the blocks)
+            raise
         if net is not None:
             out.append(net)
     if want_ladder and large and want_network:
@@ -596,7 +634,14 @@ def _compile_rotations(
 
 
 class _TooBigError(Exception):
-    """A full network run of the formula would exceed its share of the budget."""
+    """A full network run of the formula would exceed its share of the budget.
+
+    ``ladder``: the ladder candidates compiled before (if any).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ladder: list[_Candidate] = []
 
 
 #: A completed network run: ``(CX, run number, network, layout, setting, graph
@@ -640,11 +685,16 @@ class _Portfolio:
         self.runs = 0  # run counter: stable order of equal CX counts
         self.seen: set[tuple[Any, ...]] = set()
         self.group_best: dict[int, int] = {}  # fewest CX of each group's runs
+        # work at which the current stage ends: no run starts at or after it and
+        # every run stops there (``work_limit`` of the native core); 0: no limit
+        self.end = 0
+        self.exceeded = False  # the last run stopped at the work limit
 
     def _synth(self, gi: int, cfg: tuple[int, ...], length: int, cap: int) -> Any:
         _, gedges, lay, active = self.groups[gi]
         window, front, next_weight, decay, block_mode, block_bias = cfg
         full = length >= len(self.merged)
+        work_limit = max(1, self.end - self.spent) if self.end else 0
         net = synthesize_network(
             self.merged if full else self.merged[:length],
             self.num_physical,
@@ -660,7 +710,9 @@ class _Portfolio:
             finalize=full,
             finalize_permutation=self.finalize_permutation and full,
             cx_limit=cap,
+            work_limit=work_limit,
         )
+        self.exceeded = net.work_exceeded
         work = net.work + (len(net.order) + net.num_cx) * (window + 16)
         self.spent += work
         if full and not net.aborted and not self.rate:
@@ -718,6 +770,7 @@ class _Portfolio:
         pool = list(pool)
         if not pool:
             return
+        self.end = end
         if not self.rate:  # the first run of the formula measures the work rate
             self.full(*pool[0])
             pool = pool[1:]
@@ -851,7 +904,11 @@ def _network_candidate(
     network_graphs: Sequence[str] = NETWORK_GRAPHS,
     work_budget: int = 0,
     repeat: int = 1,
+    too_big: bool = False,
 ) -> _Candidate | None:
+    """The network candidate (see :data:`WORK_BUDGET`); ``None`` when every run
+    was abandoned.  ``too_big``: raise :class:`_TooBigError` when the first
+    full run alone exceeds half of ``work_budget`` (stopped there)."""
     groups: list[tuple[str, list[tuple[int, int]], list[int], list[int]]] = []
     for gname, gedges, gtarget, walk in _network_graphs(
         target, n, network_graphs, terms
@@ -904,7 +961,16 @@ def _network_candidate(
         # priority) within half of the budget; stage 2: the extended settings
         # on the graph and layout of the best run, screened, within the rest
         pool = [(gi, cfg) for cfg in configs for gi in range(len(groups))]
-        pf.full(*pool[0])  # measures the work rate
+        # the first run measures the work rate; it stops at half of the budget
+        pf.end = work_budget // 2
+        pf.full(*pool[0])
+        if pf.exceeded:
+            if too_big:  # a single run does not fit: compile the formula as blocks
+                raise _TooBigError
+            if limit > 0:  # a ladder (or the bound) competes: no network result
+                return None
+            pf.end = 0  # the network is the only candidate: one run in full
+            pf.full(*pool[0])
         extended = [_norm_config(c) for c in EXTENDED_CONFIGS]
         whole = sum(pf.estimate(c) for c in configs + extended) * len(groups)
         if pf.rate and whole <= EXHAUSTIVE_WORK:
@@ -914,29 +980,54 @@ def _network_candidate(
                     if (gi, cfg) != pool[0]:
                         pf.full(gi, cfg)
             top = []
+            screen = False
         else:
             pf.stage(pool[1:], work_budget // 2, False)
-            top = pf.top_groups(STAGE2_GROUPS)
+            # stage 2 in full on as many best groups as fit in the rest of the
+            # budget, up to STAGE2_FULL_WORK; otherwise screened on the
+            # STAGE2_GROUPS best groups
+            per = sum(pf.estimate(c) for c in extended)
+            room = min(work_budget - pf.spent, STAGE2_FULL_WORK)
+            k = 0 if per <= 0 or room <= 0 else min(len(groups), room // per)
+            top = pf.top_groups(max(k, STAGE2_GROUPS))
+            screen = STAGE2_SCREEN and len(top) * per > room
         if top:
             pf.stage(
                 [(gi, c) for c in extended for gi in top],
                 work_budget,
-                STAGE2_SCREEN,
+                screen,
             )
     finalists = pf.finalists()
+    if finalists and repeat * finalists[0][0] > REPEAT_TRANSPILE_CX:
+        finalists = finalists[:REPEAT_FINALISTS]  # large repeated blocks
     # the cheapest few finalists are all transpiled (the transpiler's savings
     # differ between them) and the fewest two-qubit gates after transpilation wins
     out: _Candidate | None = None
     for _, _, f_net, f_lay, f_cfg, f_graph, _ in finalists:
-        if repeat > 1:  # copies of a block with an exact final frame
-            qc = QuantumCircuit()
-            wires = list(range(f_net.circuit.num_qubits))
-            for _ in range(repeat):
-                qc.compose(f_net.circuit, wires, inplace=True)
-            f_net = replace(f_net, circuit=qc, num_cx=repeat * f_net.num_cx)
-        cand = _transpile_network(
-            n, f_net, f_lay, f_cfg, f_graph, target, optimization_level, seed
-        )
+        cand = None
+        if repeat > 1 and repeat * f_net.num_cx > REPEAT_TRANSPILE_CX:
+            # copies of a block with an exact final frame
+            cand = _repeat_block(
+                n,
+                f_net,
+                f_lay,
+                f_cfg,
+                f_graph,
+                target,
+                optimization_level,
+                seed,
+                repeat,
+            )
+        if cand is None:
+            if repeat > 1:
+                qc = QuantumCircuit()
+                wires = list(range(f_net.circuit.num_qubits))
+                for _ in range(repeat):
+                    qc.compose(f_net.circuit, wires, inplace=True)
+                f_net = replace(f_net, circuit=qc, num_cx=repeat * f_net.num_cx)
+            cand = _transpile_network(
+                n, f_net, f_lay, f_cfg, f_graph, target, optimization_level, seed
+            )
         if out is None or cand.key < out.key:
             out = cand
     return out
@@ -951,6 +1042,7 @@ def _transpile_network(
     target: CompilationTarget,
     optimization_level: int,
     seed: int,
+    elide: bool = True,
 ) -> _Candidate:
     qc = net.circuit
     _pad(qc, sorted(set(lay)))
@@ -960,6 +1052,7 @@ def _transpile_network(
         optimization_level=optimization_level,
         seed=seed,
         initial_layout=list(range(qc.num_qubits)),
+        elide_permutations=elide,
     )
     perm = net.final_permutation
     init = [res.initial_layout[lay[q]] for q in range(n)]
@@ -967,6 +1060,48 @@ def _transpile_network(
     key = (res.stats.two_qubit_gates, res.stats.two_qubit_depth)
     config = cast(tuple[int, int, int, int, int, int], tuple(cfg))
     return _Candidate(key, "network", res.circuit, init, fin, res, lay, config, gname)
+
+
+def _repeat_block(
+    n: int,
+    net: Any,
+    lay: list[int],
+    cfg: tuple[int, ...],
+    gname: str,
+    target: CompilationTarget,
+    optimization_level: int,
+    seed: int,
+    repeat: int,
+) -> _Candidate | None:
+    """``repeat`` copies of the transpiled block (``None`` when the transpiled
+    block does not start and end on the same layout).
+
+    The block is transpiled once and its output repeated: the transpile time
+    no longer grows with the number of copies (only the optimizations across
+    the block boundaries are given up).  When the transpiler turned SWAPs
+    into an output permutation, the block is transpiled again without that
+    (the copies must start and end on the same layout).
+    """
+    from quspect.transpiler._transpile import _score
+
+    def same(c: _Candidate) -> bool:
+        return c.init == c.fin and list(c.res.initial_layout) == list(
+            c.res.final_layout
+        )
+
+    one = _transpile_network(n, net, lay, cfg, gname, target, optimization_level, seed)
+    if not same(one):
+        one = _transpile_network(
+            n, net, lay, cfg, gname, target, optimization_level, seed, elide=False
+        )
+        if not same(one):
+            return None
+    qc = QuantumCircuit()
+    wires = list(range(one.circuit.num_qubits))
+    for _ in range(repeat):
+        qc.compose(one.circuit, wires, inplace=True)
+    two_q, depth, _ = _score(qc)
+    return replace(one, key=(two_q, depth), circuit=qc)
 
 
 def _formula_cost(
@@ -1078,6 +1213,7 @@ def _compile_formula(
     opts = dict(options)
     block = opts.pop("block_steps", None)
     rotations = product_formula(terms, time, steps, order)
+    ladder: list[_Candidate] | None = None
     network = "network" in opts["methods"]
     if block is None:
         block = 0
@@ -1087,8 +1223,9 @@ def _compile_formula(
                 cands = _compile_rotations(
                     n, terms, merged, target, bound=bound, probe=True, **opts
                 )
-            except _TooBigError:
+            except _TooBigError as exc:
                 block = 1
+                ladder = exc.ladder
             else:
                 if not cands:
                     return None
@@ -1097,7 +1234,7 @@ def _compile_formula(
         if block > steps:
             raise ValueError("block_steps must not exceed steps")
         return _compile_blocks(
-            n, terms, time, steps, order, target, term_order, opts, bound, block
+            n, terms, time, steps, order, target, term_order, opts, bound, block, ladder
         )
     merged = merge_commuting(rotations, n)
     cands = _compile_rotations(n, terms, merged, target, bound=bound, **opts)
@@ -1117,6 +1254,7 @@ def _compile_blocks(
     options: dict[str, Any],
     bound: int,
     block: int,
+    ladder: list[_Candidate] | None = None,
 ) -> EvolutionResult | None:
     """The ``steps``-step formula as ``steps / block`` copies of one
     ``block``-step network circuit.
@@ -1126,9 +1264,10 @@ def _compile_blocks(
     are given up).  The block is synthesized by the network with its final
     frame synthesized exactly (no output permutation), so it starts and ends
     on the same layout; the portfolio runs on the block alone and the copies
-    of the finalists are transpiled together.  The ladder of the whole
-    formula (when requested) is compiled first and competes; it also bounds
-    the block runs (:data:`NETWORK_ABORT_RATIO`).
+    of the finalists are transpiled together (large ones: the transpiled block
+    is repeated, see :data:`REPEAT_TRANSPILE_CX`).  The ladder of the whole
+    formula (when requested) is compiled first (or taken from ``ladder``) and
+    competes; it also bounds the block runs (:data:`NETWORK_ABORT_RATIO`).
     """
     if steps % block:
         raise ValueError(f"steps ({steps}) must be a multiple of block_steps ({block})")
@@ -1137,10 +1276,13 @@ def _compile_blocks(
     cands: list[_Candidate] = []
     if "ladder" in options["methods"]:
         # the ladder of the whole formula competes and bounds the block runs
-        lad = dict(options)
-        lad["methods"] = ("ladder",)
-        whole = merge_commuting(rotations, n)
-        cands += _compile_rotations(n, terms, whole, target, **lad)
+        if ladder:
+            cands += ladder
+        else:
+            lad = dict(options)
+            lad["methods"] = ("ladder",)
+            whole = merge_commuting(rotations, n)
+            cands += _compile_rotations(n, terms, whole, target, **lad)
         cap = int(NETWORK_ABORT_RATIO * cands[0].key[0]) + 1
         bound = cap if bound <= 0 else min(bound, cap)
     sub = product_formula(terms, time * block / steps, block, order)
@@ -1310,8 +1452,8 @@ def select_term_order(
                 four = _compile_formula(
                     n, ordered, 4 * time / r, 4, order, target, name, opts, b4
                 )
-                if four is None:
-                    continue
+                if four is None or (b4 and four.two_qubit_gates > b4):
+                    continue  # above the bound: cannot win
                 two = _compile_formula(
                     n,
                     ordered,

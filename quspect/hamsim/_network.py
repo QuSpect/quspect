@@ -112,8 +112,8 @@ class NetworkCircuit:
         final_permutation: ``final_permutation[p]`` is the physical qubit
             that holds, at the end, the state that started on physical
             qubit ``p`` (identity unless ``finalize_permutation``).
-        aborted: The synthesis stopped at ``cx_limit``; ``circuit`` is
-            incomplete and must not be used.
+        aborted: The synthesis stopped at ``cx_limit`` or ``work_limit``;
+            ``circuit`` is incomplete and must not be used.
         work: Scoring work of the run (inner iterations of the support cost
             estimates; deterministic, proportional to its run time).
     """
@@ -127,6 +127,7 @@ class NetworkCircuit:
     final_permutation: list[int] = field(default_factory=list)
     aborted: bool = False
     work: int = 0
+    work_exceeded: bool = False
 
 
 def connected_active_set(
@@ -372,6 +373,7 @@ def synthesize_network(
     block_bias: int = 1024,
     finalize_permutation: bool = False,
     cx_limit: int = 0,
+    work_limit: int = 0,
 ) -> NetworkCircuit:
     """Synthesize ``Π exp(-iθ_k P_k)`` on a coupling graph.
 
@@ -405,6 +407,10 @@ def synthesize_network(
             ``final_permutation`` and is absorbed by the output layout.
         cx_limit: Stop early (``aborted``) once more than ``cx_limit`` CX
             have been emitted; ``0``: no limit.
+        work_limit: Stop early (``aborted`` and ``work_exceeded``) once the
+            scoring work (see ``work``) exceeds ``work_limit``; ``0``: no
+            limit.  The work is a deterministic count, so a run stops at the
+            same point on every machine.
 
     Returns:
         The circuit and gate counts.
@@ -413,7 +419,7 @@ def synthesize_network(
     if active is None:
         active = connected_active_set(num_physical, edges, used or [layout[0]])
     xs, zs = _xz(rotations, layout)
-    gates, order, num_cx, fin_cx, blocks, swap_blocks, perm, aborted, work = (
+    gates, order, num_cx, fin_cx, blocks, swap_blocks, perm, aborted, work, wx = (
         _core()._pauli_network(
             num_physical,
             [(int(a), int(b)) for a, b in edges],
@@ -429,6 +435,7 @@ def synthesize_network(
             block_bias,
             finalize_permutation,
             cx_limit,
+            int(work_limit),
         )
     )
     if aborted:
@@ -442,6 +449,7 @@ def synthesize_network(
             list(perm),
             True,
             int(work),
+            bool(wx),
         )
     qc = QuantumCircuit()
     for kind, q0, q1, rot, axis, neg in gates:
