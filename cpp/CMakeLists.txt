@@ -301,6 +301,7 @@ set(SYNTHESIS_SRCS
   src/synthesis/gate_matrices.cpp
   src/synthesis/kak_synthesis.cpp
   src/synthesis/one_qubit_synthesis.cpp
+  src/synthesis/pauli_network.cpp
   src/synthesis/three_qubit.cpp
 )
 
@@ -618,6 +619,7 @@ if(QSPECT_BUILD_TESTS)
     tests/test_ir_circuit.cpp
     tests/test_qasm2_parser.cpp
     tests/test_kak_synthesis.cpp
+    tests/test_pauli_network.cpp
     tests/test_detmath.cpp
   )
 

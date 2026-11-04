@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,7 @@
 #include "quspect_native/synthesis/gate_matrices.hpp"
 #include "quspect_native/synthesis/kak_synthesis.hpp"
 #include "quspect_native/synthesis/one_qubit_synthesis.hpp"
+#include "quspect_native/synthesis/pauli_network.hpp"
 #include "quspect_native/synthesis/three_qubit.hpp"
 
 namespace py = pybind11;
@@ -467,6 +469,37 @@ void BindSynthesis(py::module_& m) {
           "((u1, u2), theta, (v1h, v2h)) as scipy.linalg.cossin(u, p=4, q=4, separate=True), or None.");
     m.def("_gate_matrix", &GateMatrixPy, py::arg("name"), py::arg("params"),
           "Deterministic matrix of a standard gate (None for an unknown name or a wrong parameter count).");
+    m.def(
+        "_pauli_network",
+        [](int num_qubits, const std::vector<std::pair<int, int>>& edges, const std::vector<int>& active,
+           const std::vector<std::vector<int>>& x_qubits, const std::vector<std::vector<int>>& z_qubits, int window,
+           int front, int next_weight, int decay, bool finalize) {
+            PauliNetworkOptions options;
+            options.window = window;
+            options.front = front;
+            options.next_weight = next_weight;
+            options.decay = decay;
+            options.finalize = finalize;
+            PauliNetworkResult res;
+            {
+                py::gil_scoped_release release;
+                res = SynthesizePauliNetwork(num_qubits, edges, active, x_qubits, z_qubits, options);
+            }
+            // 门编码为 (kind, q0, q1, rotation, axis, negate)；kind 见 NetGateKind
+            std::vector<std::tuple<int, int, int, int, char, bool>> gates;
+            gates.reserve(res.gates.size());
+            for (const NetGate& g : res.gates) {
+                gates.emplace_back(static_cast<int>(g.kind), g.q0, g.q1, g.rotation, g.axis, g.negate);
+            }
+            return py::make_tuple(gates, res.order, res.num_cx, res.finalize_cx);
+        },
+        py::arg("num_qubits"), py::arg("edges"), py::arg("active"), py::arg("x_qubits"), py::arg("z_qubits"),
+        py::arg("window"), py::arg("front"), py::arg("next_weight"), py::arg("decay"), py::arg("finalize"),
+        "Clifford-frame synthesis of a Pauli rotation sequence on a coupling graph; returns "
+        "(gates, order, num_cx, finalize_cx).");
+    m.def("_merge_commuting_rotations", &MergeCommutingRotations, py::arg("num_qubits"), py::arg("x_qubits"),
+          py::arg("z_qubits"), py::arg("span"),
+          "Slot of each rotation after merging identical Paulis separated only by commuting rotations.");
 }
 
 }  // namespace quspect::native::pybind

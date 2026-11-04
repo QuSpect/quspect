@@ -118,6 +118,13 @@ Quadratic Optimization
 .. automodule:: quspect.optimization.isingq
    :members:
 
+Hamiltonian Simulation
+----------------------
+
+.. automodule:: quspect.hamsim
+   :members:
+   :imported-members:
+
 DAG
 ---
 
