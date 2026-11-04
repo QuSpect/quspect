@@ -40,6 +40,7 @@ from quspect.hamsim._network import (
     NetworkCircuit,
     connected_active_set,
     ladder_circuit,
+    long_path,
     merge_commuting,
     synthesize_network,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "compile_evolution",
     "connected_active_set",
     "ladder_circuit",
+    "long_path",
     "merge_commuting",
     "one_step",
     "order_terms",
