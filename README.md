@@ -585,6 +585,14 @@ export LQCLOUD_API_KEY=qk_your_api_key_here
 pip install "quspect[logicalqubit]"
 ```
 
+The extra installs lqcloud 0.6, which is published for Python 3.11 and 3.12
+only. Since lqcloud 0.6, `LQCLOUD_API_KEY` / `LQCLOUD_TOKEN` / `LQCLOUD_URL`
+take precedence over arguments passed to `LogicalQubitProvider(...)`; QuSpect
+warns when an explicit argument is overridden this way. lqcloud 0.6 also keeps
+a local job store (submitted circuits and fetched results, capped at 2 GB under
+`~/.lqcloud/store`) by default; disable it with
+`LogicalQubitProvider(store=False)` or `LQCLOUD_STORE=0`.
+
 ### Run on Real Hardware
 
 The calls below create real provider jobs and may consume quota or incur cost.
@@ -723,18 +731,22 @@ If a later provider chunk fails after earlier chunks were accepted,
 `submitted_references`, and any `cancellation_failures` instead of losing the
 already-created task handles.
 
-On an older LogicalQubit server, lqcloud 0.4.1 may internally fall back from
-native batch to individual submissions without exposing partial child IDs if
-that fallback itself fails. For experiments requiring complete rollback
-visibility, set `options={"provider_batching": "individual"}` (or pass the same
-option through `SamplingEngine(execution_options=...)`). QuSpect then owns each
-submission and can report/cancel every task it has created; the trade-off is
-one provider task per circuit.
+Each native batch is one asynchronous provider task. To submit one task per
+circuit instead, set `options={"provider_batching": "individual"}` (or pass the
+same option through `SamplingEngine(execution_options=...)`); QuSpect then
+tracks, reports and cancels every task itself, at the cost of one provider task
+per circuit.
 
 With `result_format="auto"`, lqcloud selects `counts` for narrow readout and
 `memory` when the measured width requires per-shot output. QuSpect always
 provides aggregated `result.counts`; when memory is returned, the original
 shot sequence is also available as `result.memory`.
+
+With `readout_correction=True`, results follow lqcloud 0.6: `result.counts`
+(and `result.memory`) are the raw measured outcomes, `result.probabilities` is
+the server-corrected distribution (which `SamplingEngine` uses), and
+`result.metadata["quasi_counts"]` holds its unrounded `probability × shots`
+values.
 
 Shot-based observable objectives use the same job layer:
 

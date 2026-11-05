@@ -236,11 +236,11 @@ shortcut.  An optimizer sweep therefore does not create one cloud task per
 point.  The ``auto`` result format lets lqcloud choose between counts and
 per-shot memory according to readout width.
 
-For older servers where the SDK's private native-batch fallback must be
-avoided, pass ``provider_batching="individual"`` in ``execution_options``.
-QuSpect will then submit and track each circuit itself, allowing complete
-``PartialSubmissionError`` reporting and best-effort cancellation at the cost
-of additional provider tasks.
+Each native batch is one asynchronous provider task.  To have QuSpect submit
+and track every circuit as its own task instead, pass
+``provider_batching="individual"`` in ``execution_options``; this allows
+complete ``PartialSubmissionError`` reporting and best-effort cancellation at
+the cost of additional provider tasks.
 
 After a process restart, reconstruct the provider job and attach the compiled
 decoder.  A job reference intentionally contains no API key or token:

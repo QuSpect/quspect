@@ -258,14 +258,14 @@ msgstr ""
 
 #: ../../source/variational.rst:239
 msgid ""
-"For older servers where the SDK's private native-batch fallback must be "
-"avoided, pass ``provider_batching=\"individual\"`` in "
-"``execution_options``. QuSpect will then submit and track each circuit "
-"itself, allowing complete ``PartialSubmissionError`` reporting and best-"
-"effort cancellation at the cost of additional provider tasks."
+"Each native batch is one asynchronous provider task.  To have QuSpect "
+"submit and track every circuit as its own task instead, pass "
+"``provider_batching=\"individual\"`` in ``execution_options``; this allows "
+"complete ``PartialSubmissionError`` reporting and best-effort cancellation "
+"at the cost of additional provider tasks."
 msgstr ""
-"对于需要避免 SDK 私有原生批处理回退机制的旧版服务器，请在 ``execution_options`` 中传入 "
-"``provider_batching=\"individual\"``。此时 QuSpect 会自行提交并跟踪每个线路，从而能够完整报告 "
+"每个原生批次对应一个异步提供方任务。如果希望由 QuSpect 将每个线路作为独立任务提交并跟踪，请在 "
+"``execution_options`` 中传入 ``provider_batching=\"individual\"``；这样能够完整报告 "
 "``PartialSubmissionError`` 并尽力取消，代价是产生额外的提供方任务。"
 
 #: ../../source/variational.rst:245

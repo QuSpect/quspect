@@ -25,6 +25,10 @@ if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.simulation.result import SimulationResult
 
+# lqcloud 0.6 accepts min(2000, (52_000 - shots) // 25) circuits per batch
+# (80 at the 50_000-shot maximum) as long as the estimated result fits the
+# cloud's 12 MB budget. 64 stays below the count limit at every legal shot
+# count and keeps chunks small enough for the budget in common cases.
 _MAX_BATCH_CIRCUITS = 64
 _MAX_SHOTS = 50_000
 _SUPPORTED_PROVIDER_OPTIONS = {
@@ -452,25 +456,21 @@ class LogicalQubitBackend(CloudBackend):
         result_format: str,
         workload_id: str | None,
     ) -> JobReference:
-        children = tuple(getattr(raw_job, "_children", ()))
-        child_job_ids = tuple(
-            str(child.job_id) for child in children if getattr(child, "job_id", None)
-        )
+        # lqcloud 0.6 returns one task per submission (its per-circuit batch
+        # fallback is gone) and submits every task asynchronously.
         return JobReference(
             platform="logicalqubit",
             backend_name=self.name,
             job_id=str(raw_job.job_id),
             base_url=getattr(raw_job, "base_url", None)
             or getattr(self._lq_backend, "base_url", None),
-            transport=_job_transport(raw_job, children),
+            transport="async",
             batch_size=batch_size,
             labels=labels,
             experiment_shapes=shapes,
             shots=shots,
             result_format=result_format,
             workload_id=workload_id,
-            child_job_ids=child_job_ids,
-            child_batch_sizes=(1,) * len(child_job_ids),
         )
 
     @staticmethod
@@ -678,17 +678,3 @@ class LogicalQubitBackend(CloudBackend):
 
     def __repr__(self) -> str:
         return f"LogicalQubitBackend(name={self.name!r}, qubits={self.num_qubits})"
-
-
-def _job_transport(raw_job: Any, children: Sequence[Any]) -> str:
-    """Infer SDK fallback transport from its real children, not its wrapper."""
-    child_modes = {
-        bool(child._use_async)
-        for child in children
-        if getattr(child, "_use_async", None) is not None
-    }
-    if len(child_modes) > 1:
-        raise BackendError("LogicalQubit fallback children use mixed transports.")
-    if child_modes:
-        return "async" if child_modes.pop() else "sync"
-    return "async" if bool(getattr(raw_job, "_use_async", True)) else "sync"

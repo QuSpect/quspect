@@ -562,6 +562,18 @@ export LQCLOUD_API_KEY=qk_your_api_key_here
 pip install "quspect[logicalqubit]"
 ```
 
+该 extra 安装 lqcloud 0.6，它只发布了 Python 3.11 与 3.12 的版本。自 lqcloud 0.6
+起，`LQCLOUD_API_KEY` / `LQCLOUD_TOKEN` / `LQCLOUD_URL` 环境变量优先于传给
+`LogicalQubitProvider(...)` 的参数；显式参数因此被忽略时 QuSpect 会给出警告。
+lqcloud 0.6 还默认开启本地任务库（在 `~/.lqcloud/store` 下保存提交的线路与取回的
+结果，上限 2 GB），可用 `LogicalQubitProvider(store=False)` 或 `LQCLOUD_STORE=0`
+关闭。
+
+开启 `readout_correction=True` 时结果遵循 lqcloud 0.6 的语义：`result.counts`
+（以及 `result.memory`）是原始测量结果，`result.probabilities` 是服务端矫正后的
+分布（`SamplingEngine` 使用的就是它），`result.metadata["quasi_counts"]` 保存其
+未取整的「概率 × shots」值。
+
 ### 真机运行
 
 以下调用会创建真实任务，可能消耗额度。提交前请使用

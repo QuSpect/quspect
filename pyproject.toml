@@ -51,8 +51,12 @@ Issues = "https://github.com/QuSpect/quspect/issues"
 isingq = [
     "httpx>=0.27,<1",
 ]
+# lqcloud 0.6 只发布了 CPython 3.11–3.12 的版本（Requires-Python: >=3.11,<3.13），
+# 用 marker 把它限定在这个区间：其余解释器上该 extra 为空，导入时由
+# LogicalQubitProvider 给出明确的 OptionalDependencyError。uv 的全版本锁定
+# 也要求这个 marker，否则 requires-python >=3.10 无法求解。
 logicalqubit = [
-    "lqcloud>=0.4.1,<0.6",
+    "lqcloud>=0.6.1,<0.7; python_version >= '3.11' and python_version < '3.13'",
 ]
 validation = [
     "qiskit>=1.0",

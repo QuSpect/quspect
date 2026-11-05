@@ -44,7 +44,6 @@ class _RawJob:
         self.job_id = job_id
         self.backend_name = "QZ02"
         self.base_url = "https://example.invalid"
-        self._use_async = True
         self._result = result
         self._is_batch = is_batch
         self._batch_size = len(result.results) if is_batch else None
@@ -235,35 +234,26 @@ def test_partial_chunk_submission_exposes_created_jobs_and_cancels_them(
     assert backend._lq_backend.jobs[0].cancelled is True
 
 
-def test_sdk_fallback_reference_infers_async_transport_from_children(
+def test_native_batch_reference_is_one_async_task(
     backend: LogicalQubitBackend,
 ) -> None:
-    raw_job = _RawJob(
-        "task_wrapper",
-        _RawResult({"0": 4}, "task_wrapper"),
-        is_batch=False,
-    )
-    raw_job._use_async = False  # lqcloud 0.4.1 fallback-wrapper default
-    raw_job._children = (
-        SimpleNamespace(job_id="task_a", _use_async=True),
-        SimpleNamespace(job_id="task_b", _use_async=True),
-    )
-
-    reference = backend._make_reference(
-        raw_job,
-        batch_size=2,
-        labels=("a", "b"),
-        shapes=((1, 1), (1, 1)),
+    # lqcloud 0.6 has no per-circuit fallback and no synchronous route: a
+    # native batch is exactly one asynchronous task.
+    request = ExecutionRequest.batch(
+        (_measured(0), _measured(1)),
+        labels=("zero", "one"),
         shots=4,
-        result_format="auto",
-        workload_id="sampling-v1:test",
+        options={"transpile": False},
     )
 
+    reference = backend.submit_request(request).reference
     assert reference.transport == "async"
-    assert reference.child_job_ids == ("task_a", "task_b")
+    assert reference.job_id == "task_1"
+    assert reference.child_job_ids == ()
+    assert reference.batch_size == 2
 
 
-def test_individual_provider_batching_avoids_sdk_batch_fallback(
+def test_individual_provider_batching_submits_one_task_per_circuit(
     backend: LogicalQubitBackend,
 ) -> None:
     request = ExecutionRequest.batch(
