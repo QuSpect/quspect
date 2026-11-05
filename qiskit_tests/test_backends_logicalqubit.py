@@ -118,22 +118,19 @@ class FakeLQJobTimeoutError(Exception):
 
 
 class FakeSDKJob:
-    """Stand-in for ``lqcloud.job.Job`` as constructed by the provider."""
+    """Stand-in for ``lqcloud.job.Job`` (lqcloud 0.6 signature, no ``use_async``)."""
 
     def __init__(
         self,
         job_id: str,
         provider: Any,
-        *,
-        backend_name: str,
-        base_url: str,
-        use_async: bool,
+        backend_name: str | None = None,
+        base_url: str | None = None,
     ) -> None:
         self.job_id = job_id
         self.provider = provider
         self.backend_name = backend_name
         self.base_url = base_url
-        self._use_async = use_async
 
 
 class FakeLQCloudProvider:
@@ -194,8 +191,8 @@ def fake_lqcloud(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         monkeypatch.setitem(sys.modules, name, mod)
     monkeypatch.setattr(lq_provider_mod, "_HAS_LQCLOUD", True)
     monkeypatch.setattr(lq_provider_mod, "lqcloud", root)
-    monkeypatch.delenv("LQCLOUD_API_KEY", raising=False)
-    monkeypatch.delenv("LQCLOUD_URL", raising=False)
+    for name in ("LQCLOUD_API_KEY", "LQCLOUD_TOKEN", "LQCLOUD_URL"):
+        monkeypatch.delenv(name, raising=False)
     FakeLQCloudProvider.instances.clear()
     return root
 
@@ -501,7 +498,6 @@ class RawJob:
         self.job_id = job_id
         self.backend_name = "QZ02"
         self.base_url = BASE_URL
-        self._use_async = True
         self._result = result
         self._status = status
         self._cancel = cancel
@@ -1071,30 +1067,10 @@ def test_backend_native_gate_decomposition() -> None:
     assert_counts_match(result.counts, qiskit_probabilities(circ), SHOTS)
 
 
-def test_job_transport_inference() -> None:
-    """Transport is inferred from children; mixed transports are rejected."""
-    infer = lq_backend_mod._job_transport
-    assert infer(SimpleNamespace(_use_async=False), ()) == "sync"
-    assert infer(SimpleNamespace(), ()) == "async"
-    kids = (SimpleNamespace(_use_async=False), SimpleNamespace(_use_async=None))
-    assert infer(SimpleNamespace(_use_async=True), kids) == "sync"
-    with pytest.raises(BackendError, match="mixed"):
-        infer(
-            SimpleNamespace(),
-            (SimpleNamespace(_use_async=True), SimpleNamespace(_use_async=False)),
-        )
-
-
-def test_make_reference_with_fallback_children(backend: LogicalQubitBackend) -> None:
-    """SDK fallback children are recorded as child job ids."""
-    raw = RawJob("wrap")
-    raw._children = (  # type: ignore[attr-defined]
-        SimpleNamespace(job_id="c1", _use_async=True),
-        SimpleNamespace(job_id=None),
-        SimpleNamespace(job_id="c2", _use_async=True),
-    )
+def test_make_reference_is_one_async_task(backend: LogicalQubitBackend) -> None:
+    """lqcloud 0.6 submits one asynchronous task; no SDK fallback children."""
     ref = backend._make_reference(
-        raw,
+        RawJob("task_7"),
         batch_size=2,
         labels=("a", "b"),
         shapes=((1, 1), (1, 1)),
@@ -1102,9 +1078,10 @@ def test_make_reference_with_fallback_children(backend: LogicalQubitBackend) -> 
         result_format="auto",
         workload_id=None,
     )
-    assert ref.child_job_ids == ("c1", "c2")
-    assert ref.child_batch_sizes == (1, 1)
     assert ref.transport == "async"
+    assert ref.job_id == "task_7"
+    assert ref.child_job_ids == ()
+    assert ref.base_url == BASE_URL
 
 
 def test_workload_id_validated_before_submission(
@@ -1302,19 +1279,14 @@ def test_job_batch_result_and_metadata() -> None:
 def test_job_reference_inferred_from_raw_job() -> None:
     """Without an explicit reference one is inferred from the SDK job."""
     raw = RawJob("w", is_batch=True, batch_size=2)
-    raw._use_async = False
-    raw._children = (  # type: ignore[attr-defined]
-        SimpleNamespace(job_id="c1"),
-        SimpleNamespace(job_id="c2"),
-    )
     job = LogicalQubitJob(raw, requested_shots=7, result_format="counts")
     ref = job.reference
-    assert ref.transport == "sync"
+    assert ref.transport == "async"
     assert ref.batch_size == 2
-    assert ref.child_job_ids == ("c1", "c2")
+    assert ref.child_job_ids == ()
     assert ref.shots == 7
     assert ref.base_url == BASE_URL
-    assert job.job_ids == ("c1", "c2")
+    assert job.job_ids == ("w",)
     labelled = LogicalQubitJob(
         RawJob("v"),
         labels=("a", "b"),
@@ -1373,7 +1345,7 @@ def test_convert_child_bitstrings_pass_through_unchanged() -> None:
 
 
 def test_convert_child_memory_and_corrected_counts() -> None:
-    """Memory results aggregate shots; applied readout correction wins."""
+    """Counts stay measured; readout correction drives the probabilities."""
     res = _child(data={"memory": ["01", "01", "10"], "result_format": "memory"})
     assert res.counts == {"01": 2, "10": 1}
     assert res.memory == ["01", "01", "10"]
@@ -1386,7 +1358,7 @@ def test_convert_child_memory_and_corrected_counts() -> None:
             "readout_correction_requested": True,
         }
     )
-    assert corrected.counts == {"0": 2, "1": 0}
+    assert corrected.counts == {"0": 1, "1": 1}
     assert corrected.probabilities == {"0": 0.75, "1": 0.25}
     assert corrected.metadata["quasi_counts"] == {"0": 1.5, "1": 0.5}
     assert corrected.metadata["readout_correction_applied"] is True
@@ -1458,19 +1430,24 @@ def test_provider_requires_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_provider_options_from_args_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit args win over env vars; omitted values are not sent."""
+    """Only explicit args are sent; lqcloud resolves the environment itself."""
     LogicalQubitProvider()
     assert FakeLQCloudProvider.instances[-1].kwargs == {"interactive": False}
     monkeypatch.setenv("LQCLOUD_API_KEY", "env-key")
     monkeypatch.setenv("LQCLOUD_URL", "https://env.invalid")
     LogicalQubitProvider()
+    assert FakeLQCloudProvider.instances[-1].kwargs == {"interactive": False}
+    with pytest.warns(UserWarning, match="overridden"):
+        LogicalQubitProvider(api_key="k", url=BASE_URL)
+    monkeypatch.delenv("LQCLOUD_API_KEY")
+    monkeypatch.delenv("LQCLOUD_URL")
+    provider = LogicalQubitProvider(api_key="k", url=BASE_URL, store=False)
     assert FakeLQCloudProvider.instances[-1].kwargs == {
         "interactive": False,
-        "api_key": "env-key",
-        "url": "https://env.invalid",
+        "api_key": "k",
+        "url": BASE_URL,
+        "store": False,
     }
-    provider = LogicalQubitProvider(api_key="k", url=BASE_URL)
-    assert FakeLQCloudProvider.instances[-1].kwargs["api_key"] == "k"
     assert provider.url == BASE_URL
     assert repr(provider) == f"LogicalQubitProvider(url={BASE_URL!r})"
 
@@ -1478,11 +1455,16 @@ def test_provider_options_from_args_and_env(monkeypatch: pytest.MonkeyPatch) -> 
 def test_provider_get_backend_and_list() -> None:
     """get_backend wraps the SDK backend; list_backends returns a list."""
     provider = LogicalQubitProvider(url=BASE_URL)
-    be = provider.get_backend("QZ02", use_async=False, verify=False)
+    be = provider.get_backend("QZ02", verify=False)
     assert isinstance(be, LogicalQubitBackend)
     assert be.name == "QZ02"
+    with pytest.warns(DeprecationWarning, match="use_async"):
+        provider.get_backend("QZ02", use_async=True, verify=False)
+    with pytest.raises(ValueError, match="use_async=False"):
+        provider.get_backend("QZ02", use_async=False, verify=False)
     assert FakeLQCloudProvider.instances[-1].backend_calls == [
-        ("QZ02", {"use_async": False, "verify": False})
+        ("QZ02", {"verify": False}),
+        ("QZ02", {"verify": False}),
     ]
     assert provider.list_backends() == [
         {"name": "QZ02", "status": "online"},
@@ -1496,7 +1478,6 @@ def test_provider_retrieve_by_job_id() -> None:
     job = provider.retrieve_job(
         "task_9",
         backend_name="QZ02",
-        use_async=False,
         batch_size=2,
         labels=("a", "b"),
         experiment_shapes=((1, 1), (1, 1)),
@@ -1507,9 +1488,8 @@ def test_provider_retrieve_by_job_id() -> None:
     raw = job._lq_job
     assert isinstance(raw, FakeSDKJob)
     assert (raw.job_id, raw.backend_name, raw.base_url) == ("task_9", "QZ02", BASE_URL)
-    assert raw._use_async is False
     assert raw._is_batch is True and raw._batch_size == 2  # type: ignore[attr-defined]
-    assert job.reference.transport == "sync"
+    assert job.reference.transport == "async"
     assert job.reference.labels == ("a", "b")
 
 

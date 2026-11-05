@@ -56,7 +56,6 @@ class _RawJob:
         self.job_id = "task_batch"
         self.backend_name = "QZ02"
         self.base_url = "https://example.invalid"
-        self._use_async = True
         self._result = result
         self._status = status
         self.cancelled = False
@@ -181,6 +180,67 @@ def test_non_integral_corrected_counts_remain_available_without_truncation() -> 
     assert result.counts == {"0": 4, "1": 1}
     assert result.probabilities == pytest.approx({"0": 0.78, "1": 0.22})
     assert result.metadata["quasi_counts"] == {"0": 3.9, "1": 1.1}
+
+
+def test_readout_corrected_counts_mode_reports_raw_counts() -> None:
+    # lqcloud 0.6 payload: corrected distribution under ``counts`` (dense,
+    # probability * shots), the measured outcomes under ``raw_counts``.
+    raw = _RawResult({}, shots=8)
+    raw.data.update(
+        counts={"00": 4.4, "01": -0.2, "10": 0.0, "11": 3.8},
+        raw_counts={"00": 4, "01": 1, "11": 3},
+        readout_correction_requested=True,
+        readout_correction_applied=True,
+    )
+    job = LogicalQubitJob(_RawJob(raw), reference=_reference(batch_size=None))
+
+    result = job.result()
+    assert result.counts == {"00": 4, "01": 1, "11": 3}
+    assert result.num_shots == 8
+    assert result.probabilities == pytest.approx(
+        {"00": 0.55, "01": -0.025, "10": 0.0, "11": 0.475}
+    )
+    assert result.metadata["quasi_counts"] == raw.data["counts"]
+    assert result.metadata["readout_correction_applied"] is True
+
+
+def test_readout_corrected_memory_mode_counts_match_memory() -> None:
+    raw = _RawResult({}, shots=4)
+    raw.data = {
+        "memory": ["1", "1", "0", "1"],
+        "corrected_counts": {"0": 0.6, "1": 3.4},
+        "shots": 4,
+        "result_format": "memory",
+        "readout_correction_applied": True,
+        "success": True,
+    }
+    job = LogicalQubitJob(_RawJob(raw), reference=_reference(batch_size=None))
+
+    result = job.result()
+    assert result.memory == ["1", "1", "0", "1"]
+    assert result.counts == {"0": 1, "1": 3}
+    assert result.probabilities == pytest.approx({"0": 0.15, "1": 0.85})
+    assert result.metadata["quasi_counts"] == {"0": 0.6, "1": 3.4}
+
+
+def test_invalid_corrected_value_fails_the_experiment() -> None:
+    raw = _RawResult({"0": 8}, shots=8)
+    raw.data.update(
+        raw_counts={"0": 8},
+        counts={"0": "corrupt"},
+        readout_correction_applied=True,
+    )
+    job = LogicalQubitJob(
+        _RawJob(_RawBatch([raw])), reference=_reference(batch_size=None)
+    )
+    with pytest.raises(JobError, match="Invalid count"):
+        job.result()
+
+
+def test_inferred_reference_is_async() -> None:
+    reference = LogicalQubitJob(_RawJob(_RawResult())).reference
+    assert reference.transport == "async"
+    assert reference.child_job_ids == ()
 
 
 def test_memory_result_preserves_each_shot_and_aggregates_counts() -> None:
