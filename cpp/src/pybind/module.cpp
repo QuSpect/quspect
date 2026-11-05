@@ -41,6 +41,7 @@
 #include "quspect_native/transpiler/route_lns.hpp"
 #include "quspect_native/transpiler/sabre_routing.hpp"
 #include "quspect_native/transpiler/su4_routing.hpp"
+#include "quspect_native/transpiler/beam_routing.hpp"
 
 #include "dag_bindings.hpp"
 #include "detmath_bindings.hpp"
@@ -724,6 +725,51 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("adjacency"), py::arg("blocks"), py::arg("layout"), py::arg("configs"), py::arg("ext_weight") = 0.5,
         py::arg("exe_bonus") = 0.5, py::arg("layout_iters") = 1, py::arg("depth_tiebreak") = true,
         "_route_su4_blocks for each (width, seed) of configs, computed concurrently; list of its results.");
+
+    // 全局束搜索路由（beam_routing.hpp）：每个起始布局各一个任务，互不相关（结果与线程数无关，
+    // 按 layouts 的顺序返回 (swaps, layout, events)）
+    m.def(
+        "_route_beam_many",
+        [](const std::vector<std::vector<int>>& adjacency, const std::vector<std::pair<int, int>>& blocks,
+           const std::vector<std::vector<int>>& layouts, const std::vector<std::uint64_t>& seeds, int beam,
+           int ext_depth, double gamma, double ext_weight, double exec_bonus, int layout_iters, std::int64_t max_swaps,
+           double decay) {
+            if (seeds.size() != layouts.size()) {
+                throw std::invalid_argument("seeds and layouts must have the same length");
+            }
+            std::vector<transpiler::BeamRouteResult> results(layouts.size());
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(layouts.size());
+                for (std::size_t i = 0; i < layouts.size(); ++i) {
+                    tasks.emplace_back([&, i] {
+                        transpiler::BeamRouteOptions options;
+                        options.beam = beam;
+                        options.ext_depth = ext_depth;
+                        options.gamma = gamma;
+                        options.ext_weight = ext_weight;
+                        options.exec_bonus = exec_bonus;
+                        options.layout_iters = layout_iters;
+                        options.seed = seeds[i];
+                        options.max_swaps = max_swaps;
+                        options.decay = decay;
+                        results[i] = transpiler::RouteBeam(adjacency, blocks, layouts[i], options);
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (auto& result : results) {
+                out.append(py::make_tuple(result.swaps, std::move(result.layout), std::move(result.events)));
+            }
+            return out;
+        },
+        py::arg("adjacency"), py::arg("blocks"), py::arg("layouts"), py::arg("seeds"), py::arg("beam") = 128,
+        py::arg("ext_depth") = 8, py::arg("gamma") = 0.7, py::arg("ext_weight") = 0.5, py::arg("exec_bonus") = 3.0,
+        py::arg("layout_iters") = 2, py::arg("max_swaps") = 0, py::arg("decay") = 1.0,
+        "Beam-search SWAP routing from each start layout, computed concurrently; list of (swaps, layout, events) "
+        "(swaps = -1: over max_swaps).");
 
     // 低伸缩初始布局（quspect.transpiler._embedding 的原生实现）
     m.def(

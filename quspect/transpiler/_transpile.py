@@ -54,7 +54,10 @@ their mirror cost, drops; equally cheap but shallower windows are offered
 as additional candidates.  Circuits made of generic SU(4) blocks are also
 routed layer by layer on paths and rings, and by a truncated rollout of
 SABRE's greedy policy on other coupling graphs
-(:mod:`quspect.transpiler._layer_route`).
+(:mod:`quspect.transpiler._layer_route`).  Level 3 also routes the circuit
+by a global beam search over SWAP sequences from the best SABRE layouts
+(:mod:`quspect.transpiler._beam_route`) and evaluates that routing as one
+more candidate.
 """
 
 from __future__ import annotations
@@ -70,6 +73,7 @@ from typing import TYPE_CHECKING, Any
 from quspect.circuit._native import instruction_stats
 from quspect.synthesis.two_qubit import swap_face_templates
 from quspect.transpiler._basis import plan_basis, translate_to_target
+from quspect.transpiler._beam_route import beam_route_plan
 from quspect.transpiler._consolidate import SYNTHESIS_BASIS, ConsolidateBlocksPass
 from quspect.transpiler._gauge import minimize_single_qubit_gates, orient_cx_gates
 from quspect.transpiler._highlevel import HighLevelOptimizePass
@@ -163,6 +167,8 @@ _LNS_LEVEL = 2
 # 一般 SU(4) 块线路的分层路由（路径 / 环）与截断 rollout 路由（见 _layer_route）
 # 从这一级开始
 _LAYER_ROUTE_LEVEL = 2
+# 第 3 级的全局束搜索路由候选（见 _beam_route）
+_BEAM_ROUTE = True
 # 同一类线路（所有两比特块都是一般 SU(4)）的 SABRE 前瞻：一层就有很多个块，默认的
 # 20 个块看不到下一层。扩展集取 _SU4_EXT_LAYERS 层的块数（不少于默认值，
 # 不超过 _SU4_EXT_MAX）
@@ -383,6 +389,12 @@ def transpile(
     on QV-100), on a ring by its cyclic analogue, and on every other graph
     by a truncated rollout of SABRE's greedy policy (5-6 % fewer CZ on
     QV-100 on a 10x10 grid and on heavy-hex).
+
+    Level 3 adds one more candidate routed by a global beam search over
+    SWAP sequences (:mod:`quspect.transpiler._beam_route`; 128 partial
+    routings kept per step, started from the best distinct SABRE layouts).
+    It is skipped when ``time_limit`` is given, and its work budget scales
+    with ``work_limit``.
 
     At every level the pre-routing decomposition keeps ``ccx``: SABRE
     routes each Toffoli as a three-qubit unit and synthesizes it for its
@@ -1034,6 +1046,26 @@ def _transpile(
                     key=lambda c: (c.estimated_two_qubit_gates, c.num_swaps, c.depth),
                 )
                 to_eval.append(layered)
+        if (
+            _BEAM_ROUTE
+            and initial_layout is None
+            and time_limit is None
+            and cands[0].num_swaps > 0
+        ):
+            # 全局束搜索路由（_beam_route）：按 SWAP 数优化，作为一个额外候选完整评估。
+            # 预算随 work_limit 缩放；给了 time_limit 时不做（其耗时无法按墙钟截断）
+            beamed = beam_route_plan(
+                sabre,
+                cands,
+                seed=_layer_seed(seed),
+                work_scale=work_limit / _LEVEL3_WORK_LIMIT,
+            )
+            if beamed is not None:
+                cands = sorted(
+                    [*cands, beamed],
+                    key=lambda c: (c.estimated_two_qubit_gates, c.num_swaps, c.depth),
+                )
+                to_eval.append(beamed)
         if exact_logical is not None:
             # 第 2 级可能选用精确线路的路由：把它（第 2 级的那一个）也完整评估，
             # 保证第 3 级不比第 2 级差
@@ -1448,8 +1480,8 @@ def _top_with_layered(
 
 
 def _is_layered(plan: _CandidatePlan) -> bool:
-    """Whether ``plan`` is a layered / rollout routing (``layer_route_plan``)."""
-    return plan.label.split("/", 1)[0] in ("layers", "rollout")
+    """Whether ``plan`` is a layered / rollout / beam routing (not a SABRE one)."""
+    return plan.label.split("/", 1)[0] in ("layers", "rollout", "beam")
 
 
 def _with_refinements(

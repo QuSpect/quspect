@@ -363,10 +363,11 @@ def test_level3_budget_respected() -> None:
     # 2 routings each, for the mirror, the block-only and the
     # commutation-aware candidate family
     assert stats.num_candidates <= 3 * (3 + 2 + 2) * 2
-    # best candidate + level-2 default + best commutation-aware candidate,
-    # each possibly with its LNS refinement (plus the light refinement of the
-    # default when the large-window sweep improved it further)
-    assert stats.num_evaluated <= 2 * 3 + 1
+    # best candidate + level-2 default + best commutation-aware candidate +
+    # beam-search candidate, each possibly with its LNS refinement (plus the
+    # light refinement of the default when the large-window sweep improved it
+    # further)
+    assert stats.num_evaluated <= 2 * 4 + 1
     assert len(stats.candidate_scores) == stats.num_evaluated
 
 
