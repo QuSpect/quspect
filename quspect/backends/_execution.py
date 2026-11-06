@@ -352,7 +352,14 @@ class ExecutionBatch(Sequence[SimulationResult]):
 
 @dataclass(frozen=True)
 class JobReference:
-    """Credential-free data required to recover a submitted job."""
+    """Credential-free data required to recover a submitted job.
+
+    ``measurement_maps`` is for providers whose result bits must be decoded
+    by QuSpect: one entry per experiment, where ``measurement_maps[i][k]``
+    lists the classical bits that receive provider result bit ``k`` (bit
+    ``k`` of the integer outcome, least significant first).  It is empty for
+    providers that already report results in QuSpect's clbit order.
+    """
 
     platform: str
     backend_name: str
@@ -367,6 +374,7 @@ class JobReference:
     workload_id: str | None = None
     child_job_ids: Sequence[str] = field(default_factory=tuple)
     child_batch_sizes: Sequence[int] = field(default_factory=tuple)
+    measurement_maps: Sequence[Sequence[Sequence[int]]] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         for field_name in ("platform", "backend_name", "job_id", "transport"):
@@ -447,8 +455,27 @@ class JobReference:
         ):
             raise ValueError("Child batch sizes do not add up to batch_size.")
 
+        measurement_maps = tuple(
+            tuple(tuple(int(clbit) for clbit in clbits) for clbits in experiment)
+            for experiment in self.measurement_maps
+        )
+        if measurement_maps:
+            expected = self.batch_size if self.batch_size is not None else 1
+            if len(measurement_maps) != expected:
+                raise ValueError(
+                    "JobReference measurement_maps must have one entry per experiment."
+                )
+            if any(
+                clbit < 0
+                for experiment in measurement_maps
+                for clbits in experiment
+                for clbit in clbits
+            ):
+                raise ValueError("JobReference measurement_maps cannot be negative.")
+
         object.__setattr__(self, "labels", labels)
         object.__setattr__(self, "experiment_shapes", shapes)
+        object.__setattr__(self, "measurement_maps", measurement_maps)
         object.__setattr__(self, "child_job_ids", child_job_ids)
         object.__setattr__(self, "child_batch_sizes", child_batch_sizes)
 
@@ -474,6 +501,10 @@ class JobReference:
             "workload_id": self.workload_id,
             "child_job_ids": list(self.child_job_ids),
             "child_batch_sizes": list(self.child_batch_sizes),
+            "measurement_maps": [
+                [list(clbits) for clbits in experiment]
+                for experiment in self.measurement_maps
+            ],
         }
 
     @classmethod
@@ -497,6 +528,7 @@ class JobReference:
             workload_id=data.get("workload_id"),
             child_job_ids=data.get("child_job_ids", ()),
             child_batch_sizes=data.get("child_batch_sizes", ()),
+            measurement_maps=data.get("measurement_maps", ()),
         )
 
 

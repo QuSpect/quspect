@@ -324,6 +324,13 @@ class CompositeJob(CloudJob):
         shapes = tuple(
             shape for reference in references for shape in reference.experiment_shapes
         )
+        # Per-experiment decoding maps concatenate like the shapes, but only
+        # when every child carries them; a partial set could not be aligned.
+        measurement_maps: tuple[Any, ...] = ()
+        if all(reference.measurement_maps for reference in references):
+            measurement_maps = tuple(
+                item for reference in references for item in reference.measurement_maps
+            )
         batch_size = sum(reference.batch_size or 1 for reference in references)
         all_job_ids: list[str] = []
         child_batch_sizes: list[int] = []
@@ -364,6 +371,7 @@ class CompositeJob(CloudJob):
             workload_id=first.workload_id,
             child_job_ids=tuple(all_job_ids),
             child_batch_sizes=tuple(child_batch_sizes),
+            measurement_maps=measurement_maps,
         )
 
     def result(

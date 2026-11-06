@@ -58,6 +58,13 @@ isingq = [
 logicalqubit = [
     "lqcloud>=0.6.1,<0.7; python_version >= '3.11' and python_version < '3.13'",
 ]
+# 本源量子后端运行时不依赖 pyqpanda3（直接走云平台 HTTP 接口）。pyqpanda3 只
+# 作为测试参照：用它的 OriginIR 解析器 / CPUQVM 独立校验我们生成的程序，并比对
+# SDK 与我们发出的请求，及早发现协议变化。0.5.1 只发布了 Linux x86_64、
+# Windows x64、macOS 13+ arm64 的 wheel；其他平台上该 extra 为空，相关测试跳过。
+originq-tests = [
+    "pyqpanda3>=0.5.1,<0.6; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+]
 validation = [
     "qiskit>=1.0",
 ]
