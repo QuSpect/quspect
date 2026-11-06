@@ -553,7 +553,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 ## 云端 QPU
 
 QuSpect 通过统一的 `Backend` 接口连接本地模拟器和云端真机。目前支持
-LogicalQubit 与夸父 Quafu-SQC 平台。
+LogicalQubit、夸父 Quafu-SQC 与本源量子（Origin Quantum）平台。
 
 ### 云端配置
 
@@ -730,6 +730,43 @@ print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线�
 - 每条线路对应一个夸父任务；批量提交返回可恢复的 `CompositeJob`，可用
   `provider.retrieve_job(job.reference)` 或
   `provider.retrieve_job(task_id, backend_name="Haituo")` 重新获取。
+
+### 本源量子（Origin Quantum）
+
+```bash
+export QPANDA_QCLOUD_API_KEY=...   # 本源量子云控制台获取
+```
+
+无需安装额外依赖：QuSpect 用标准库直接调用本源云平台的 HTTP 接口，并自行生成
+OriginIR，不依赖 pyqpanda3，QuSpect 支持的平台都能使用。该接口即 pyqpanda3
+0.5.1 所用接口，没有公开文档；测试会比对 QuSpect 与 SDK 发出的请求，以便及时
+发现协议变化。当前 key 内嵌的服务地址是明文 `http`，key 以明文传输（与
+pyqpanda3 相同）。
+
+```python
+from quspect.backends.originq import OriginQProvider
+
+provider = OriginQProvider()
+backend = provider.get_backend("full_amplitude")   # 云模拟器；真机如 "WK_C180_2"
+result = backend.run(qc, shots=2000)
+```
+
+- **比特顺序**：结果按 QuSpect 约定（经典比特 0 在最左）。本源的结果为小端，
+  且按被测量子比特排列（忽略 `MEASURE` 的经典比特参数；测量不按
+  比特升序时会解码错误）。因此 QuSpect 在末尾按比特升序对每个被测比特只测量
+  一次，再用任务引用中保存的测量映射还原经典比特。仅支持末端测量。
+- **编译**：`transpile=True`（默认）时由 QuSpect 编译到 `{cz, u3, rz}`，在芯片
+  校准数据最好的连通区域（按单比特门×读出保真度及 CZ 保真度挑选，或用
+  `physical_qubits=[...]` 指定）上做 SABRE 映射与路由，并关闭云端映射提交。
+  校准数据很重要：`WK_C180` 编号靠前的几个比特校准失败或读出很差，用它们得到的
+  结果是错的；`transpile=False` 时由本源云端做映射
+  （`provider_mapping=True`）。`readout_correction` 对应云端的 amend 选项（默认开）。
+- **结果**：本源返回概率，`result.probabilities` 为云端分布，`result.counts`
+  为 `round(p * shots)`（`metadata["counts_source"] == "probabilities"`）。
+- `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务；
+  任务不可取消。真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
+- 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
+  请务必传 `timeout`。
 
 ---
 

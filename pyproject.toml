@@ -61,6 +61,16 @@ logicalqubit = [
 # 夸父 Quafu-SQC 后端只用标准库直连 HTTP 接口，不依赖夸父 SDK；保留空 extra，
 # 使 `pip install "quspect[quafu]"` 与其他云平台的安装方式一致。
 quafu = []
+# 本源量子后端同样只用标准库直连云平台 HTTP 接口，运行时不依赖 pyqpanda3；
+# 保留空 extra，使 `pip install "quspect[originq]"` 与其他云平台一致。
+originq = []
+# pyqpanda3 只作为本源后端的测试参照：用它的 OriginIR 解析器 / CPUQVM 独立校验
+# 我们生成的程序，并比对 SDK 与我们发出的请求，及早发现协议变化。0.5.1 只发布了
+# Linux x86_64、Windows x64、macOS 13+ arm64 的 wheel；其他平台上该 extra 为空，
+# 相关测试跳过。
+originq-tests = [
+    "pyqpanda3>=0.5.1,<0.6; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+]
 validation = [
     "qiskit>=1.0",
 ]

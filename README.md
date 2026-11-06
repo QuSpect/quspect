@@ -573,7 +573,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 
 ## Cloud QPU
 
-QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)** and **Quafu-SQC (夸父)** are supported; additional platforms can be added by implementing `CloudBackend`.
+QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)**, **Quafu-SQC (夸父)** and **Origin Quantum (本源量子)** are supported; additional platforms can be added by implementing `CloudBackend`.
 
 ### Cloud Setup
 
@@ -863,6 +863,53 @@ How it works:
 - Each circuit is one Quafu task; `submit_request()` returns a recoverable
   `CompositeJob` for batches, and `provider.retrieve_job(job.reference)` or
   `provider.retrieve_job(task_id, backend_name="Haituo")` reattaches later.
+
+### Origin Quantum (本源量子)
+
+```bash
+export QPANDA_QCLOUD_API_KEY=...   # from the Origin Quantum cloud console
+```
+
+No extra package is needed: QuSpect talks to the Origin Quantum cloud's HTTP
+API directly (standard library only) and generates OriginIR itself, so
+pyqpanda3 is not required and every platform QuSpect supports works. The API
+is the one pyqpanda3 0.5.1 uses; it is not publicly documented, and the test
+suite compares QuSpect's requests with the SDK's to catch protocol changes.
+The service URL embedded in current keys is plain `http`, so the key travels
+unencrypted (as it does with pyqpanda3).
+
+```python
+from quspect.backends.originq import OriginQProvider
+
+provider = OriginQProvider()
+print(provider.list_backends())          # {'WK_C180_2': True, 'full_amplitude': True, ...}
+backend = provider.get_backend("full_amplitude")   # cloud simulator; or a QPU such as "WK_C180_2"
+result = backend.run(qc, shots=2000)
+```
+
+- **Bit order** — results use QuSpect's convention (classical bit 0 leftmost).
+  Origin Quantum results are little-endian and keyed by measured qubit
+  (it ignores the classical-bit operand of `MEASURE`, and mis-decodes
+  measurements that are not in ascending qubit order). QuSpect therefore
+  measures each measured qubit once, at the end, in ascending order, and
+  decodes the result through the measurement map stored in the job
+  reference. Only terminal measurements are supported.
+- **Compilation** — with `transpile=True` (default) QuSpect lowers to
+  `{cz, u3, rz}` and routes with SABRE on the best-calibrated connected region
+  of the chip (ranked by single-gate × readout and CZ fidelities from the
+  chip's calibration data), or on `physical_qubits=[...]`, then submits with
+  provider mapping disabled. Calibration matters: on `WK_C180` the low-index
+  qubits had a failed or poor calibration and gave wrong results. `transpile=False` leaves layout and routing to
+  Origin Quantum (`provider_mapping=True`). `readout_correction` maps to the
+  provider's "amend" flag (on by default).
+- **Results** — Origin Quantum returns probabilities, so
+  `result.probabilities` is the provider distribution and `result.counts` is
+  `round(p * shots)` (`result.metadata["counts_source"] == "probabilities"`).
+- The `full_amplitude` simulator takes no options and no native batches;
+  requests become one job per circuit. Jobs cannot be cancelled. QPU shots are
+  limited by the chip's `MaxShots` (49 600 on `WK_C180_2`).
+- A malformed program is not rejected by the cloud — the task simply never
+  finishes — so always pass a `timeout` to `result()`.
 
 ---
 
