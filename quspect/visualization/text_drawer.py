@@ -225,9 +225,8 @@ def _instruction_width(instruction: CircuitInstruction) -> int:
         labels.extend(str(bit) for bit in instruction.clbits)
     elif instruction.is_barrier:
         labels.append("|")
-    elif instruction.is_channel:
-        if instruction.channel is not None:
-            labels.append(_channel_label(instruction.channel))
+    elif instruction.is_channel and instruction.channel is not None:
+        labels.append(_channel_label(instruction.channel))
 
     width = _MIN_CELL_WIDTH
     for label in labels:

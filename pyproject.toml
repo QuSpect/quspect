@@ -58,6 +58,9 @@ isingq = [
 logicalqubit = [
     "lqcloud>=0.6.1,<0.7; python_version >= '3.11' and python_version < '3.13'",
 ]
+# 夸父 Quafu-SQC 后端只用标准库直连 HTTP 接口，不依赖夸父 SDK；保留空 extra，
+# 使 `pip install "quspect[quafu]"` 与其他云平台的安装方式一致。
+quafu = []
 validation = [
     "qiskit>=1.0",
 ]
