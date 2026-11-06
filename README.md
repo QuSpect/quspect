@@ -812,7 +812,8 @@ for bs in sorted(sim_result.counts):
 
 [Quafu-SQC](https://quafu-sqc.baqis.ac.cn) is BAQIS's superconducting quantum
 cloud. QuSpect talks to its HTTP API directly with the Python standard
-library, so **no Quafu SDK or extra is needed**. Get a token (valid 30 days)
+library, so **no Quafu SDK is needed**; the `quafu` extra exists for symmetry
+with other platforms and installs nothing (`pip install "quspect[quafu]"`). Get a token (valid 30 days)
 from the SQCLab website, then provide it via `QuafuProvider(token=...)`,
 `QUAFU_API_TOKEN` (or the SDK's `QPU_API_TOKEN`), or a JSON file
 `~/.quafu/api` containing `{"token": "..."}`.

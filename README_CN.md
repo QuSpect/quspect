@@ -684,7 +684,8 @@ QuSpect 会返回可恢复的组合任务；部分提交失败时可从
 ### 夸父 Quafu-SQC
 
 [夸父 Quafu-SQC](https://quafu-sqc.baqis.ac.cn) 是北京量子院的超导量子计算云。
-QuSpect 直接用 Python 标准库调用其 HTTP 接口，**无需安装夸父 SDK 或任何 extra**。
+QuSpect 直接用 Python 标准库调用其 HTTP 接口，**无需安装夸父 SDK**；`quafu` extra 仅为与其他平台保持一致，
+不会安装任何依赖（`pip install "quspect[quafu]"`）。
 在 SQCLab 网站获取 token（有效期 30 天）后，可通过 `QuafuProvider(token=...)`、
 环境变量 `QUAFU_API_TOKEN`（或 SDK 使用的 `QPU_API_TOKEN`），或 JSON 文件
 `~/.quafu/api`（内容为 `{"token": "..."}`）提供。
