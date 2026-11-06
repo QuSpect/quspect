@@ -553,7 +553,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 ## 云端 QPU
 
 QuSpect 通过统一的 `Backend` 接口连接本地模拟器和云端真机。目前支持
-LogicalQubit、夸父 Quafu-SQC 与本源量子（Origin Quantum）平台。
+LogicalQubit、夸父 Quafu-SQC、本源量子（Origin Quantum）与天衍（Tianyan）平台。
 
 ### 云端配置
 
@@ -767,6 +767,41 @@ result = backend.run(qc, shots=2000)
   任务不可取消。真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
   请务必传 `timeout`。
+
+### 天衍（Tianyan）
+
+[天衍](https://qc.zdxlz.com)是中电信量子集团的量子计算云平台。QuSpect 自行生成
+QCIS，并用标准库直接调用云平台的 HTTPS 接口，**无需安装 cqlib**。
+
+```bash
+export TIANYAN_LOGIN_KEY=...   # qc.zdxlz.com 个人中心的 API Token
+```
+
+```python
+from quspect.backends.tianyan import TianyanProvider
+
+provider = TianyanProvider()
+backend = provider.get_backend("tianyan176")    # 真机；"tianyan_sw" 为全振幅模拟器
+result = backend.run(qc, shots=2000)
+```
+
+- **编译与比特映射全部由 QuSpect 完成**：云端不做映射和路由，在不相连的比特上
+  做 `CZ` 或使用被禁用的比特都会被拒绝。`transpile=True`（默认）时 QuSpect 把
+  电路分解到 QCIS 门集，并在已启用比特和耦合器中校准数据最好的连通区域（或
+  `physical_qubits=[...]` 指定的比特）上做 SABRE 映射与路由；`transpile=False`
+  时按电路里的比特号直接作为物理比特提交。
+- **比特顺序**：结果按 QuSpect 约定。天衍按 `M` 指令顺序报告被测比特和每个
+  shot，`probability` 的键则是最先测量的比特在最右边。QuSpect 在末尾按比特升序
+  对每个被测比特只测量一次，再用任务引用中保存的测量映射还原经典比特。仅支持
+  末端测量。
+- **结果**：`result.counts` 为实测 shot 计数；`result.probabilities` 在天衍提供时
+  使用其分布（真机上为读出校正后的结果，见 `metadata["probabilities_source"]`）。
+- **批量**：真机原生批量要求每个程序测量相同的比特，因此请求会按测量比特分组
+  （每组最多 49 个程序），整体作为一个可恢复的任务返回。
+- 网关经常返回 HTTP 504。读请求会自动重试，提交也会重试（`submit_retries`，
+  默认 3 次）：超时的提交可能已经建了任务，所以重试偶尔会多出一份重复任务，
+  每次重试都会记一条 warning。付费机器上在意的话，可以用
+  `TianyanProvider(submit_retries=0)`。
 
 ---
 

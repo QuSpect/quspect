@@ -132,7 +132,7 @@ jobs:
           evict-old-files: job
 
       - name: Install Python dependencies
-        run: python -m pip install pybind11 -e ".[dev,qiskit-tests,originq-tests]"
+        run: python -m pip install pybind11 -e ".[dev,qiskit-tests,originq-tests,tianyan-tests]"
 
       # C++ 扩展不由 pip 构建：CMake 把 .so 直接写进 quspect/，
       # 所以必须使用 setup-python 提供的同一个解释器。
