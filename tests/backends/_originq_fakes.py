@@ -296,45 +296,51 @@ def assert_same_distribution(actual: dict, expected: dict, tol: float = 1e-9) ->
     assert not diff, f"distribution mismatch (actual, expected): {diff}"
 
 
-def serve_capture(port_queue, log_path, chip, resources) -> None:
-    """Run a recording Origin Quantum stand-in (in a child process).
+def start_capture_server(workdir, chip, resources, *, timeout: float = 60.0):
+    """Launch ``_originq_capture_server.py`` and wait until it listens.
 
-    pyqpanda3's blocking calls hold the GIL, so an in-process server thread
-    would never get to answer; the contract tests start this in a separate
-    process and read the JSON-lines log afterwards.
+    Returns ``(url, recorded, process)``; ``recorded()`` reads the requests
+    logged so far.  If the child exits early or never reports its port, the
+    error includes its stderr.
     """
-    import http.server
+    import pathlib
+    import subprocess
+    import sys
+    import time
 
-    ok = {"success": True, "code": 10000, "message": "success"}
+    workdir = pathlib.Path(workdir)
+    log_path, port_path = workdir / "requests.jsonl", workdir / "port"
+    config = workdir / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "log_path": str(log_path),
+                "port_path": str(port_path),
+                "chip": chip,
+                "resources": resources,
+            }
+        )
+    )
+    script = pathlib.Path(__file__).with_name("_originq_capture_server.py")
+    process = subprocess.Popen(
+        [sys.executable, "-I", str(script), str(config)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + timeout
+    while not port_path.exists():
+        if process.poll() is not None or time.monotonic() > deadline:
+            process.kill()
+            _, stderr = process.communicate(timeout=10)
+            raise RuntimeError(
+                f"capture server did not start (exit {process.returncode}): {stderr}"
+            )
+        time.sleep(0.05)
 
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def _reply(self, payload):
-            body = json.dumps(payload).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    def recorded() -> list[dict]:
+        if not log_path.exists():
+            return []
+        return [json.loads(line) for line in log_path.read_text().splitlines()]
 
-        def do_GET(self):  # noqa: N802
-            self._reply(resources)
-
-        def do_POST(self):  # noqa: N802
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
-            entry = {"path": self.path, "headers": dict(self.headers), "body": body}
-            with open(log_path, "a") as fh:
-                fh.write(json.dumps(entry) + "\n")
-            if self.path.endswith("chipInfo.json"):
-                self._reply({**ok, "obj": chip})
-            elif self.path.endswith("submit.json"):
-                self._reply({**ok, "obj": {"taskId": "CONTRACT"}})
-            else:
-                self._reply({**ok, "obj": {"taskId": "CONTRACT", "taskState": "1"}})
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    port_queue.put(server.server_address[1])
-    server.serve_forever()
+    return f"http://127.0.0.1:{int(port_path.read_text())}", recorded, process

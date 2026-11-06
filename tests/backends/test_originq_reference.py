@@ -271,33 +271,18 @@ def test_reference_round_trip_recovers_and_decodes() -> None:
 
 @pytest.fixture
 def sdk_capture_server(tmp_path):
-    """A stand-in server (child process) recording what pyqpanda3 sends."""
-    import multiprocessing
-
-    from tests.backends._originq_fakes import real_chip_info, serve_capture
+    """A stand-in server (separate process) recording what pyqpanda3 sends."""
+    from tests.backends._originq_fakes import real_chip_info, start_capture_server
 
     pytest.importorskip("pyqpanda3.qcloud")
-    log_path = tmp_path / "requests.jsonl"
-    chip = real_chip_info()
-    context = multiprocessing.get_context("spawn")
-    ports = context.Queue()
-    process = context.Process(
-        target=serve_capture,
-        args=(ports, str(log_path), chip, FakeCloud().resources()),
-        daemon=True,
+    url, recorded, process = start_capture_server(
+        tmp_path, real_chip_info(), FakeCloud().resources()
     )
-    process.start()
-
-    def recorded() -> list[dict]:
-        if not log_path.exists():
-            return []
-        return [json.loads(line) for line in log_path.read_text().splitlines()]
-
     try:
-        yield f"http://127.0.0.1:{ports.get(timeout=30)}", recorded
+        yield url, recorded
     finally:
-        process.terminate()
-        process.join(timeout=10)
+        process.kill()
+        process.wait(timeout=10)
 
 
 def _normalize_ir(text: str) -> str:
