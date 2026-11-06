@@ -219,6 +219,12 @@ Transpiler: Routing of SU(4)-Block Circuits
    :members: layer_route_plan, layer_route_events, su4_route_events, block_layers,
       path_order, cycle_order
 
+Transpiler: Beam-Search Routing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: quspect.transpiler._beam_route
+   :members: beam_route_plan, beam_applicable, beam_config
+
 Transpiler: SABRE Routing Core
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

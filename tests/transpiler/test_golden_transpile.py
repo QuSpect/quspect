@@ -287,7 +287,7 @@ GOLDEN: dict[int, dict[str, str]] = {
         "adder_6": "a3e948d4dde9aead",
         "three_qubit_5": "5266d589e92eae68",
         "qft_9": "e0a9f89fceadceac",
-        "random_10": "8f709dc3d6db8087",
+        "random_10": "b407e1f281116650",
         "adder_10": "62e4f5d59565808b",
         "three_qubit_8": "2838694d01ac288c",
     },
