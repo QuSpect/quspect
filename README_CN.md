@@ -66,7 +66,7 @@ QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASC
 - **可恢复批量执行** — 具名线路批次、扁平化参数扫描和不含凭据的任务引用
 - **可视化** — ASCII 终端线路图、SVG 线路渲染（3 种主题）、采样结果图（hbar、vbar、dot、SVG）
 - **IR 导出** — OpenQASM 2.0 与 QSAL（原生 JSON）导出
-- **云端 QPU** — 通过统一 `Backend` 接口连接本地模拟器与 LogicalQubit 真机
+- **云端 QPU** — 通过统一 `Backend` 接口连接本地模拟器与 LogicalQubit、夸父 Quafu-SQC 真机
 - **iSing 优化** — QUBO/Ising 模型转换、可恢复的云端提交与目标函数解码，需安装
   `quspect[isingq]`；参见 [iSing 云端优化](docs/source/isingq.rst)。
 - **编译器** — 原生门分解、拓扑安全的 DAG 优化、受限物理比特 mapping，以及
@@ -553,7 +553,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 ## 云端 QPU
 
 QuSpect 通过统一的 `Backend` 接口连接本地模拟器和云端真机。目前支持
-LogicalQubit 和本源量子（Origin Quantum）平台。
+LogicalQubit、夸父 Quafu-SQC 与本源量子（Origin Quantum）平台。
 
 ### 云端配置
 
@@ -680,6 +680,56 @@ print(batch.by_label("theta-plus").counts)
 `LogicalQubitProvider.retrieve_job()` 恢复。批量任务超过 provider 单批上限时，
 QuSpect 会返回可恢复的组合任务；部分提交失败时可从
 `PartialSubmissionError` 获取已创建的任务引用。
+
+### 夸父 Quafu-SQC
+
+[夸父 Quafu-SQC](https://quafu-sqc.baqis.ac.cn) 是北京量子院的超导量子计算云。
+QuSpect 直接用 Python 标准库调用其 HTTP 接口，**无需安装夸父 SDK**；`quafu` extra 仅为与其他平台保持一致，
+不会安装任何依赖（`pip install "quspect[quafu]"`）。
+在 SQCLab 网站获取 token（有效期 30 天）后，可通过 `QuafuProvider(token=...)`、
+环境变量 `QUAFU_API_TOKEN`（或 SDK 使用的 `QPU_API_TOKEN`），或 JSON 文件
+`~/.quafu/api`（内容为 `{"token": "..."}`）提供。
+
+```python
+from quspect import QuantumCircuit
+from quspect.backends.quafu import QuafuProvider
+
+provider = QuafuProvider()
+print(provider.token_expiry)
+print(provider.list_backends())  # {'Haituo': 0, 'Baihua': 12, 'Ling': 'Calibrating', ...}
+
+backend = provider.get_backend("Haituo")
+print(backend.num_qubits, backend.native_gate_set, backend.calibration_time)
+
+qc = QuantumCircuit(name="bell")
+qc.h(0)
+qc.cx(0, 1)
+qc.measure([0, 1], [0, 1])
+result = backend.run(qc, shots=1024)
+print(result.counts)                       # {'00': ..., '11': ...}
+print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线路
+```
+
+工作方式：
+
+- **编译由 QuSpect 完成。** 芯片公开的标定数据（`/task/backendtest/{chip}1`）提供
+  基础门集（`h, rx, ry, rz, cz`）和耦合图；标定保真度为 0 的耦合器和比特会被剔除。
+  线路经分解、优化后，用 SABRE 映射到夸父按保真度推荐的 `priority_qubits`
+  中最小的连通子集上，再关闭服务端编译器提交，芯片按提交的物理线路原样执行。
+- `physical_qubits=[...]` / `initial_layout=[...]` 约束比特布局；`transpile=False`
+  表示线路下标已是物理比特（本地会校验耦合）。
+- `server_compiler="quarkcircuit" | "qiskit" | "qsteed"`（需 `transpile=False`）
+  改由夸父服务端编译。
+- `readout_correction=True` 返回夸父读出纠错后的准概率：`counts` 保持原始计数，
+  `probabilities` 为截断并归一化后的分布，原始准概率在
+  `metadata["quasi_probabilities"]`。
+- `dynamic_decoupling="XY4" | "CPMG"` 开启动力学解耦。
+- shots 以 1024 为单位执行，其他值会向上取整。
+- 比特串采用 QuSpect 约定（第 *i* 个字符对应经典比特 *i*，未测量的比特为 `0`），
+  已从夸父的小端键转换。
+- 每条线路对应一个夸父任务；批量提交返回可恢复的 `CompositeJob`，可用
+  `provider.retrieve_job(job.reference)` 或
+  `provider.retrieve_job(task_id, backend_name="Haituo")` 重新获取。
 
 ### 本源量子（Origin Quantum）
 

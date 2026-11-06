@@ -573,7 +573,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 
 ## Cloud QPU
 
-QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)** and **Origin Quantum (本源量子)** are supported; additional platforms can be added by implementing `CloudBackend`.
+QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)**, **Quafu-SQC (夸父)** and **Origin Quantum (本源量子)** are supported; additional platforms can be added by implementing `CloudBackend`.
 
 ### Cloud Setup
 
@@ -807,6 +807,62 @@ for bs in sorted(sim_result.counts):
     q = qpu_result.get_count(bs)
     print(f"  |{bs}⟩:  sim={s:4d}  qpu={q:4d}  Δ={s-q:+4d}")
 ```
+
+### Quafu-SQC (夸父)
+
+[Quafu-SQC](https://quafu-sqc.baqis.ac.cn) is BAQIS's superconducting quantum
+cloud. QuSpect talks to its HTTP API directly with the Python standard
+library, so **no Quafu SDK is needed**; the `quafu` extra exists for symmetry
+with other platforms and installs nothing (`pip install "quspect[quafu]"`). Get a token (valid 30 days)
+from the SQCLab website, then provide it via `QuafuProvider(token=...)`,
+`QUAFU_API_TOKEN` (or the SDK's `QPU_API_TOKEN`), or a JSON file
+`~/.quafu/api` containing `{"token": "..."}`.
+
+```python
+from quspect import QuantumCircuit
+from quspect.backends.quafu import QuafuProvider
+
+provider = QuafuProvider()
+print(provider.token_expiry)
+print(provider.list_backends())  # {'Haituo': 0, 'Baihua': 12, 'Ling': 'Calibrating', ...}
+
+backend = provider.get_backend("Haituo")
+print(backend.num_qubits, backend.native_gate_set, backend.calibration_time)
+
+qc = QuantumCircuit(name="bell")
+qc.h(0)
+qc.cx(0, 1)
+qc.measure([0, 1], [0, 1])
+result = backend.run(qc, shots=1024)
+print(result.counts)                       # {'00': ..., '11': ...}
+print(result.metadata["executed_qasm"])    # physical circuit run on the chip
+```
+
+How it works:
+
+- **Compilation is done by QuSpect.** The chip's public calibration
+  (`/task/backendtest/{chip}1`) gives the basis (`h, rx, ry, rz, cz`) and
+  coupling graph; couplers or qubits with zero calibrated fidelity are
+  dropped. Circuits are decomposed, optimized and SABRE-routed onto the
+  smallest connected subset from Quafu's fidelity-ranked `priority_qubits`,
+  then submitted with the server compiler disabled, so the chip runs exactly
+  the submitted physical circuit.
+- `physical_qubits=[...]` / `initial_layout=[...]` constrain the placement;
+  `transpile=False` submits a circuit whose indices are already physical
+  (couplings are validated locally).
+- `server_compiler="quarkcircuit" | "qiskit" | "qsteed"` (with
+  `transpile=False`) hands compilation to Quafu instead.
+- `readout_correction=True` returns Quafu's mitigated quasi-probabilities:
+  `counts` stay raw, `probabilities` are the clipped and renormalized
+  distribution, and the unmodified values are in
+  `metadata["quasi_probabilities"]`.
+- `dynamic_decoupling="XY4" | "CPMG"` enables Quafu's DD.
+- Shots are executed in blocks of 1024; other values are rounded up.
+- Bitstrings follow QuSpect's convention (character *i* is classical bit *i*;
+  unmeasured bits read `0`), converted from Quafu's little-endian keys.
+- Each circuit is one Quafu task; `submit_request()` returns a recoverable
+  `CompositeJob` for batches, and `provider.retrieve_job(job.reference)` or
+  `provider.retrieve_job(task_id, backend_name="Haituo")` reattaches later.
 
 ### Origin Quantum (本源量子)
 

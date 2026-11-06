@@ -2031,7 +2031,7 @@ requires-dist = [
     { name = "sphinx-intl", marker = "extra == 'dev'", specifier = ">=2" },
     { name = "sphinx-rtd-theme", marker = "extra == 'dev'", specifier = ">=2" },
 ]
-provides-extras = ["isingq", "logicalqubit", "originq-tests", "validation", "qiskit-tests", "dev"]
+provides-extras = ["isingq", "logicalqubit", "quafu", "originq", "originq-tests", "validation", "qiskit-tests", "dev"]
 
 [[package]]
 name = "requests"
