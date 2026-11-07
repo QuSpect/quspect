@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import os
 
-__all__ = ["ABLATION_ENV", "COMPONENTS", "ablated"]
+__all__ = ["ABLATION_ENV", "COMPONENTS", "ablated", "active_components"]
 
 #: Environment variable holding the comma-separated ablated components.
 ABLATION_ENV = "QUSPECT_ABLATE"
@@ -107,3 +107,16 @@ def ablated(name: str) -> bool:
         False
     """
     return name in _active()
+
+
+def active_components() -> frozenset[str]:
+    """The components currently switched off (empty by default).
+
+    Memoization caches keep one table per value, so results computed with a
+    component switched off never reach the default pipeline.
+
+    Example:
+        >>> active_components()
+        frozenset()
+    """
+    return _active()

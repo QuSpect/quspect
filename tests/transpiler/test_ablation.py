@@ -52,3 +52,17 @@ def test_sched_keeps_gate_order(monkeypatch: pytest.MonkeyPatch) -> None:
     qc = QuantumCircuit().cx(1, 2).cx(0, 1).rz(0.3, 0).cx(0, 3)
     monkeypatch.setenv(ABLATION_ENV, "sched")
     assert schedule_for_depth(qc) is qc
+
+
+def test_memo_is_separate_per_ablation_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    from quspect.synthesis._memo import BoundedCache
+
+    cache: BoundedCache[str, int] = BoundedCache()
+    monkeypatch.setenv(ABLATION_ENV, "stab")
+    cache.put("k", 1)
+    assert cache.get("k") == 1
+    monkeypatch.delenv(ABLATION_ENV)
+    assert cache.get("k") is None
+    cache.put("k", 2)
+    monkeypatch.setenv(ABLATION_ENV, "stab")
+    assert cache.get("k") == 1
