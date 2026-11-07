@@ -64,6 +64,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from quspect._ablation import ablated
+
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction
@@ -449,7 +451,7 @@ def schedule_for_depth(
         ``ZZ(3, 2)`` now runs next to ``ZZ(0, 1)``: depth 9 → 6.
     """
     instrs = circuit.instructions
-    if len(instrs) < 3:
+    if len(instrs) < 3 or ablated("sched"):
         return circuit
     info = _Info(instrs)
     identity = list(range(len(instrs)))

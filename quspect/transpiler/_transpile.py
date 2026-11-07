@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from quspect._ablation import ablated
 from quspect.synthesis.two_qubit import swap_face_templates
 from quspect.transpiler._basis import plan_basis, translate_to_target
 from quspect.transpiler._consolidate import SYNTHESIS_BASIS, ConsolidateBlocksPass
@@ -534,6 +535,8 @@ def transpile(
         True
     """
     tolerance = approximation_tolerance(approximation_degree)
+    if ablated("approx"):
+        tolerance = 0.0
     with _relaxed_gc():
         return _transpile(
             circuit,
@@ -646,6 +649,8 @@ def _transpile(
     if not depth_weight >= 0.0:
         raise ValueError(f"depth_weight must be non-negative, got {depth_weight!r}.")
     t_start = time.perf_counter()
+    if ablated("vf2"):
+        exact_layout = False
     stats = TranspileStats(optimization_level=optimization_level)
     # 内部流水线在以 CZ 为中心的工作门集上进行（目标单比特门 + {cz, h, rz, x}），
     # 最后一步再翻译为目标的纠缠门 / 单比特门：CZ 与 CX 等只差单比特门，双比特门数不变。
@@ -792,9 +797,10 @@ def _transpile(
     if optimization_level >= 1:
         logical = HighLevelOptimizePass().run(logical)
     if optimization_level >= _PHASE_FOLD_LEVEL and native:
-        if consolidate is not None:
+        if consolidate is not None and not ablated("qsd"):
             logical = ThreeQubitBlockPass().run(logical)
-        logical = _fold_phases(logical, native)
+        if not ablated("phase"):
+            logical = _fold_phases(logical, native)
     exact_high = logical
     if pre_approx is not None:
         # 在三比特块重综合与相位折叠之后：它们的输入与精确流水线相同
@@ -834,7 +840,7 @@ def _transpile(
             "lookahead_weight": _SU4_LOOKAHEAD_WEIGHT,
         }
     )
-    if optimization_level < 3:
+    if optimization_level < 3 or ablated("select"):
         trials = DEFAULT_LAYOUT_TRIALS if layout_trials is None else layout_trials
         solve_args: dict[str, Any] = {
             "iter_num": iter_num,
@@ -898,6 +904,7 @@ def _transpile(
         fallbacks: list[_Choice] = []
         if (
             optimization_level >= _LNS_LEVEL
+            and not ablated("lns")
             and not use_exact
             and route_plan.estimated_two_qubit_gates <= _LNS_LEVEL2_MAX_2Q
         ):
@@ -984,7 +991,12 @@ def _transpile(
             swap_keep=_LEVEL3_SWAP_KEEP,
             mirror={**_mirror_options(optimization_level), **ext_kw},
         )
-        if _MIRROR_ALT_WORK > 0 and cands[0].num_swaps > 0 and _MIRROR_LEVEL <= 3:
+        if (
+            _MIRROR_ALT_WORK > 0
+            and cands[0].num_swaps > 0
+            and _MIRROR_LEVEL <= 3
+            and not ablated("mirror")
+        ):
             # 镜像门是贪心决策，在少数结构化电路（链上的 Trotter）上反而更差：再用不做
             # 镜像的块节点路由一族候选，与主族按估计的双比特门数合并排序。
             alt = _route_candidates(
@@ -1053,7 +1065,9 @@ def _transpile(
             ]
         comm_logical = (
             DecomposePass(target, keep=_COMMUTING_KEEP).run(high_level)
-            if consolidate is not None and cands[0].num_swaps > 0
+            if consolidate is not None
+            and cands[0].num_swaps > 0
+            and not ablated("comm")
             else None
         )
         if comm_logical is not None and _commutation_worthwhile(comm_logical):
@@ -1073,7 +1087,7 @@ def _transpile(
             to_eval += comm[:_COMM_EVALUATIONS]
         stats.num_candidates = len(cands)
         stats.stage_seconds["route"] = time.perf_counter() - t0
-        if optimization_level >= _LNS_LEVEL:
+        if optimization_level >= _LNS_LEVEL and not ablated("lns"):
             t0 = time.perf_counter()
             to_eval = _with_refinements(to_eval, _lns_refinements(sabre, to_eval))
             if _LNS_DEPTH:
@@ -1320,7 +1334,8 @@ def _su4_extended_set(sabre: SABRE, logical: QuantumCircuit, elide: bool) -> int
     (see :func:`quspect.transpiler._layer_route.block_layers`) and its
     widest layer has more than half the default extended set.
     """
-    if not sabre.block_nodes or not sabre.mirror_gates:
+    # 消融 mirror 时宽前瞻照常启用（它只依赖块节点）
+    if not sabre.block_nodes or not (sabre.mirror_gates or ablated("mirror")):
         return None
     try:
         prep = sabre._prepare(logical, elide)
@@ -1467,6 +1482,9 @@ def _mirror_options(optimization_level: int) -> dict[str, Any]:
     """SABRE keyword arguments of mirror-gate-aware routing at this level."""
     if optimization_level < _MIRROR_LEVEL:
         return {}
+    if ablated("mirror"):
+        # 去掉镜像门与按镜像代价缩放的 SWAP 融合奖励，保留块节点
+        return {"block_nodes": _BLOCK_NODES}
     return {
         "block_nodes": _BLOCK_NODES,
         "mirror_gates": _MIRROR_GATES,

@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from quspect._ablation import ablated
 from quspect.synthesis.two_qubit import SynthOp, ops_to_instructions
 from quspect.transpiler._embedding import dilation_layouts
 from quspect.transpiler._routing import _RouteResult, incident_edges, route_dag
@@ -1391,7 +1392,12 @@ class SABRE:
         pair (a ``ccx`` node counts on its two control–target pairs).
         Skipped on disconnected coupling graphs.
         """
-        if dag is None or self.dilation_layouts == 0 or len(self._components) > 1:
+        if (
+            dag is None
+            or self.dilation_layouts == 0
+            or len(self._components) > 1
+            or ablated("qap")
+        ):
             return []
         weight: dict[tuple[int, int], int] = {}
         for a, b, c in zip(dag.nq1, dag.nq2, dag.nq3, strict=True):

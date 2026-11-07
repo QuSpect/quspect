@@ -46,6 +46,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from quspect._ablation import ablated
+
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.circuit.instruction import CircuitInstruction
@@ -535,6 +537,8 @@ def orient_cx_gates(
     """
     from quspect.gates._matrix_utils import gate_matrix
 
+    if ablated("orient"):
+        return circuit
     length = _LengthModel(one_qubit)
     if not length.fast or _gauge_backend() == "python":
         return circuit
