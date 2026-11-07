@@ -1277,13 +1277,7 @@ def _try_synthesize(
         out[-1] = (lefts[0] @ out[-1][0], lefts[1] @ out[-1][1])
         return out
 
-    cands = _stabilizer_candidates(k, vv, a, b, c, d, fit_cosets=swap_face)
-    # SWAP face: pairs (L, R) with L·Can·R = Can but R ≠ L^† (see
-    # _swap_face_gauges); their right factors replace S^†
-    gauges = _swap_face_gauges(a, b, c, d) if swap_face else []
-    right_stabs = [(s0.conj().T, s1.conj().T) for s0, s1 in cands]
-    cands += [left for left, _ in gauges]
-    right_stabs += [right for _, right in gauges]
+    cands = _stabilizer_candidates(k, vv, a, b, c, d)
     if len(cands) == 1:  # k = 0 or nothing to choose: no scoring needed
         return _emit_fixed_layers(u, fixed(cands[0]), k, atol, basis, verify_atol)
     # k ≥ 1.  Score the candidates by the Euler lengths of their outer layers
@@ -1298,11 +1292,7 @@ def _try_synthesize(
     for i in (0, 1):
         stack = np.array([stab[i] for stab in cands])
         lefts = np.matmul(np.matmul(a[i], stack), b_dag[i])
-        if gauges:
-            right_stack = np.array([stab[i] for stab in right_stabs])
-        else:
-            right_stack = stack.conj().transpose(0, 2, 1)
-        rights = np.matmul(np.matmul(c_dag[i], right_stack), d[i])
+        rights = np.matmul(np.matmul(c_dag[i], stack.conj().transpose(0, 2, 1)), d[i])
         firsts.append(np.matmul(layers[0][i], rights))
         lasts.append(np.matmul(lefts, layers[-1][i]))
     lengths = _euler_lengths(
@@ -1321,20 +1311,9 @@ def _try_synthesize(
             (lasts[0][j].copy(), lasts[1][j].copy()),
         ]
 
-    if gauges:
-        # SWAP face, non-CZ entanglers: the CZ-frame score ties with the
-        # identity for the gauges that cancel through the SWAP (the
-        # emitted length is only known after dressing), so emit every
-        # candidate that is not worse
-        better = sorted(
-            (j for j in range(1, n) if scores[j] <= scores[0]),
-            key=lambda j: (scores[j], j),
-        )
-    else:
-        better = sorted(
-            (j for j in range(1, n) if scores[j] < scores[0]),
-            key=lambda j: (scores[j], j),
-        )[:_STABILIZER_EMITS]
+    better = sorted(
+        (j for j in range(1, n) if scores[j] < scores[0]), key=lambda j: (scores[j], j)
+    )[:_STABILIZER_EMITS]
     if basis.entangler == "cz":
         # With CZ the emitted length is the score plus a constant (the inner
         # layers and the CZ gates), so the result is the first candidate in
@@ -1436,8 +1415,6 @@ def _stabilizer_candidates(
     k1v: _Pair,
     k2v: _Pair,
     k2u: _Pair,
-    *,
-    fit_cosets: bool = False,
 ) -> list[_Pair]:
     """Local unitaries ``S = s0⊗s1`` commuting with ``Can(v)`` worth trying.
 
@@ -1456,10 +1433,6 @@ def _stabilizer_candidates(
     (``V⊗Z·V·Z`` for ``a = b = -c`` — e.g. Heisenberg ``XX + YY - ZZ``
     blocks —, ``Rx(φ)⊗Rx(-φ)`` for ``b = -c``).  Those candidates are added
     to the ones of the unmirrored rules.
-
-    ``fit_cosets`` also fits the members ``r·P`` of the discrete coset of
-    the ``Rz(φ)⊗Rz(φ)`` / ``Rx(φ)⊗Rx(φ)`` family to the targets (see
-    :func:`_stabilizer_family`); the SWAP-face template uses it.
     """
     eye: _Pair = (_I2, _I2)
     if k == 0:
@@ -1472,75 +1445,28 @@ def _stabilizer_candidates(
         (0, k2u[0] @ k2v[0].conj().T),
         (1, k2u[1] @ k2v[1].conj().T),
     ]
-    out = _stabilizer_family(a, b, c, targets, fit_cosets)
+    out = _stabilizer_family(a, b, c, targets)
     if _MIRRORED_STABILIZERS and c < -_STABILIZER_TOL and abs(b + c) <= _STABILIZER_TOL:
         # solve for s1' = Z·s1·Z in the family of (a, b, |c|), then map back
         mirrored = [(i, _Z @ w @ _Z if i == 1 else w) for i, w in targets]
         out += [
-            (s0, _Z @ s1 @ _Z)
-            for s0, s1 in _stabilizer_family(a, b, -c, mirrored, fit_cosets)[1:]
+            (s0, _Z @ s1 @ _Z) for s0, s1 in _stabilizer_family(a, b, -c, mirrored)[1:]
         ]
     return out
 
 
 _STABILIZER_TOL = 1e-9
-
-
-def _swap_face_gauges(
-    k1u: _Pair, k1v: _Pair, k2v: _Pair, k2u: _Pair
-) -> list[tuple[_Pair, _Pair]]:
-    """Gauge pairs ``(L, R)`` with ``L·Can·R = Can`` on the SWAP face.
-
-    For ``a = b = π/4``, ``Can·(Rz(φ)⊗Rz(ψ)) = (Rz(ψ)⊗Rz(φ))·Can``, so
-    ``L = Rz(-ψ)⊗Rz(-φ)`` and ``R = Rz(φ)⊗Rz(ψ)`` (and the same with an
-    ``X⊗X`` on both sides) leave ``Can`` unchanged although ``R ≠ L^†``.
-    The eigensolver may return KAK factors anywhere in that torus (OpenBLAS
-    on arm64 Linux leaves ``Z`` before q0 and after q1 of SWAP·ZZ(0.3));
-    ``φ`` and ``ψ`` are fitted to make an outer factor the identity.
-    """
-    # left_i = k1u_i L_i k1v_i^† ≈ I ⇒ L_i ≈ k1u_i^† k1v_i
-    # right_i = k2v_i^† R_i k2u_i ≈ I ⇒ R_i ≈ k2v_i k2u_i^†
-    lw = [k1u[i].conj().T @ k1v[i] for i in (0, 1)]
-    rw = [k2v[i] @ k2u[i].conj().T for i in (0, 1)]
-    out: list[tuple[_Pair, _Pair]] = []
-    for p in (_I2, _X):
-        # L = (Rz(-ψ)·P, Rz(-φ)·P), R = (P·Rz(φ), P·Rz(ψ))
-        phis = {0.0, -_axis_angle(lw[1] @ p, _Z), _axis_angle(p @ rw[0], _Z)}
-        psis = {0.0, -_axis_angle(lw[0] @ p, _Z), _axis_angle(p @ rw[1], _Z)}
-        for phi in sorted(phis):
-            for psi in sorted(psis):
-                if p is _I2 and phi == 0.0 and psi == 0.0:
-                    continue
-                left = (_axis_rot(_Z, -psi) @ p, _axis_rot(_Z, -phi) @ p)
-                right = (p @ _axis_rot(_Z, phi), p @ _axis_rot(_Z, psi))
-                out.append((left, right))
-    return out
-
-
 #: Use the stabilizers of the mirrored degenerate points ``b = -c`` (round 17).
 _MIRRORED_STABILIZERS = True
 
 
 def _stabilizer_family(
-    a: float,
-    b: float,
-    c: float,
-    targets: list[tuple[int, np.ndarray]],
-    fit_cosets: bool = False,
+    a: float, b: float, c: float, targets: list[tuple[int, np.ndarray]]
 ) -> list[_Pair]:
     """Candidates of :func:`_stabilizer_candidates` for the point ``(a, b, c)``.
 
     ``targets`` are ``(slot, w)``: a factor ``s_slot = w`` makes one outer
     single-qubit factor the identity.  The identity comes first.
-
-    With ``fit_cosets`` the members ``r·P`` of the discrete coset of an
-    ``Rz(φ)⊗Rz(φ)`` / ``Rx(φ)⊗Rx(φ)`` family are fitted to the targets
-    directly (``r ≈ w·P``) instead of only ``r·P`` with ``r ≈ w``.  Which
-    coset the eigensolver's KAK factors land in depends on the LAPACK
-    build, so without it SWAP·ZZ blocks keep long outer layers on some
-    platforms (arm64 Linux).  It is limited to the SWAP-face template:
-    elsewhere the extra, locally shorter candidates merge worse with the
-    neighbouring gates (BV on a line: single-qubit gates ×2).
     """
     eye: _Pair = (_I2, _I2)
     tol = _STABILIZER_TOL
@@ -1549,7 +1475,6 @@ def _stabilizer_family(
     cands: list[_Pair] = [eye]
     # discrete part of the stabilizer not already in the continuous family
     paulis: tuple[_Pair, ...]
-    fitted: list[_Pair] = []  # V⊗V (a = b = c) already holds every coset
     if abs(a - b) <= tol and abs(b - c) <= tol:
         cands += [(w, w) for _, w in targets]
         paulis = _PAULI_LOCAL  # V·P ⊗ V·P: other members of the same family
@@ -1568,13 +1493,7 @@ def _stabilizer_family(
             r = _axis_rot(pauli, _axis_angle(w, pauli))
             cands.append((r, r))
         paulis = (_PAULI_LOCAL[0] if abs(a - b) <= tol else _PAULI_LOCAL[2],)
-        if fit_cosets:
-            p = paulis[0][0]
-            for _, w in targets:
-                r = _axis_rot(pauli, _axis_angle(w @ p, pauli)) @ p
-                fitted.append((r, r))
-    out = cands + [(s0 @ p0, s1 @ p1) for s0, s1 in cands for p0, p1 in paulis]
-    return out + fitted
+    return cands + [(s0 @ p0, s1 @ p1) for s0, s1 in cands for p0, p1 in paulis]
 
 
 def _emit_fixed_layers(

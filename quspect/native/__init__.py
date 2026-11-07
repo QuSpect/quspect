@@ -14,14 +14,6 @@ Example::
     executor = NativeExecutor(precision="double", seed=42)
     result = executor.run(qsal_json, shots=1024)
     print(result.counts)
-
-Use :func:`load_core` to detect whether the native core is available without
-raising::
-
-    from quspect.native import load_core
-
-    if load_core() is None:
-        ...  # native core not built; fall back to pure-Python code paths
 """
 
 from __future__ import annotations
@@ -31,18 +23,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from quspect._native_loader import BUILD_HINT, load_core
-
-__all__ = [
-    "ExecutionResult",
-    "NativeExecutor",
-    "NativeImportError",
-    "capabilities",
-    "decode_qsal",
-    "get_num_threads",
-    "load_core",
-    "set_num_threads",
-    "validate",
-]
 
 _core: Any = load_core()
 

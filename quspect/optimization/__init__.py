@@ -26,12 +26,6 @@ from quspect.optimization.hardware import (
     HardwareIsingProgram,
     compile_hardware_ising,
 )
-from quspect.optimization.isingq import (
-    IsingQClient,
-    IsingQError,
-    IsingQProgram,
-    compile_isingq,
-)
 from quspect.optimization.model import (
     BinaryQuadraticModel,
     IsingProblem,
@@ -51,10 +45,6 @@ from quspect.optimization.program import (
 )
 
 __all__ = [
-    "IsingQClient",
-    "IsingQError",
-    "IsingQProgram",
-    "compile_isingq",
     "BinaryVariable",
     "QuadraticExpression",
     "as_expression",

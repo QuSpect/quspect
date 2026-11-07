@@ -55,16 +55,6 @@ BUILD_HINT = (
 def load_core() -> Any | None:
     """Return the best native extension module for this CPU, or ``None``.
 
-    This is the supported, stable public way to detect whether the QuSpect
-    C++ native core is available; import it as
-    ``from quspect.native import load_core``.  A return value of ``None``
-    means the native core has not been built (or installed), so native
-    features such as :class:`quspect.native.NativeExecutor` are unavailable.
-    Any non-``None`` return value is the loaded extension module; its name and
-    attributes are implementation details and may change between releases, so
-    treat it only as a truthy "native core is available" signal and use the
-    public :mod:`quspect.native` API to interact with it.
-
     The scalar module is imported first.  If it is missing, ``None`` is
     returned so callers can raise a friendly error or skip native features.
     When the scalar module reports AVX2 + FMA support via
@@ -87,9 +77,9 @@ def load_core() -> Any | None:
             "not built".
 
     Example:
-        >>> from quspect.native import load_core
-        >>> has_native_core = load_core() is not None
-        >>> isinstance(has_native_core, bool)
+        >>> from quspect._native_loader import load_core
+        >>> core = load_core()
+        >>> core is None or "backend_f64" in core.get_runtime_capabilities()
         True
     """
     try:

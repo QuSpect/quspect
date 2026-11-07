@@ -158,7 +158,7 @@ class Simulator(Backend):
                 statevector=sv,
             )
 
-        # 无测量线路：不采样，num_shots 始终为 0
+        # 无测量电路：不采样，num_shots 始终为 0
         has_measurements = any(instr.is_measure for instr in instructions)
         cpp_shots = shots if has_measurements else 0
         result_shots = shots if has_measurements else 0

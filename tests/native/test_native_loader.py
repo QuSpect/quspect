@@ -175,31 +175,3 @@ def test_real_extension_reports_consistent_backend() -> None:
     scalar = importlib.import_module(SCALAR_MODULE)
     assert bool(scalar.cpu_supports_avx2()) == bool(caps["avx2_available"])
     assert scalar.get_runtime_capabilities()["backend_f64"] == "scalar"
-
-
-def test_load_core_is_public_in_quspect_native() -> None:
-    """``load_core`` is a supported public API of :mod:`quspect.native`."""
-    import quspect.native as native
-    from quspect.native import load_core as public_load_core
-
-    assert "load_core" in native.__all__
-    assert public_load_core is load_core
-
-
-def test_quspect_native_all_names_resolve() -> None:
-    """Every name in ``quspect.native.__all__`` exists on the module."""
-    import quspect.native as native
-
-    for name in native.__all__:
-        assert hasattr(native, name), name
-    for name in (
-        "ExecutionResult",
-        "NativeExecutor",
-        "NativeImportError",
-        "capabilities",
-        "decode_qsal",
-        "get_num_threads",
-        "set_num_threads",
-        "validate",
-    ):
-        assert name in native.__all__, name

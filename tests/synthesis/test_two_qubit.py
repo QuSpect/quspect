@@ -249,23 +249,13 @@ def test_tiny_interactions_dropped_only_within_linear_budget() -> None:
 
 
 @pytest.mark.parametrize(
-    ("point", "bounds"),
-    [
-        ((0.125, 0.125, -0.125), (16, 19)),
-        ((0.3, 0.3, -0.3), (16, 19)),
-        ((0.5, 0.2, -0.2), (17, 22)),
-    ],
+    "point", [(0.125, 0.125, -0.125), (0.3, 0.3, -0.3), (0.5, 0.2, -0.2)]
 )
-def test_mirrored_degenerate_stabilizer(
-    point: tuple[float, float, float], bounds: tuple[int, int]
-) -> None:
+def test_mirrored_degenerate_stabilizer(point: tuple[float, float, float]) -> None:
     """``b = -c`` points have a continuous stabilizer (``V⊗Z·V·Z``, ...).
 
     Every candidate commutes with ``Can``, and a Clifford-dressed block (a
-    Heisenberg ``XX + YY - ZZ`` term) gets short outer layers.  The round-12
-    search depends on the KAK factors the platform's LAPACK happens to
-    return (it is sometimes already short on Linux), so the new search is
-    checked against fixed gate counts and never longer than the old one.
+    Heisenberg ``XX + YY - ZZ`` term) gets short outer layers.
     """
     import quspect.synthesis.two_qubit as tq
     from tests.synthesis._legacy_stabilizer_r12 import legacy_try_synthesize
@@ -284,13 +274,11 @@ def test_mirrored_degenerate_stabilizer(
         assert np.allclose(s @ can, can @ s, atol=1e-9)
     u = np.kron(tq._H, tq._S) @ can @ np.kron(tq._SX, tq._H)
     kak = tq._kak4(u)
-    for basis, bound in zip(
-        (tq.TwoQubitBasis("cx", "zsx"), tq.TwoQubitBasis()), bounds, strict=True
-    ):
+    for basis in (tq.TwoQubitBasis("cx", "zsx"), tq.TwoQubitBasis()):
         new = tq._try_synthesize(u, kak, 3, tq.DEFAULT_ATOL, None, basis, 1e-9)
         old = legacy_try_synthesize(u, kak, 3, tq.DEFAULT_ATOL, None, basis, 1e-9)
         assert new[1] <= 1e-9
-        assert len(new[0]) <= min(bound, len(old[0]))
+        assert len(new[0]) < len(old[0])
 
 
 @pytest.mark.parametrize(("theta", "outer"), [(0.0, 0), (0.3, 0), (1.2, 0), (-2.0, 2)])
@@ -303,43 +291,6 @@ def test_swap_face_template(theta: float, outer: int) -> None:
     u = swap @ zz
     with tq.swap_face_templates():
         _check_swap_face(u, outer)
-
-
-@pytest.mark.parametrize("theta", [0.0, 0.3, 1.2, -2.0])
-def test_swap_face_independent_of_kak_gauge(theta: float) -> None:
-    """The result does not depend on which gauge the KAK factors land in.
-
-    On the SWAP face ``L·Can·R = Can`` for ``L = Rz(-ψ)⊗Rz(-φ)``,
-    ``R = Rz(φ)⊗Rz(ψ)`` (times ``{I, X⊗X}`` on both sides), and the
-    eigensolver may return KAK factors anywhere in that family (OpenBLAS
-    on arm64 Linux leaves ``Z`` before q0 and after q1 of SWAP·ZZ(0.3)).
-    """
-    import quspect.synthesis.two_qubit as tq
-
-    swap = np.eye(4)[[0, 2, 1, 3]].astype(complex)
-    u = swap @ np.diag(np.exp(-0.5j * theta * np.array([1, -1, -1, 1])))
-    phase, k1, v, k2 = tq._kak4(u)
-    for basis in (tq.TwoQubitBasis("cx"), tq.TwoQubitBasis("cx", "zsx")):
-        counts = set()
-        for phi, psi in (
-            (0.0, 0.0),
-            (0.7, 0.7),
-            (-1.9, -1.9),
-            (np.pi, 0.0),
-            (0.4, -2.2),
-        ):
-            for coset in (tq._I2, tq._X, tq._Y):
-                left = np.kron(tq._rz(-psi) @ coset, tq._rz(-phi) @ coset)
-                right = np.kron(coset @ tq._rz(phi), coset @ tq._rz(psi))
-                kak = (phase, k1 @ left, v, right @ k2)
-                can = tq.canonical_gate(*v)
-                assert np.allclose(left @ can @ right, can)
-                ops, err = tq._try_synthesize(
-                    u, kak, 3, tq.DEFAULT_ATOL, None, basis, 1e-9, swap_face=True
-                )
-                assert err <= 1e-9
-                counts.add(sum(1 for name, _, _ in ops if name != "cx"))
-        assert len(counts) == 1, counts
 
 
 def _check_swap_face(u: np.ndarray, outer: int) -> None:

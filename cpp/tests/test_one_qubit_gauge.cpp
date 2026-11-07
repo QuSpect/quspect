@@ -234,24 +234,6 @@ TEST(OneQubitGauge, EulerLengthMatchesPython) {
     EXPECT_FALSE(EulerLength(kMats[0], 7, 1e-9).has_value());
 }
 
-// Rx(θ)：θ 恰好等于 atol 时 θ 的最后几位取决于 atan2 的实现，必须交回 Python。
-Matrix2 RxMatrix(double theta) {
-    const double c = std::cos(theta / 2.0);
-    const double s = std::sin(theta / 2.0);
-    return {Complex{c, 0.0}, Complex{0.0, -s}, Complex{0.0, -s}, Complex{c, 0.0}};
-}
-
-TEST(OneQubitGauge, EulerLengthDefersNearThreshold) {
-    for (int basis = 0; basis < 2; ++basis) {
-        EXPECT_FALSE(EulerLength(RxMatrix(1e-9), basis, 1e-9).has_value());
-        EXPECT_FALSE(EulerLength(RxMatrix(1e-12), basis, 1e-12).has_value());
-        EXPECT_FALSE(EulerLength(RxMatrix(std::acos(-1.0) / 2.0 + 1e-9), basis, 1e-9).has_value());
-        // 远离阈值：照常给出长度（与 len(euler_ops(...)) 相同）
-        EXPECT_EQ(EulerLength(RxMatrix(1e-7), basis, 1e-9).value(), basis == 0 ? 3 : 5);
-        EXPECT_EQ(EulerLength(RxMatrix(1e-11), basis, 1e-9).value(), 0);
-    }
-}
-
 TEST(OneQubitGauge, LeadingAnglesMatchPython) {
     for (int i = 0; i < kNumMats; ++i) {
         const auto lead = LeadingAnglesInZFrame(kFramesX[i]);

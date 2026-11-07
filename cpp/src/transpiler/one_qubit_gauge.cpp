@@ -20,8 +20,6 @@ namespace {
 constexpr double kPi = 3.141592653589793;
 constexpr double kHalfPi = kPi / 2.0;
 constexpr double kTwoPi = 2.0 * kPi;
-// EulerLength 与 Python 的阈值判断只在离阈值超过该距离时保证一致（角度为 O(π)，约 200 ulp）。
-constexpr double kEulerThresholdMargin = 1e-13;
 constexpr int kInf = 1000000;
 
 bool Finite(const Complex& z) {
@@ -458,43 +456,33 @@ std::optional<int> EulerLength(const Matrix2& m, int basis, double atol) {
     const double minus = Abs(*m10) > 1e-12 ? 2.0 * Phase(*m10) + kPi : 0.0;
     const double phi = (plus + minus) / 2.0;
     const double lam = (plus - minus) / 2.0;
-    // 阈值比较落在边界附近时交回 Python：np.angle 与 libm atan2 的实现可能差 1 ulp
-    // （Linux 上 numpy 用自带的 SIMD atan2），逐位一致只能在远离阈值时保证。
-    bool ambiguous = false;
-    const auto within = [atol, &ambiguous](double dist) {
-        if (std::fabs(dist - atol) <= kEulerThresholdMargin) {
-            ambiguous = true;
-        }
-        return dist <= atol;
-    };
-    const auto zero = [&within](double angle) { return within(std::fabs(std::remainder(angle, kTwoPi))); };
+    const auto zero = [atol](double angle) { return std::fabs(std::remainder(angle, kTwoPi)) <= atol; };
     const auto rz = [&zero](double angle) { return zero(angle) ? 0 : 1; };
-    std::optional<int> length;
     if (basis == 0) {
         if (zero(theta)) {
-            length = rz(phi + lam);
-        } else if (within(std::fabs(theta - kPi))) {
-            length = rz(lam - phi) + 1;
-        } else if (within(std::fabs(theta - kHalfPi))) {
-            length = rz(lam - kHalfPi) + 1 + rz(phi - kHalfPi);
-        } else {
-            length = rz(lam) + 3 + rz(phi);
+            return rz(phi + lam);
         }
-    } else if (basis == 1) {
+        if (std::fabs(theta - kPi) <= atol) {
+            return rz(lam - phi) + 1;
+        }
+        if (std::fabs(theta - kHalfPi) <= atol) {
+            return rz(lam - kHalfPi) + 1 + rz(phi - kHalfPi);
+        }
+        return rz(lam) + 3 + rz(phi);
+    }
+    if (basis == 1) {
         if (zero(theta)) {
-            length = rz(phi + lam);
-        } else if (within(std::fabs(theta - kPi))) {
-            length = rz(lam - phi) + 1;
-        } else if (within(std::fabs(theta - kHalfPi))) {
-            length = rz(lam) + 1 + rz(phi);
-        } else {
-            length = rz(lam + kHalfPi) + 1 + rz(theta + kPi) + 1 + rz(phi + kHalfPi);
+            return rz(phi + lam);
         }
+        if (std::fabs(theta - kPi) <= atol) {
+            return rz(lam - phi) + 1;
+        }
+        if (std::fabs(theta - kHalfPi) <= atol) {
+            return rz(lam) + 1 + rz(phi);
+        }
+        return rz(lam + kHalfPi) + 1 + rz(theta + kPi) + 1 + rz(phi + kHalfPi);
     }
-    if (ambiguous) {
-        return std::nullopt;
-    }
-    return length;
+    return std::nullopt;
 }
 
 std::int64_t PyRound(double x) {

@@ -366,31 +366,6 @@ if(QSPECT_AVX2_ACTIVE)
   qspect_use_openmp(qspect_native_avx2_static PUBLIC)
 endif()
 
-# ============================================================
-# Pulse envelopes (quspect._pulse)
-# ============================================================
-#
-# 超导量子比特控制包络（envelopes-qc 0.1.5 的 C++ 重新实现）。解码结果与原实现逐位一致，
-# 因此必须关闭浮点收缩（FMA 融合）；libcerf 3.1（MIT）以 C++ 方式编译。不使用 OpenMP。
-set(PULSE_SRCS
-  src/pulse/envelopes.cpp
-  src/pulse/cerf_erfcx.cpp
-  src/pulse/cerf_err_fcts.cpp
-  src/pulse/cerf_im_w_of_x.cpp
-  src/pulse/cerf_w_of_z.cpp
-  src/pulse/cerf_width.cpp
-)
-add_library(qspect_pulse_static STATIC ${PULSE_SRCS})
-target_include_directories(qspect_pulse_static
-  PUBLIC ${NATIVE_INCLUDE_DIR}
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libcerf
-)
-if(MSVC)
-  target_compile_options(qspect_pulse_static PRIVATE /fp:precise)
-else()
-  target_compile_options(qspect_pulse_static PRIVATE -ffp-contract=off -fno-fast-math)
-endif()
-
 # 默认变体：测试优先链接 AVX2 变体（CPU 支持时 test_dispatch 断言 backend == "avx2"）
 if(QSPECT_AVX2_ACTIVE)
   set(QSPECT_NATIVE_DEFAULT_LIB qspect_native_avx2_static)
@@ -433,22 +408,6 @@ if(QSPECT_BUILD_PYTHON)
   if(QSPECT_AVX2_ACTIVE)
     qspect_add_python_module(qspect_core_avx2_module _core_avx2 qspect_native_avx2_static)
   endif()
-
-  # quspect._pulse：独立于内核变体的包络模块
-  pybind11_add_module(qspect_pulse_module MODULE src/pybind/pulse_module.cpp)
-  target_link_libraries(qspect_pulse_module PRIVATE qspect_pulse_static)
-  set_target_properties(qspect_pulse_module PROPERTIES OUTPUT_NAME _pulse)
-  if(NOT SKBUILD)
-    set(_qspect_pkg_dir "${CMAKE_CURRENT_SOURCE_DIR}/../quspect")
-    set_target_properties(qspect_pulse_module PROPERTIES
-      LIBRARY_OUTPUT_DIRECTORY "$<1:${_qspect_pkg_dir}>"
-      RUNTIME_OUTPUT_DIRECTORY "$<1:${_qspect_pkg_dir}>"
-    )
-  endif()
-  install(TARGETS qspect_pulse_module
-    LIBRARY DESTINATION quspect
-    RUNTIME DESTINATION quspect
-  )
 endif()
 
 # ============================================================
@@ -508,13 +467,6 @@ if(QSPECT_BUILD_TESTS)
     PRIVATE qspect_native_scalar_static
   )
   add_test(NAME test_dispatch_scalar COMMAND test_dispatch_scalar)
-
-  add_executable(test_pulse_envelopes tests/test_pulse_envelopes.cpp)
-  target_link_libraries(test_pulse_envelopes
-    PRIVATE gtest_main
-    PRIVATE qspect_pulse_static
-  )
-  add_test(NAME test_pulse_envelopes COMMAND test_pulse_envelopes)
 
   # AVX2 构建中默认测试链接 AVX2 变体；并行测试再对 scalar 变体跑一遍
   if(QSPECT_AVX2_ACTIVE)

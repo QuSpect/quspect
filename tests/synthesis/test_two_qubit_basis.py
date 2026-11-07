@@ -114,9 +114,9 @@ def _clifford_dressed(core: np.ndarray, seed: int) -> np.ndarray:
     ("coords", "ratio"),
     [
         ((0.35, 0.35, 0.35), 0.55),  # Heisenberg: stabilizer V⊗V
-        ((0.35, 0.35, 0.2), 0.85),  # XXZ: Rz(φ)⊗Rz(φ)
-        ((0.35, 0.0, 0.0), 0.97),  # CP-like: Rx⊗Rx
-        ((np.pi / 4, 0.0, 0.0), 0.92),  # CX-like (Clifford dressing)
+        ((0.35, 0.35, 0.2), 0.8),  # XXZ: Rz(φ)⊗Rz(φ)
+        ((0.35, 0.0, 0.0), 0.95),  # CP-like: Rx⊗Rx
+        ((np.pi / 4, 0.0, 0.0), 0.88),  # CX-like (Clifford dressing)
         ((0.4, 0.3, 0.1), 0.97),  # generic: Pauli pairs only
     ],
 )
@@ -129,10 +129,6 @@ def test_stabilizer_shortens_outer_layers(
     eigensolver returns arbitrary ones); choosing the stabilizer element
     roughly halves the single-qubit gates of a Clifford-dressed Heisenberg
     gate in ``{rz, sx, x}``.  Never longer than without the search.
-
-    Both counts depend on the KAK factors the platform's LAPACK returns
-    (macOS Accelerate vs. OpenBLAS on x86-64 / arm64 Linux differ by a few
-    gates in total), so the ratios leave room for that spread.
     """
     from quspect.synthesis import two_qubit as tq
 
@@ -145,9 +141,7 @@ def test_stabilizer_shortens_outer_layers(
         return sum(1 for _, q, _ in ops if len(q) == 1)
 
     new = [count(u) for u in us]
-    monkeypatch.setattr(
-        tq, "_stabilizer_candidates", lambda *a, **kw: [(tq._I2, tq._I2)]
-    )
+    monkeypatch.setattr(tq, "_stabilizer_candidates", lambda *a: [(tq._I2, tq._I2)])
     old = [count(u) for u in us]
     assert all(n <= o for n, o in zip(new, old, strict=True))
     assert sum(new) <= ratio * sum(old), (sum(new), sum(old))
