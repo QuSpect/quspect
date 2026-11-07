@@ -18,6 +18,8 @@ from typing import Generic, TypeVar
 
 import numpy as np
 
+from quspect._ablation import active_components
+
 K = TypeVar("K")
 V = TypeVar("V")
 
@@ -37,11 +39,21 @@ class BoundedCache(Generic[K, V]):
         (1, None)
     """
 
-    __slots__ = ("_data", "_maxsize")
+    __slots__ = ("_maxsize", "_stores")
 
     def __init__(self, maxsize: int = DEFAULT_MAXSIZE) -> None:
-        self._data: dict[K, V] = {}
+        # 每个消融状态（QUSPECT_ABLATE）一份独立的表：消融配置算出的结果不会被
+        # 默认流水线读到，反之亦然。默认状态下与单个 dict 完全相同。
+        self._stores: dict[frozenset[str], dict[K, V]] = {}
         self._maxsize = max(1, maxsize)
+
+    @property
+    def _data(self) -> dict[K, V]:
+        state = active_components()
+        store = self._stores.get(state)
+        if store is None:
+            store = self._stores[state] = {}
+        return store
 
     def get(self, key: K) -> V | None:
         """Return the cached value or ``None``."""
@@ -49,13 +61,14 @@ class BoundedCache(Generic[K, V]):
 
     def put(self, key: K, value: V) -> None:
         """Store ``value``; clears the cache first when it is full."""
-        if len(self._data) >= self._maxsize:
-            self._data.clear()
-        self._data[key] = value
+        data = self._data
+        if len(data) >= self._maxsize:
+            data.clear()
+        data[key] = value
 
     def clear(self) -> None:
         """Drop every entry."""
-        self._data.clear()
+        self._stores.clear()
 
     def __len__(self) -> int:
         return len(self._data)
