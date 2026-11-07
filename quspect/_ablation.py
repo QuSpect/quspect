@@ -49,6 +49,28 @@ Components (see the paper's compiler-techniques section):
 ``sched``
     Depth scheduling on the commutation trace monoid
     (:func:`schedule_for_depth` returns its input).
+
+Base-pipeline switches (for grouped ablations and contribution ladders):
+
+``kak``
+    Two-qubit block consolidation and KAK resynthesis before routing, after
+    routing and after optimization (no :class:`ConsolidateBlocksPass`), the
+    pre-routing ``SWAP · U`` block resynthesis of SABRE and the final
+    SWAP-face block rewrite.  Gates are translated one by one (unsupported
+    gates with a matrix are still synthesized) and simplified by the
+    peephole optimizer.  This also disables everything that needs a
+    consolidation pass (three-qubit QSD, approximate synthesis and the
+    commutation-aware candidate family).
+``sabre2``
+    The routing extensions of SABRE v2: block nodes (and with them mirror
+    gates, the SWAP-fusion bonus and the SU(4) wide lookahead), Toffolis
+    routed as three-qubit units (they are decomposed before routing) and
+    the pre-routing ``SWAP · U`` block resynthesis.  The LightSABRE core
+    (lookahead, decay, release valve, layout trials) stays.
+``gauge``
+    Single-qubit gauge minimization after translation
+    (:func:`minimize_single_qubit_gates` is skipped); the peephole
+    single-qubit fusion of the optimizer stays.
 """
 
 from __future__ import annotations
@@ -77,6 +99,9 @@ COMPONENTS = frozenset(
         "orient",
         "orient_dual",
         "sched",
+        "kak",
+        "sabre2",
+        "gauge",
     }
 )
 

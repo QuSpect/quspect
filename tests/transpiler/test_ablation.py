@@ -66,3 +66,30 @@ def test_memo_is_separate_per_ablation_state(monkeypatch: pytest.MonkeyPatch) ->
     cache.put("k", 2)
     monkeypatch.setenv(ABLATION_ENV, "stab")
     assert cache.get("k") == 1
+
+
+_ALL_EXT = (
+    "vf2,qap,mirror,comm,lns,kendall,rollout,select,stab,qsd,phase,approx,sched,orient"
+)
+
+
+@pytest.mark.parametrize(
+    "switches",
+    ["kak", "sabre2", "gauge", _ALL_EXT, f"{_ALL_EXT},kak,sabre2,gauge"],
+)
+def test_base_switches_stay_equivalent(
+    monkeypatch: pytest.MonkeyPatch, switches: str
+) -> None:
+    from tests.transpiler.test_transpile import _assert_equivalent
+
+    target = CompilationTarget.from_coupling_map(
+        5, [(i, i + 1) for i in range(4)], native_gates=_NATIVE
+    )
+    qc = _qft_like(5).ccx(0, 2, 4).swap(1, 3)
+    monkeypatch.delenv(ABLATION_ENV, raising=False)
+    full = transpile(qc, target, optimization_level=3, seed=0)
+    monkeypatch.setenv(ABLATION_ENV, switches)
+    out = transpile(qc, target, optimization_level=3, seed=0)
+    _assert_equivalent(qc, out, target)
+    if switches != "gauge":
+        assert out.stats.two_qubit_gates >= full.stats.two_qubit_gates

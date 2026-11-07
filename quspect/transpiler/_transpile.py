@@ -659,17 +659,22 @@ def _transpile(
     native = frozenset(target.native_gates)
     decompose = DecomposePass(target)
     # 路由前保留 ccx：SABRE 把 Toffoli 当作三比特单元路由并按落点综合
-    pre_decompose = DecomposePass(target, keep={"ccx"})
+    # 消融 sabre2 时 Toffoli 在路由前就分解（不作为三比特单元路由）
+    pre_decompose = DecomposePass(
+        target, keep=frozenset() if ablated("sabre2") else {"ccx"}
+    )
     consolidate = (
         ConsolidateBlocksPass(target)
-        if optimization_level >= 1 and (not native or native >= SYNTHESIS_BASIS)
+        if optimization_level >= 1
+        and (not native or native >= SYNTHESIS_BASIS)
+        and not ablated("kak")
         else None
     )
     optimize = OptimizePass(basis_gates=native or None)
     final_optimize = OptimizePass(basis_gates=plan.native or None)
     sabre = SABRE(
         target,
-        permutation_synthesis=optimization_level >= _PHASE_FOLD_LEVEL,
+        permutation_synthesis=_permutation_synthesis(optimization_level),
         dilation_layouts=_dilation_layouts(optimization_level),
         **_mirror_options(optimization_level),
     )
@@ -728,6 +733,8 @@ def _transpile(
         # （内层只剩一个 rz）：选中的路由用它再走一遍路由后流程；另外把最终线路里的
         # 这种块直接改写（纠缠门不变）。都走完下面的流程，按 (双比特门, 深度, …) 取优
         # （最终线路里没有这种块时两条都跳过）
+        if ablated("kak"):
+            return out
         swapped = resynthesize_swap_face_blocks(c, plan.native)
         if swapped is c:
             return out
@@ -747,7 +754,7 @@ def _transpile(
 
     def finish_one(c: QuantumCircuit) -> QuantumCircuit:
         def gauge(x: QuantumCircuit) -> QuantumCircuit:
-            if optimization_level >= 1 and plan.one_qubit:
+            if optimization_level >= 1 and plan.one_qubit and not ablated("gauge"):
                 return minimize_single_qubit_gates(x, plan.one_qubit)
             return x
 
@@ -855,7 +862,7 @@ def _transpile(
             # 宽前瞻的路由也做一次，按估计（QV 类线路上与完整评估一致）取优
             wide = SABRE(
                 target,
-                permutation_synthesis=optimization_level >= _PHASE_FOLD_LEVEL,
+                permutation_synthesis=_permutation_synthesis(optimization_level),
                 dilation_layouts=_dilation_layouts(optimization_level),
                 **_mirror_options(optimization_level),
                 **ext_kw,
@@ -987,7 +994,7 @@ def _transpile(
             elide_permutations=elide_permutations,
             work_limit=work_limit,
             time_limit=time_limit,
-            permutation_synthesis=optimization_level >= _PHASE_FOLD_LEVEL,
+            permutation_synthesis=_permutation_synthesis(optimization_level),
             swap_keep=_LEVEL3_SWAP_KEEP,
             mirror={**_mirror_options(optimization_level), **ext_kw},
         )
@@ -1011,7 +1018,7 @@ def _transpile(
                 elide_permutations=elide_permutations,
                 work_limit=max(1, int(_MIRROR_ALT_WORK * work_limit)),
                 time_limit=time_limit,
-                permutation_synthesis=optimization_level >= _PHASE_FOLD_LEVEL,
+                permutation_synthesis=_permutation_synthesis(optimization_level),
                 swap_keep=_LEVEL3_SWAP_KEEP,
                 mirror={
                     # 不做镜像的这一族保留默认的扩展集：两种前瞻都进入候选
@@ -1055,7 +1062,7 @@ def _transpile(
                 elide_permutations=elide_permutations,
                 work_limit=None,
                 time_limit=None,
-                permutation_synthesis=optimization_level >= _PHASE_FOLD_LEVEL,
+                permutation_synthesis=_permutation_synthesis(optimization_level),
                 mirror={**_mirror_options(optimization_level), **ext_kw},
             )
             to_eval += [
@@ -1480,7 +1487,8 @@ def _dilation_layouts(optimization_level: int) -> int:
 
 def _mirror_options(optimization_level: int) -> dict[str, Any]:
     """SABRE keyword arguments of mirror-gate-aware routing at this level."""
-    if optimization_level < _MIRROR_LEVEL:
+    if optimization_level < _MIRROR_LEVEL or ablated("sabre2"):
+        # 消融 sabre2：逐门路由（无块节点，因而也无镜像门、融合奖励与 SU(4) 宽前瞻）
         return {}
     if ablated("mirror"):
         # 去掉镜像门与按镜像代价缩放的 SWAP 融合奖励，保留块节点
@@ -1492,6 +1500,16 @@ def _mirror_options(optimization_level: int) -> dict[str, Any]:
         "mirror_cz_penalty": _MIRROR_CZ_PENALTY,
         "swap_fusion_bonus": _MIRROR_FUSION,
     }
+
+
+def _permutation_synthesis(optimization_level: int) -> bool:
+    """Whether SABRE replaces blocks ``U`` by ``SWAP · U`` before routing."""
+    # SWAP·U 重综合是路由前的 KAK 改写，消融 kak 或 sabre2 时都关掉
+    return (
+        optimization_level >= _PHASE_FOLD_LEVEL
+        and not ablated("kak")
+        and not ablated("sabre2")
+    )
 
 
 def _commutation_worthwhile(circuit: QuantumCircuit) -> bool:
