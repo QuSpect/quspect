@@ -42,6 +42,10 @@ Components (see the paper's compiler-techniques section):
 ``orient``
     Global CX orientation by Lagrangian dual decomposition
     (:func:`orient_cx_gates` returns its input).
+``orient_dual``
+    Only the dual (subgradient) iterations of the CX orientation: the
+    initial candidates (input orientation and all CX flipped) are still
+    evaluated (``iterations=0``).
 ``sched``
     Depth scheduling on the commutation trace monoid
     (:func:`schedule_for_depth` returns its input).
@@ -71,6 +75,7 @@ COMPONENTS = frozenset(
         "phase",
         "approx",
         "orient",
+        "orient_dual",
         "sched",
     }
 )

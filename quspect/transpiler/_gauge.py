@@ -539,6 +539,9 @@ def orient_cx_gates(
 
     if ablated("orient"):
         return circuit
+    if ablated("orient_dual"):
+        # 只保留初始候选（原朝向与全部翻转），不做对偶（次梯度）迭代
+        iterations = 0
     length = _LengthModel(one_qubit)
     if not length.fast or _gauge_backend() == "python":
         return circuit
