@@ -209,9 +209,27 @@ _LNS_LEVEL2_MAX_2Q = 5000
 # _PHASE_POLY_MAX_2Q 的线路做
 _PHASE_POLY_LEVEL = 3
 _PHASE_POLY_MAX_2Q = 3000
+# 也从未合并（未做两比特块重综合）的路由线路出发做一次区域重综合
+_PHASE_POLY_RAW = True
+# 小线路（两比特门不超过 _PHASE_POLY_PRE_MAX_2Q、没有三比特以上的门）的
+# 第二个起点：路由前先在逻辑线路上做一次区域重综合（只用已有相互作用的
+# 比特对），两条路取最终更好的
+_PHASE_POLY_PRE = True
+_PHASE_POLY_PRE_MAX_2Q = 300
 # 区域划分是贪心的：按 (最多几根线, A* 展开预算) 各划分一次，取两比特门最少的
 # （4 根线最好；5 根线另有约 8% 的区域更省，但 A* 更贵，预算取小）
 _PHASE_POLY_SETTINGS = ((4, 200_000), (5, 20_000))
+# 完整的区域重综合（估计最好的几个候选与选中的路由）：再加上至多 16 根线的
+# 区域（> 6 根线用束搜索），从线路开头与末尾各划分一次
+_PHASE_POLY_FULL_SETTINGS = (
+    (4, 200_000),
+    (5, 20_000),
+    (16, 20_000),
+    (16, 20_000, True),
+)
+_PHASE_POLY_REFINE_TOP = 3
+# 大区域束搜索的束宽
+_PHASE_POLY_BEAM = 64
 
 
 @dataclass
@@ -560,24 +578,67 @@ def transpile(
         True
     """
     tolerance = approximation_tolerance(approximation_degree)
+    kwargs: dict[str, Any] = {
+        "optimization_level": optimization_level,
+        "seed": seed,
+        "initial_layout": initial_layout,
+        "iter_num": iter_num,
+        "layout_trials": layout_trials,
+        "swap_trials": swap_trials,
+        "max_evaluations": max_evaluations,
+        "work_limit": work_limit,
+        "time_limit": time_limit,
+        "exact_layout": exact_layout,
+        "elide_permutations": elide_permutations,
+        "tolerance": tolerance,
+        "depth_weight": depth_weight,
+    }
     with _relaxed_gc():
-        return _transpile(
-            circuit,
-            target,
-            optimization_level=optimization_level,
-            seed=seed,
-            initial_layout=initial_layout,
-            iter_num=iter_num,
-            layout_trials=layout_trials,
-            swap_trials=swap_trials,
-            max_evaluations=max_evaluations,
-            work_limit=work_limit,
-            time_limit=time_limit,
-            exact_layout=exact_layout,
-            elide_permutations=elide_permutations,
-            tolerance=tolerance,
-            depth_weight=depth_weight,
-        )
+        t0 = time.perf_counter()
+        res = _transpile(circuit, target, **kwargs)
+        assert res is not None
+        if (
+            optimization_level >= _PHASE_POLY_LEVEL
+            and _PHASE_POLY_PRE
+            and time_limit is None
+            and _pre_resynthesis_worthwhile(circuit)
+        ):
+            # 第二个起点：路由前先在逻辑线路上做 CNOT-相位区域重综合（只用已有的
+            # 比特对）。它改变路由与之后各步的输入，结果时好时坏，所以小线路两条路
+            # 都走，取最终更好的一个
+            alt = _transpile(circuit, target, pre_phase_regions=True, **kwargs)
+            if alt is not None and _result_key(alt, depth_weight) < _result_key(
+                res, depth_weight
+            ):
+                res = alt
+            res.stats.seconds = time.perf_counter() - t0
+        return res
+
+
+def _pre_resynthesis_worthwhile(circuit: QuantumCircuit) -> bool:
+    """Small circuits without gates on three or more qubits (see :func:`transpile`)."""
+    n_two = 0
+    for ins in circuit:
+        if not ins.is_gate:
+            continue
+        k = len(ins.qubits)
+        if k > 2:
+            return False
+        n_two += k == 2
+    return 2 <= n_two <= _PHASE_POLY_PRE_MAX_2Q
+
+
+def _result_key(
+    res: TranspileResult, depth_weight: float
+) -> tuple[float, int, int, int, int]:
+    st = res.stats
+    return (
+        st.two_qubit_gates + depth_weight * st.two_qubit_depth,
+        st.two_qubit_gates,
+        st.depth,
+        st.two_qubit_depth,
+        st.total_gates,
+    )
 
 
 #: Per-operation approximation floor (average gate infidelity) at
@@ -662,9 +723,12 @@ def _transpile(
     elide_permutations: bool = True,
     tolerance: float = 0.0,
     depth_weight: float = 0.0,
-) -> TranspileResult:
+    pre_phase_regions: bool = False,
+) -> TranspileResult | None:
     """Body of :func:`transpile` (same arguments; ``tolerance`` from
-    :func:`approximation_tolerance`)."""
+    :func:`approximation_tolerance`).  ``pre_phase_regions`` resynthesizes the
+    CNOT-phase regions of the logical circuit before routing (level 3) and
+    returns ``None`` if that changes nothing."""
     if optimization_level not in (0, 1, 2, 3):
         raise ValueError(
             f"optimization_level must be 0, 1, 2 or 3, got {optimization_level!r}."
@@ -712,16 +776,20 @@ def _transpile(
     )
 
     def post(
-        c: QuantumCircuit, wires: Sequence[int] | None = None
+        c: QuantumCircuit, wires: Sequence[int] | None = None, *, full: bool = False
     ) -> tuple[QuantumCircuit, int, float]:
         """Post-routing pipeline; also returns its approximations (count, error).
 
         ``wires`` (wire → physical qubit of the routing) lets the CNOT-phase
         resynthesis use every coupling, not only the pairs already in use.
+        ``full`` runs the complete CNOT-phase resynthesis (large regions and
+        a second pass from the unmerged routed circuit); otherwise only the
+        basic small-region partitions are used.
         """
         c = decompose.run(c)
         if optimization_level == 0:
             return translate_to_target(c, plan), 0, 0.0
+        raw = c
         n_approx, err = 0, 0.0
         if post_consolidate is not None:
             c = post_consolidate.run(c)
@@ -734,9 +802,26 @@ def _transpile(
                 n_approx += post_consolidate.stats.blocks_approximated
                 err += post_consolidate.stats.approximation_error
         if optimization_level >= _PHASE_POLY_LEVEL and consolidate is not None:
+            edges = _wire_edges(target, wires)
+            settings = _PHASE_POLY_FULL_SETTINGS if full else _PHASE_POLY_SETTINGS
             c = _resynthesize_phase_regions(
-                c, decompose, optimize, consolidate, _wire_edges(target, wires)
+                c, decompose, optimize, consolidate, edges, settings=settings
             )
+            if full and _PHASE_POLY_RAW:
+                # 两比特块重综合（KAK）会打乱 CNOT-相位结构（如 Trotter 链中目标上的
+                # rx）：也从未合并的路由线路出发做一次（精确合并，不做近似），取两比特
+                # 门少的
+                alt = _resynthesize_phase_regions(
+                    raw,
+                    decompose,
+                    optimize,
+                    consolidate,
+                    edges,
+                    settings=settings,
+                    merge_first=True,
+                )
+                if _count_two_qubit(alt) < _count_two_qubit(c):
+                    c, n_approx, err = alt, 0, 0.0
         out = translate_to_target(decompose.run(c), plan)
         if optimization_level >= 2 and plan.needs_translation:
             # 翻译后的单比特门再在目标门集里优化一遍（对易 / 合并 / 重综合）：
@@ -769,7 +854,7 @@ def _transpile(
         alts: list[QuantumCircuit] = []
         if routed is not None and _SWAP_POST:
             with swap_face_templates():
-                alt, _, _ = post(routed, wires)
+                alt, _, _ = post(routed, wires, full=True)
             if _count_two_qubit(alt) <= _count_two_qubit(c):
                 alts.append(alt)
         if _SWAP_LATE:
@@ -832,6 +917,15 @@ def _transpile(
     if optimization_level >= 1:
         logical = HighLevelOptimizePass().run(logical)
     if optimization_level >= _PHASE_FOLD_LEVEL and native:
+        if pre_phase_regions:
+            rewritten = (
+                _pre_routing_phase_regions(logical, decompose)
+                if consolidate is not None
+                else logical
+            )
+            if rewritten is logical:
+                return None  # 与第一个起点相同，不必再走一遍
+            logical = rewritten
         if consolidate is not None:
             logical = ThreeQubitBlockPass().run(logical)
         logical = _fold_phases(logical, native)
@@ -1150,12 +1244,27 @@ def _transpile(
         orig_best: tuple[Any, ...] | None = None
         # 最好的非深度精炼（lnsd/）候选：深度精炼胜出时也完成它
         base_best: tuple[Any, ...] | None = None
+        evaluated_l3: list[tuple[Any, ...]] = []
         for order, cand in enumerate(to_eval):
             built = cand.build_circuit()
             out, n_approx, err = post(built, cand.initial_mapping)
             score = _score(out)
             stats.candidate_scores.append((cand.label, *score))
             key = (score[0] + depth_weight * score[1], *score, order)
+            evaluated_l3.append((key, cand, out, built, (n_approx, err)))
+        if optimization_level >= _PHASE_POLY_LEVEL and consolidate is not None:
+            # 两级打分：所有候选用基本的区域重综合打分，估计最好的
+            # _PHASE_POLY_REFINE_TOP 个再走完整的区域重综合（大区域、未合并线路
+            # 的读法），按结果取优
+            ranked = sorted(range(len(evaluated_l3)), key=lambda i: evaluated_l3[i][0])
+            for i in ranked[:_PHASE_POLY_REFINE_TOP]:
+                key, cand, out, built, _ = evaluated_l3[i]
+                full, n_full, err_full = post(built, cand.initial_mapping, full=True)
+                score = _score(full)
+                key_full = (score[0] + depth_weight * score[1], *score, key[-1])
+                if key_full < key:
+                    evaluated_l3[i] = (key_full, cand, full, built, (n_full, err_full))
+        for key, cand, out, built, (n_approx, err) in evaluated_l3:
             if best_key is None or key < best_key:
                 best_key, chosen, best = key, cand, out
                 best_approx = (n_approx, err)
@@ -1691,22 +1800,35 @@ def _resynthesize_phase_regions(
     optimize: OptimizePass,
     consolidate: ConsolidateBlocksPass,
     edges: Sequence[tuple[int, int]] = (),
+    *,
+    settings: Sequence[tuple[int, ...]] = (),
+    merge_first: bool = False,
 ) -> QuantumCircuit:
-    """Optimal CNOT-phase resynthesis of the routed circuit (:mod:`._phase_poly`).
+    """CNOT-phase region resynthesis of the routed circuit (:mod:`._phase_poly`).
 
     Rewrites on the couplings ``edges`` (wire space) and on the qubit pairs
     that already carry a two-qubit gate, so the couplings stay valid; the
     result is merged again (single-qubit runs, two-qubit blocks) and kept
-    only if it has fewer two-qubit gates.
+    only if it has fewer two-qubit gates.  With ``merge_first`` the input is
+    an unmerged circuit: the first rewrite is merged and kept unconditionally
+    (the caller compares the result with its merged pipeline).
     """
     n_two = _count_two_qubit(circuit)
     if n_two < 2 or n_two > _PHASE_POLY_MAX_2Q:
         return circuit
     best, best_n = circuit, n_two
-    for _ in range(2):
-        rewritten = PhasePolynomialPass(settings=_PHASE_POLY_SETTINGS, edges=edges).run(
-            decompose.run(best)
-        )
+    for k in range(2):
+        rewritten = PhasePolynomialPass(
+            settings=settings or _PHASE_POLY_SETTINGS,
+            edges=edges,
+            beam_width=_PHASE_POLY_BEAM,
+        ).run(decompose.run(best))
+        if merge_first and k == 0:
+            best = decompose.run(
+                consolidate.run(decompose.run(optimize.run(rewritten)))
+            )
+            best_n = _count_two_qubit(best)
+            continue
         if _count_two_qubit(rewritten) >= best_n:
             break
         merged = decompose.run(consolidate.run(decompose.run(optimize.run(rewritten))))
@@ -1715,6 +1837,28 @@ def _resynthesize_phase_regions(
             break
         best, best_n = merged, n_merged
     return best
+
+
+def _pre_routing_phase_regions(
+    circuit: QuantumCircuit, decompose: DecomposePass
+) -> QuantumCircuit:
+    """CNOT-phase region resynthesis of the logical circuit before routing.
+
+    Only qubit pairs that already interact are used, so the interaction graph
+    (and the routing problem) does not grow; circuits with gates on three or
+    more qubits (Toffolis are routed as units) are left alone.  The result is
+    kept only if it has fewer two-qubit gates.
+    """
+    if any(len(i.qubits) > 2 for i in circuit if i.is_gate):
+        return circuit
+    flat = decompose.run(circuit)
+    n_two = _count_two_qubit(flat)
+    if n_two < 2 or n_two > _PHASE_POLY_MAX_2Q:
+        return circuit
+    out = PhasePolynomialPass(
+        settings=_PHASE_POLY_FULL_SETTINGS, beam_width=_PHASE_POLY_BEAM
+    ).run(flat)
+    return out if _count_two_qubit(out) < n_two else circuit
 
 
 def _fold_phases(circuit: QuantumCircuit, native: frozenset[str]) -> QuantumCircuit:

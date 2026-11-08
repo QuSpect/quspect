@@ -12,6 +12,7 @@ namespace {
 
 using quspect::native::transpiler::CnotPhaseResult;
 using quspect::native::transpiler::SynthesizeCnotPhase;
+using quspect::native::transpiler::SynthesizeCnotPhaseBeam;
 
 using Edges = std::vector<std::pair<int, int>>;
 
@@ -100,6 +101,50 @@ TEST(CnotPhaseSynth, BudgetAndArguments) {
     const auto zero = SynthesizeCnotPhase(2, Line(2), {1, 2}, {1, 2}, 3, 10);
     EXPECT_TRUE(zero.found);
     EXPECT_TRUE(zero.moves.empty());
+}
+
+TEST(CnotPhaseSynth, FreeWiresAbsorbAPermutation) {
+    // SWAP 的两根线都自由：0 个 CX，终态置换 (1, 0)
+    const auto exact = SynthesizeCnotPhase(2, Line(2), {2, 1}, {}, 3, 1000, 3U);
+    ASSERT_TRUE(exact.found);
+    EXPECT_TRUE(exact.moves.empty());
+    EXPECT_EQ(exact.perm, (std::vector<int>{1, 0}));
+    const auto beam = SynthesizeCnotPhaseBeam(2, Line(2), {2, 1}, {}, 3, 8, 3U);
+    ASSERT_TRUE(beam.found);
+    EXPECT_TRUE(beam.moves.empty());
+    EXPECT_EQ(beam.perm, (std::vector<int>{1, 0}));
+    // 只有一根线自由时仍要 3 个 CX
+    const auto one = SynthesizeCnotPhase(2, Line(2), {2, 1}, {}, 3, 1000, 1U);
+    ASSERT_TRUE(one.found);
+    EXPECT_EQ(one.moves.size(), 3U);
+}
+
+TEST(CnotPhaseSynth, BeamSearchOnLargeRegions) {
+    // 12 根线的全连接 CX 层：n - 1 个 CX
+    const int n = 12;
+    std::vector<std::uint32_t> rows(n);
+    for (int i = 0; i < n; ++i)
+        rows[static_cast<std::size_t>(i)] = 1U << i;
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+            rows[static_cast<std::size_t>(j)] ^= rows[static_cast<std::size_t>(i)];
+    const auto lin = SynthesizeCnotPhaseBeam(n, AllPairs(n), rows, {}, 65, 64);
+    Check(n, lin, rows, {}, AllPairs(n));
+    EXPECT_EQ(lin.moves.size(), static_cast<std::size_t>(n - 1));
+    // 8 根线的全部两体奇偶、恒等映射
+    const int m = 8;
+    std::vector<std::uint32_t> id(m), zz;
+    for (int i = 0; i < m; ++i) {
+        id[static_cast<std::size_t>(i)] = 1U << i;
+        for (int j = i + 1; j < m; ++j)
+            zz.push_back((1U << i) | (1U << j));
+    }
+    const auto ph = SynthesizeCnotPhaseBeam(m, AllPairs(m), id, zz, 2 * static_cast<int>(zz.size()) - 1, 64);
+    Check(m, ph, id, zz, AllPairs(m));
+    EXPECT_LE(ph.moves.size(), zz.size() + m);
+    // 上限之内无解；参数检查
+    EXPECT_FALSE(SynthesizeCnotPhaseBeam(3, Line(3), {1, 2, 4}, {3, 6}, 3, 64).found);
+    EXPECT_THROW(SynthesizeCnotPhaseBeam(2, Line(2), {1, 1}, {}, 3, 8), std::invalid_argument);
 }
 
 }  // namespace

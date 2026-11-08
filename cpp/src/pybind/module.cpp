@@ -43,6 +43,7 @@
 #include "quspect_native/transpiler/su4_routing.hpp"
 #include "quspect_native/transpiler/beam_routing.hpp"
 #include "quspect_native/transpiler/cnot_phase_synth.hpp"
+#include "quspect_native/transpiler/phase_poly.hpp"
 
 #include "dag_bindings.hpp"
 #include "detmath_bindings.hpp"
@@ -771,6 +772,97 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("layout_iters") = 2, py::arg("max_swaps") = 0, py::arg("decay") = 1.0,
         "Beam-search SWAP routing from each start layout, computed concurrently; list of (swaps, layout, events) "
         "(swaps = -1: over max_swaps).");
+
+    // 路由后 CNOT-相位区域重综合的整轮流程（phase_poly.hpp）。输入线路按门给出 (种类, a, b, 提示, 编号)：
+    // 种类 0 = 单比特门（编号指向 matrices / opaque），2 = cz（提示 0 表示来自 cx(a→b)），1 = h。
+    // 返回 None（没有改进）或 ((种类, a, b, 编号, 角度) 各列, (regions, replaced, saved, rounds))，
+    // 种类：0 原单比特门，1 h，2 cz，3 rz，4 x。
+    m.def(
+        "_phase_poly_run",
+        [](const std::vector<int>& kinds, const std::vector<int>& qa, const std::vector<int>& qb,
+           const std::vector<int>& hint, const std::vector<int>& index, const std::vector<std::array<double, 8>>& mats,
+           const std::vector<std::uint8_t>& opaque, const std::vector<std::pair<int, int>>& extra_pairs,
+           const std::vector<std::tuple<int, std::int64_t, bool>>& settings, int beam_width, int max_rounds) -> py::object {
+            const std::size_t n = kinds.size();
+            if (qa.size() != n || qb.size() != n || hint.size() != n || index.size() != n)
+                throw std::invalid_argument("_phase_poly_run: column lengths differ");
+            std::vector<transpiler::PhasePolyOp> ops(n);
+            for (std::size_t i = 0; i < n; ++i) {
+                ops[i].kind = kinds[i];
+                ops[i].a = qa[i];
+                ops[i].b = qb[i];
+                ops[i].hint = hint[i];
+                ops[i].index = index[i];
+                if (kinds[i] != transpiler::kPPOrig && kinds[i] != transpiler::kPPH && kinds[i] != transpiler::kPPCz)
+                    throw std::invalid_argument("_phase_poly_run: bad op kind");
+            }
+            std::vector<transpiler::PhasePolySetting> sets;
+            for (const auto& [cap, budget, reverse] : settings)
+                sets.push_back(transpiler::PhasePolySetting{cap, budget, reverse});
+            transpiler::PhasePolyResult res;
+            {
+                py::gil_scoped_release release;
+                res = transpiler::RunPhasePolynomial(ops, mats, opaque, extra_pairs, sets, beam_width, max_rounds);
+            }
+            const auto stats = py::make_tuple(res.stats.regions, res.stats.replaced, res.stats.saved, res.stats.rounds);
+            if (!res.improved)
+                return py::make_tuple(py::none(), stats);
+            std::vector<int> ok, oa, ob, oi;
+            std::vector<double> ang;
+            ok.reserve(res.ops.size());
+            for (const auto& op : res.ops) {
+                ok.push_back(op.kind);
+                oa.push_back(op.a);
+                ob.push_back(op.b);
+                oi.push_back(op.index);
+                ang.push_back(op.angle);
+            }
+            return py::make_tuple(py::make_tuple(ok, oa, ob, oi, ang), stats);
+        },
+        py::arg("kinds"), py::arg("a"), py::arg("b"), py::arg("hint"), py::arg("index"), py::arg("matrices"),
+        py::arg("opaque"), py::arg("extra_pairs"), py::arg("settings"), py::arg("beam_width"), py::arg("max_rounds"),
+        "Post-routing CNOT-phase region resynthesis (all rounds); ((kinds, a, b, index, angle) or None, stats).");
+
+    // 同上，问题带自由线与方法：(n, 有向边, 目标行, 必需奇偶, CX 上限, 自由线掩码, 束宽, 展开预算)。
+    // 束宽 0：A*（n ≤ 6，最优，预算为展开数）；束宽 > 0：逐层束搜索（n ≤ 32，启发式）。
+    // 按输入顺序返回 (CX 序列, 终态置换) 或 None
+    m.def(
+        "_cnot_phase_synth_batch",
+        [](const std::vector<std::tuple<int, std::vector<std::pair<int, int>>, std::vector<std::uint32_t>,
+                                        std::vector<std::uint32_t>, int, std::uint32_t, int, std::int64_t>>& problems) {
+            std::vector<transpiler::CnotPhaseResult> results(problems.size());
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(problems.size());
+                for (std::size_t i = 0; i < problems.size(); ++i) {
+                    tasks.emplace_back([&, i] {
+                        const auto& [n, edges, rows, required, max_cx, free_mask, beam, budget] = problems[i];
+                        if (beam > 0) {
+                            results[i] =
+                                transpiler::SynthesizeCnotPhaseBeam(n, edges, rows, required, max_cx, beam, free_mask);
+                        } else {
+                            results[i] =
+                                transpiler::SynthesizeCnotPhase(n, edges, rows, required, max_cx, budget, free_mask);
+                        }
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (auto& r : results) {
+                if (r.found) {
+                    out.append(py::make_tuple(py::cast(std::move(r.moves)), py::cast(std::move(r.perm))));
+                } else {
+                    out.append(py::none());
+                }
+            }
+            return out;
+        },
+        py::arg("problems"),
+        "CNOT-phase synthesis for each problem (n, edges, target_rows, required, max_cx, free_mask, beam_width, "
+        "node_budget): A* (optimal, n <= 6) when beam_width == 0, else layer-wise beam search (n <= 32); "
+        "list of (moves, perm) or None.");
 
     // 受耦合约束的 CNOT-相位线路最优综合（cnot_phase_synth.hpp），一批互不相关的问题并行求解；
     // 每个问题 (n, 有向边, 目标行, 必需奇偶, CX 上限)，按输入顺序返回 CX 序列或 None
