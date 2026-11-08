@@ -73,6 +73,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from quspect._ablation import ablated
 from quspect.synthesis._memo import BoundedCache, matrix_key
 
 if TYPE_CHECKING:
@@ -1523,7 +1524,7 @@ def _stabilizer_candidates(
     :func:`_stabilizer_family`); the SWAP-face template uses it.
     """
     eye: _Pair = (_I2, _I2)
-    if k == 0:
+    if k == 0 or ablated("stab"):
         return [eye]
     a, b, c = (float(x) for x in v)
     # s makes the outer factor identity: left_i = a_i s b_i^†, right_i = c_i^† s^† d_i

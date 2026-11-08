@@ -68,6 +68,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from quspect._ablation import ablated
 from quspect.transpiler._route_lns import node_cost_model
 from quspect.transpiler._routing import _native_core
 
@@ -515,10 +516,14 @@ def layer_route_plan(
     if prep is None:
         return None
     plans: list[_CandidatePlan] = []
-    out = layer_route_events(router, prep, seed=seed)
+    out = None if ablated("kendall") else layer_route_events(router, prep, seed=seed)
     if out is not None:
         plans.append(_plan_from(router, base, out, "layers"))
-    if path_order(router._adj_sets) is None and base.route_layout:
+    if (
+        path_order(router._adj_sets) is None
+        and base.route_layout
+        and not ablated("rollout")
+    ):
         num_blocks = sum(1 for q in prep.dag.nq1 if q >= 0)
         seeds = max(1, min(ROLLOUT_MAX_SEEDS, ROLLOUT_WORK // max(1, num_blocks)))
         best: tuple[list[int], list[int], int] | None = None
