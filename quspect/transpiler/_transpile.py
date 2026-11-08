@@ -85,6 +85,7 @@ from quspect.transpiler._mapping import (
 )
 from quspect.transpiler._passes import DecomposePass, OptimizePass
 from quspect.transpiler._phase_fold import PhaseFoldingPass
+from quspect.transpiler._phase_poly import PhasePolynomialPass
 from quspect.transpiler._route_lns import (
     deepen_options,
     deepen_plan,
@@ -204,6 +205,13 @@ _LNS_KEEP_BOTH_2Q = 1500
 _LNS_DEPTH_FINISH_2Q = 20_000
 # 第 2 级只在估计双比特门数不超过它时做 LNS（两条路由都完整评估）
 _LNS_LEVEL2_MAX_2Q = 5000
+# 路由后 CNOT-相位区域的最优重综合（见 _phase_poly）：从这一级开始、只对两比特门数不超过
+# _PHASE_POLY_MAX_2Q 的线路做
+_PHASE_POLY_LEVEL = 3
+_PHASE_POLY_MAX_2Q = 3000
+# 区域划分是贪心的：按 (最多几根线, A* 展开预算) 各划分一次，取两比特门最少的
+# （4 根线最好；5 根线另有约 8% 的区域更省，但 A* 更贵，预算取小）
+_PHASE_POLY_SETTINGS = ((4, 200_000), (5, 20_000))
 
 
 @dataclass
@@ -703,8 +711,14 @@ def _transpile(
         else None
     )
 
-    def post(c: QuantumCircuit) -> tuple[QuantumCircuit, int, float]:
-        """Post-routing pipeline; also returns its approximations (count, error)."""
+    def post(
+        c: QuantumCircuit, wires: Sequence[int] | None = None
+    ) -> tuple[QuantumCircuit, int, float]:
+        """Post-routing pipeline; also returns its approximations (count, error).
+
+        ``wires`` (wire → physical qubit of the routing) lets the CNOT-phase
+        resynthesis use every coupling, not only the pairs already in use.
+        """
         c = decompose.run(c)
         if optimization_level == 0:
             return translate_to_target(c, plan), 0, 0.0
@@ -719,6 +733,10 @@ def _transpile(
                 c = post_consolidate.run(c)
                 n_approx += post_consolidate.stats.blocks_approximated
                 err += post_consolidate.stats.approximation_error
+        if optimization_level >= _PHASE_POLY_LEVEL and consolidate is not None:
+            c = _resynthesize_phase_regions(
+                c, decompose, optimize, consolidate, _wire_edges(target, wires)
+            )
         out = translate_to_target(decompose.run(c), plan)
         if optimization_level >= 2 and plan.needs_translation:
             # 翻译后的单比特门再在目标门集里优化一遍（对易 / 合并 / 重综合）：
@@ -730,7 +748,11 @@ def _transpile(
                 out = tuned
         return out, n_approx, err
 
-    def finish(c: QuantumCircuit, routed: QuantumCircuit | None) -> QuantumCircuit:
+    def finish(
+        c: QuantumCircuit,
+        routed: QuantumCircuit | None,
+        wires: Sequence[int] | None = None,
+    ) -> QuantumCircuit:
         # 只对选中的结果做一次：单比特旋转穿过与之对易的双比特门推移 + CX 反向
         # （H⊗H 吸收），逐线束搜索后在目标门集里重综合（双比特门不变）；
         # 然后按对易关系重排以减小深度（门不变）。
@@ -747,7 +769,7 @@ def _transpile(
         alts: list[QuantumCircuit] = []
         if routed is not None and _SWAP_POST:
             with swap_face_templates():
-                alt, _, _ = post(routed)
+                alt, _, _ = post(routed, wires)
             if _count_two_qubit(alt) <= _count_two_qubit(c):
                 alts.append(alt)
         if _SWAP_LATE:
@@ -1130,7 +1152,7 @@ def _transpile(
         base_best: tuple[Any, ...] | None = None
         for order, cand in enumerate(to_eval):
             built = cand.build_circuit()
-            out, n_approx, err = post(built)
+            out, n_approx, err = post(built, cand.initial_mapping)
             score = _score(out)
             stats.candidate_scores.append((cand.label, *score))
             key = (score[0] + depth_weight * score[1], *score, order)
@@ -1197,11 +1219,11 @@ def _transpile(
         stats.stage_seconds["post"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    best = finish(best, best_routed)
+    best = finish(best, best_routed, wires)
     for fallback in fallbacks:
         # 最后的单比特 / SWAP 面阶段还能去掉双比特门，与路由后流程的打分不完全单调：
         # LNS 精炼胜出时（小线路）也完成最好的原候选，按最终结果取优
-        alt_final = finish(fallback.post, fallback.routed)
+        alt_final = finish(fallback.post, fallback.routed, fallback.wires)
         if _finish_key(alt_final) < _finish_key(best):
             best = alt_final
             wires, final = fallback.wires, fallback.final
@@ -1647,6 +1669,52 @@ def _pick_evaluations(
                 break
             chosen.append(other)
     return chosen
+
+
+def _wire_edges(
+    target: CompilationTarget, wires: Sequence[int] | None
+) -> list[tuple[int, int]]:
+    """Couplings in wire space (wire ``w`` sits on physical ``wires[w]``)."""
+    if wires is None or not target.coupling_graph:
+        return []
+    wire_of = {p: w for w, p in enumerate(wires)}
+    return [
+        (wire_of[a], wire_of[b])
+        for a, b in sorted(target.coupling_graph)
+        if a in wire_of and b in wire_of
+    ]
+
+
+def _resynthesize_phase_regions(
+    circuit: QuantumCircuit,
+    decompose: DecomposePass,
+    optimize: OptimizePass,
+    consolidate: ConsolidateBlocksPass,
+    edges: Sequence[tuple[int, int]] = (),
+) -> QuantumCircuit:
+    """Optimal CNOT-phase resynthesis of the routed circuit (:mod:`._phase_poly`).
+
+    Rewrites on the couplings ``edges`` (wire space) and on the qubit pairs
+    that already carry a two-qubit gate, so the couplings stay valid; the
+    result is merged again (single-qubit runs, two-qubit blocks) and kept
+    only if it has fewer two-qubit gates.
+    """
+    n_two = _count_two_qubit(circuit)
+    if n_two < 2 or n_two > _PHASE_POLY_MAX_2Q:
+        return circuit
+    best, best_n = circuit, n_two
+    for _ in range(2):
+        rewritten = PhasePolynomialPass(settings=_PHASE_POLY_SETTINGS, edges=edges).run(
+            decompose.run(best)
+        )
+        if _count_two_qubit(rewritten) >= best_n:
+            break
+        merged = decompose.run(consolidate.run(decompose.run(optimize.run(rewritten))))
+        n_merged = _count_two_qubit(merged)
+        if n_merged >= best_n:
+            break
+        best, best_n = merged, n_merged
+    return best
 
 
 def _fold_phases(circuit: QuantumCircuit, native: frozenset[str]) -> QuantumCircuit:

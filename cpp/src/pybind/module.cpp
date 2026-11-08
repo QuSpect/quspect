@@ -42,6 +42,7 @@
 #include "quspect_native/transpiler/sabre_routing.hpp"
 #include "quspect_native/transpiler/su4_routing.hpp"
 #include "quspect_native/transpiler/beam_routing.hpp"
+#include "quspect_native/transpiler/cnot_phase_synth.hpp"
 
 #include "dag_bindings.hpp"
 #include "detmath_bindings.hpp"
@@ -770,6 +771,40 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("layout_iters") = 2, py::arg("max_swaps") = 0, py::arg("decay") = 1.0,
         "Beam-search SWAP routing from each start layout, computed concurrently; list of (swaps, layout, events) "
         "(swaps = -1: over max_swaps).");
+
+    // 受耦合约束的 CNOT-相位线路最优综合（cnot_phase_synth.hpp），一批互不相关的问题并行求解；
+    // 每个问题 (n, 有向边, 目标行, 必需奇偶, CX 上限)，按输入顺序返回 CX 序列或 None
+    m.def(
+        "_cnot_phase_synth_many",
+        [](const std::vector<std::tuple<int, std::vector<std::pair<int, int>>, std::vector<std::uint32_t>,
+                                        std::vector<std::uint32_t>, int>>& problems,
+           std::int64_t node_budget) {
+            std::vector<transpiler::CnotPhaseResult> results(problems.size());
+            {
+                py::gil_scoped_release release;
+                std::vector<std::function<void()>> tasks;
+                tasks.reserve(problems.size());
+                for (std::size_t i = 0; i < problems.size(); ++i) {
+                    tasks.emplace_back([&, i] {
+                        const auto& [n, edges, rows, required, max_cx] = problems[i];
+                        results[i] = transpiler::SynthesizeCnotPhase(n, edges, rows, required, max_cx, node_budget);
+                    });
+                }
+                common::RunTasks(tasks, common::CompileThreads());
+            }
+            py::list out;
+            for (auto& r : results) {
+                if (r.found) {
+                    out.append(py::cast(std::move(r.moves)));
+                } else {
+                    out.append(py::none());
+                }
+            }
+            return out;
+        },
+        py::arg("problems"), py::arg("node_budget") = 200000,
+        "Minimum-CX CNOT-phase synthesis on directed edges for each problem (n, edges, target_rows, required, max_cx); "
+        "list of [(control, target), ...] or None (no solution within max_cx or the node budget).");
 
     // 低伸缩初始布局（quspect.transpiler._embedding 的原生实现）
     m.def(
