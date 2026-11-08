@@ -1674,7 +1674,11 @@ def _transpile(
                     ),
                 )
                 best = blk_out
-                final = _moved(final, block_pass.wire_moves, wires)
+                if block_pass.wire_moves:
+                    # 末端块的输出置换并入最终布局；finish 中“从路由线路重走一遍”
+                    # 的候选不含这个置换，不能再用
+                    final = _moved(final, block_pass.wire_moves, wires)
+                    best_routed = None
                 stats.selected = f"numeric-blocks/{stats.selected}"
         stats.stage_seconds["numeric_blocks"] = time.perf_counter() - t0
     t0 = time.perf_counter()

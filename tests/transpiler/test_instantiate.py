@@ -272,3 +272,28 @@ def test_level3_numeric_blocks_equivalent(
     _assert_equivalent(qc, res, 4)
     o2 = transpile(qc, target, optimization_level=2, seed=0)
     assert res.stats.two_qubit_gates <= o2.stats.two_qubit_gates
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_level3_random_circuits_equivalent(seed: int) -> None:
+    # 三比特块（含末端块的输出置换）、再编译与普通门级候选一起作用后仍等价
+    import random
+
+    rng = random.Random(seed)
+    qc = QuantumCircuit()
+    for _ in range(14):
+        a, b, c = rng.sample(range(5), 3)
+        kind = rng.randrange(4)
+        if kind == 0:
+            qc.ccx(a, b, c)
+        elif kind == 1:
+            qc.cx(a, b).rz(rng.uniform(-3, 3), b).cx(a, b)
+        elif kind == 2:
+            qc.h(a).cx(a, c).t(c)
+        else:
+            qc.swap(a, b).cz(b, c)
+    target = CompilationTarget.from_coupling_map(
+        5, [(0, 1), (1, 2), (2, 3), (3, 4)], native_gates=_BASIS
+    )
+    res = transpile(qc, target, optimization_level=3, seed=seed)
+    _assert_equivalent(qc, res, 5)
