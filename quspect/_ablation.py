@@ -32,7 +32,10 @@ Components (see the paper's compiler-techniques section):
     (single SABRE result, wide lookahead / layered alternatives and
     level-2 LNS) and the same post-processing.
 ``stab``
-    KAK stabilizer selection: only the identity stabilizer is used.
+    KAK stabilizer selection: only the identity stabilizer is used.  Only
+    reaches the Python synthesis path; the native KAK synthesizer (used
+    whenever the extension is available) ignores it, so on this pipeline
+    the switch has no effect.
 ``qsd``
     Three-qubit block resynthesis (:class:`ThreeQubitBlockPass`).
 ``phase``
