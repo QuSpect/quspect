@@ -57,7 +57,19 @@ SABRE's greedy policy on other coupling graphs
 (:mod:`quspect.transpiler._layer_route`).  Level 3 also routes the circuit
 by a global beam search over SWAP sequences from the best SABRE layouts
 (:mod:`quspect.transpiler._beam_route`) and evaluates that routing as one
-more candidate.
+more candidate, together with a few candidates of plain gate-level SABRE on
+the CX-level circuit (no block nodes, mirror gates or bonuses).
+
+Level 3 then refines the selected result in three ways.  Circuits on three
+qubits are resynthesized as a whole by a numerical instantiation search
+over CZ structures with a free layout (:mod:`quspect.transpiler._instantiate`);
+three-qubit blocks of larger routed circuits are resynthesized the same way
+with the layout fixed.  Both are verified on the emitted gates
+(element-wise ``1e-9``) and used only with strictly fewer two-qubit gates.
+Finally, small results are compiled once more with their physical circuit
+as the input and the identity layout ("repass"): the routing SWAPs, merged
+into neighbouring blocks, become ordinary gates and the second compilation
+often starts from a better point; the better of the two is kept.
 """
 
 from __future__ import annotations
@@ -77,6 +89,7 @@ from quspect.transpiler._beam_route import beam_route_plan
 from quspect.transpiler._consolidate import SYNTHESIS_BASIS, ConsolidateBlocksPass
 from quspect.transpiler._gauge import minimize_single_qubit_gates, orient_cx_gates
 from quspect.transpiler._highlevel import HighLevelOptimizePass
+from quspect.transpiler._instantiate import NumericThreeQubitBlockPass
 from quspect.transpiler._layer_route import block_layers, layer_route_plan
 from quspect.transpiler._mapping import (
     DEFAULT_LAYOUT_TRIALS,
@@ -120,6 +133,10 @@ _PHASE_FOLD_LEVEL = 2
 # 以及路由前保留不分解的门（对易规则需要看到完整的 cx / cp / crz / rzz；
 # ccx 分解掉后其 CX 也能参与对易，实测比整体路由 Toffoli 更好）
 _COMM_EVALUATIONS = 1
+# 普通门级 SABRE（CX 级线路，无块节点 / 镜像 / 对易 / 融合奖励）候选：完整评估的
+# 个数（0 关闭）与占 work_limit 的比例
+_PLAIN_EVALUATIONS = 4
+_PLAIN_WORK = 1.0
 _COMM_FUSION = 0.3
 _COMM_WORK = 1.0
 _COMMUTING_KEEP = frozenset({"cx", "cp", "crz", "rzz"})
@@ -230,6 +247,33 @@ _PHASE_POLY_FULL_SETTINGS = (
 _PHASE_POLY_REFINE_TOP = 3
 # 大区域束搜索的束宽
 _PHASE_POLY_BEAM = 64
+# 三比特线路整个酉矩阵的数值实例化搜索（见 _instantiate）：从这一级开始；
+# 每次编译的预算（优化器迭代次数，约 60 µs / 次，与墙钟无关所以结果确定）
+_NUMERIC_3Q = True
+_NUMERIC_3Q_LEVEL = 3
+_NUMERIC_3Q_BUDGET = 40_000
+# 更大线路中路由后的三比特块：两比特门不少于 _NUMERIC_BLOCK_MIN_CZ 的块按两比特门数
+# 从多到少尝试，每块 / 每次编译的预算（迭代次数）；只对两比特门不超过
+# _NUMERIC_BLOCKS_MAX_2Q 的线路做
+_NUMERIC_BLOCKS = True
+# "inside"：每次 _transpile 内、finish 之前做（默认；第二起点与再编译的各遍
+# 也各做一次）；"end"：只对最终选中的结果做（开发集上比 inside 少省约 0.7%，
+# 快约 20%）；"both"
+_NUMERIC_BLOCKS_MODE = "inside"
+_NUMERIC_BLOCK_MIN_CZ = 4
+_NUMERIC_BLOCK_BUDGET = 4_000
+_NUMERIC_BLOCKS_BUDGET = 40_000
+_NUMERIC_BLOCKS_MAX_2Q = 400
+_NUMERIC_BLOCK_RESTARTS = 1
+# 第 3 级：两比特门不超过 _REPASS_MAX_2Q 的结果再编译一遍（输入 = 路由后的物理线路，
+# 恒等布局），取更好的
+_REPASS = True
+_REPASS_LEVEL = 3
+_REPASS_MAX_2Q = 1500
+# 也对没有用 SWAP 的结果再编译一遍
+_REPASS_NO_SWAPS = True
+# 再编译至多这么多遍（某一遍没有变好就停）
+_REPASS_ROUNDS = 2
 
 
 @dataclass
@@ -612,7 +656,251 @@ def transpile(
             ):
                 res = alt
             res.stats.seconds = time.perf_counter() - t0
+        if (
+            optimization_level >= _REPASS_LEVEL
+            and _REPASS
+            and time_limit is None
+            and initial_layout is None
+            and (res.stats.num_swaps > 0 or _REPASS_NO_SWAPS)
+            and 2 <= res.stats.two_qubit_gates <= _REPASS_MAX_2Q
+        ):
+            # 再编译一遍：把路由后的物理线路当作输入（布局固定为恒等）。SWAP 已并进
+            # 相邻的块、成为普通的门，新的一轮在它上面重新做块合并、路由与重综合，
+            # 常常落到另一个更好的起点（受限拓扑上的 QAOA / QFT）。取最终更好的一个
+            for _ in range(_REPASS_ROUNDS):
+                again = _recompile(res, circuit, target, kwargs)
+                if again is None or not _result_key(again, depth_weight) < _result_key(
+                    res, depth_weight
+                ):
+                    break
+                res = again
+            res.stats.seconds = time.perf_counter() - t0
+        if (
+            optimization_level >= _NUMERIC_3Q_LEVEL
+            and _NUMERIC_BLOCKS
+            and _NUMERIC_BLOCKS_MODE in ("end", "both")
+            and time_limit is None
+        ):
+            # 最后对选中的结果做一次三比特块的数值实例化（见 _polish_blocks）
+            res = _polish_blocks(res, circuit, target, elide_permutations)
+            res.stats.seconds = time.perf_counter() - t0
         return res
+
+
+def _moved(
+    final: Sequence[int], wire_moves: dict[int, int], wires: Sequence[int]
+) -> list[int]:
+    """``final`` (physical end positions) after the state of wire ``a`` moved
+    to wire ``wire_moves[a]`` at the end of the circuit."""
+    phys = {wires[a]: wires[b] for a, b in wire_moves.items()}
+    return [phys.get(p, p) for p in final]
+
+
+def _polish_blocks(
+    res: TranspileResult,
+    circuit: QuantumCircuit,
+    target: CompilationTarget,
+    elide_permutations: bool = True,
+) -> TranspileResult:
+    """Numerically resynthesize three-qubit blocks of the selected result
+    (:class:`NumericThreeQubitBlockPass` on its wire circuit, layout fixed);
+    returns ``res`` unless the two-qubit count drops."""
+    n2 = res.stats.two_qubit_gates
+    if (
+        circuit.num_qubits <= 3
+        or not _NUMERIC_BLOCK_MIN_CZ <= n2 <= _NUMERIC_BLOCKS_MAX_2Q
+    ):
+        return res
+    plan = plan_basis(target.native_gates, circuit)
+    work = plan.working_target(target)
+    native = frozenset(work.native_gates)
+    if not native or not native >= SYNTHESIS_BASIS:
+        return res
+    wires = list(res.wire_layout)
+    edges = _wire_edges(work, wires) if work.coupling_graph else None
+    block_pass = NumericThreeQubitBlockPass(
+        edges,
+        free_output=elide_permutations,
+        min_cz=_NUMERIC_BLOCK_MIN_CZ,
+        block_budget=_NUMERIC_BLOCK_BUDGET,
+        total_budget=_NUMERIC_BLOCKS_BUDGET,
+        restarts=_NUMERIC_BLOCK_RESTARTS,
+    )
+    blocked = block_pass.run(res.wire_circuit)
+    if blocked is res.wire_circuit:
+        return res
+    out = translate_to_target(DecomposePass(work).run(blocked), plan)
+    if plan.needs_translation:
+        tuned = OptimizePass(basis_gates=plan.native or None).run(out)
+        if _count_two_qubit(tuned) <= _count_two_qubit(out) and all(
+            i.gate.name in plan.native for i in tuned if i.is_gate and i.gate
+        ):
+            out = tuned
+    if _count_two_qubit(out) >= n2:
+        return res
+    out = _finish_one(out, plan, res.stats.optimization_level)
+    st = replace(res.stats, stage_seconds=dict(res.stats.stage_seconds))
+    st.two_qubit_gates, st.two_qubit_depth, st.total_gates = _score(out)
+    st.depth = _depth(out, two_qubit_only=False)
+    st.selected = f"numeric-blocks/{st.selected}"
+    return TranspileResult(
+        circuit=_to_physical(out, wires),
+        initial_layout=list(res.initial_layout),
+        final_layout=_moved(list(res.final_layout), block_pass.wire_moves, wires),
+        wire_circuit=out,
+        wire_layout=wires,
+        stats=st,
+    )
+
+
+def _recompile(
+    res: TranspileResult,
+    circuit: QuantumCircuit,
+    target: CompilationTarget,
+    kwargs: dict[str, Any],
+) -> TranspileResult | None:
+    """Compile ``res.circuit`` again with the identity layout and compose the
+    layouts (see :func:`transpile`); ``None`` if not applicable."""
+    phys = res.circuit
+    width = phys.num_qubits
+    n = len(res.initial_layout)
+    if n != circuit.num_qubits or any(
+        p >= width for p in (*res.initial_layout, *res.final_layout)
+    ):
+        return None
+    again = _transpile(phys, target, **{**kwargs, "initial_layout": list(range(width))})
+    if again is None or list(again.initial_layout[:width]) != list(range(width)):
+        return None
+    st = again.stats
+    st.selected = f"repass/{st.selected}"
+    st.approximated_operations += res.stats.approximated_operations
+    st.approximation_error += res.stats.approximation_error
+    # 线空间：逻辑比特 i 的线 = 第二遍里物理 initial[i] 那条线（逻辑线在前）
+    order = list(res.initial_layout)
+    rest = [w for w in range(len(again.wire_layout)) if w not in set(order)]
+    perm = order + rest
+    new_of = {w: i for i, w in enumerate(perm)}
+    wire_circuit = _relabel(again.wire_circuit, new_of)
+    return TranspileResult(
+        circuit=again.circuit,
+        initial_layout=list(res.initial_layout),
+        final_layout=[again.final_layout[p] for p in res.final_layout],
+        wire_circuit=wire_circuit,
+        wire_layout=[again.wire_layout[w] for w in perm],
+        stats=st,
+    )
+
+
+def _relabel(circuit: QuantumCircuit, new_of: dict[int, int]) -> QuantumCircuit:
+    """Rename qubit ``q`` of ``circuit`` to ``new_of[q]``."""
+    from quspect.circuit.circuit import QuantumCircuit
+
+    out = QuantumCircuit(name=circuit.name)
+    out.compose(
+        circuit,
+        qubits=[new_of[q] for q in range(circuit.num_qubits)],
+        clbits=list(range(circuit.num_clbits)),
+        inplace=True,
+    )
+    return out
+
+
+def _finish_one(
+    c: QuantumCircuit, plan: Any, optimization_level: int
+) -> QuantumCircuit:
+    """Single-qubit minimization and depth scheduling of a finished circuit
+    (the last stage of :func:`transpile`; two-qubit gates are unchanged)."""
+
+    def gauge(x: QuantumCircuit) -> QuantumCircuit:
+        if optimization_level >= 1 and plan.one_qubit:
+            return minimize_single_qubit_gates(x, plan.one_qubit)
+        return x
+
+    def variants(x: QuantumCircuit, *, blocks: bool = True) -> list[QuantumCircuit]:
+        # 单比特最小化后按深度重排。第 2 级起再从全局选定的 CX 朝向（对偶分解）出发
+        # 最小化一遍（朝向改变对易关系，由调用方按重排后的深度取优）
+        out = [schedule_for_depth(gauge(x), blocks=blocks)]
+        if optimization_level >= _ORIENT_LEVEL and plan.one_qubit:
+            oriented = orient_cx_gates(x, plan.one_qubit)
+            if oriented is not x:
+                out.append(schedule_for_depth(gauge(oriented), blocks=blocks))
+        return out
+
+    def shallowest(cands: list[QuantumCircuit]) -> QuantumCircuit:
+        best = cands[0]
+        for alt in cands[1:]:
+            if _depth_key(alt) < _depth_key(best):
+                best = alt
+        return best
+
+    if optimization_level < _SCHEDULE_LEVEL:
+        return gauge(c)
+    # 单比特最小化会把旋转并进两比特块、破坏块的对易性（如 ZZ 链），而它不改
+    # 双比特门的顺序：先按块重排再最小化，双比特门深度保持重排后的值。小线路两条
+    # 路都算，取 (深度, 双比特门深度, 总门数) 更好的一个（只在提前重排压低了
+    # 双比特门深度时多算一遍，按只做局部最小化的结果判断）；大线路只走先重排的一条
+    # 路，省一次最小化。
+    early = schedule_for_depth(c)
+    if early is c:
+        return shallowest(variants(c))
+    if len(c.instructions) > _SCHEDULE_BOTH_LIMIT:
+        return shallowest(variants(early, blocks=False))
+    cands = variants(c)
+    if _depth(early, two_qubit_only=True) < _depth(cands[0], two_qubit_only=True):
+        cands += variants(early)
+    return shallowest(cands)
+
+
+def _numeric_three_qubit(
+    circuit: QuantumCircuit,
+    current_two_qubit: int,
+    wires: Sequence[int],
+    target: CompilationTarget,
+    permute_output: bool,
+) -> tuple[QuantumCircuit, list[int], list[int]] | None:
+    """Numerically instantiated replacement of a three-qubit circuit with fewer
+    than ``current_two_qubit`` CZ gates: ``(wire circuit, wires, final)``, or
+    ``None``.  The circuit is placed on the physical qubits ``wires[:3]``
+    (in the order the search chose); logical ``i`` starts on wire ``i``."""
+    from quspect.circuit.circuit import QuantumCircuit
+    from quspect.transpiler._instantiate import instantiate_three_qubit
+
+    if circuit.num_qubits != 3 or current_two_qubit < 2 or len(wires) < 3:
+        return None
+    if not all(ins.is_gate for ins in circuit):
+        return None
+    phys = list(wires[:3])
+    if target.coupling_graph:
+        coupled = {
+            (j, k)
+            for j in range(3)
+            for k in range(j + 1, 3)
+            if (phys[j], phys[k]) in target.coupling_graph
+            or (phys[k], phys[j]) in target.coupling_graph
+        }
+    else:
+        coupled = {(0, 1), (0, 2), (1, 2)}
+    try:
+        found = instantiate_three_qubit(
+            circuit,
+            coupled,
+            current_two_qubit - 1,
+            permute_output=permute_output,
+            budget=_NUMERIC_3Q_BUDGET,
+        )
+    except (TypeError, ValueError):  # 例如未绑定的符号参数
+        return None
+    if found is None:
+        return None
+    # 局部线 j（物理 phys[j]）→ 新线号：逻辑比特 i 起于新线 i = 局部线 start[i]
+    new_of = {local: i for i, local in enumerate(found.start)}
+    out = QuantumCircuit(name=circuit.name)
+    for ins in found.instructions:
+        assert ins.gate is not None
+        out.append(ins.gate, [new_of[q] for q in ins.qubits])
+    new_wires = [phys[found.start[i]] for i in range(3)] + list(wires[3:])
+    final = [phys[found.end[i]] for i in range(3)] + list(wires[3:])
+    return out, new_wires, final
 
 
 def _pre_resynthesis_worthwhile(circuit: QuantumCircuit) -> bool:
@@ -866,44 +1154,7 @@ def _transpile(
         return out
 
     def finish_one(c: QuantumCircuit) -> QuantumCircuit:
-        def gauge(x: QuantumCircuit) -> QuantumCircuit:
-            if optimization_level >= 1 and plan.one_qubit:
-                return minimize_single_qubit_gates(x, plan.one_qubit)
-            return x
-
-        def variants(x: QuantumCircuit, *, blocks: bool = True) -> list[QuantumCircuit]:
-            # 单比特最小化后按深度重排。第 2 级起再从全局选定的 CX 朝向（对偶分解）出发
-            # 最小化一遍（朝向改变对易关系，由调用方按重排后的深度取优）
-            out = [schedule_for_depth(gauge(x), blocks=blocks)]
-            if optimization_level >= _ORIENT_LEVEL and plan.one_qubit:
-                oriented = orient_cx_gates(x, plan.one_qubit)
-                if oriented is not x:
-                    out.append(schedule_for_depth(gauge(oriented), blocks=blocks))
-            return out
-
-        def shallowest(cands: list[QuantumCircuit]) -> QuantumCircuit:
-            best = cands[0]
-            for alt in cands[1:]:
-                if _depth_key(alt) < _depth_key(best):
-                    best = alt
-            return best
-
-        if optimization_level < _SCHEDULE_LEVEL:
-            return gauge(c)
-        # 单比特最小化会把旋转并进两比特块、破坏块的对易性（如 ZZ 链），而它不改
-        # 双比特门的顺序：先按块重排再最小化，双比特门深度保持重排后的值。小线路两条
-        # 路都算，取 (深度, 双比特门深度, 总门数) 更好的一个（只在提前重排压低了
-        # 双比特门深度时多算一遍，按只做局部最小化的结果判断）；大线路只走先重排的一条
-        # 路，省一次最小化。
-        early = schedule_for_depth(c)
-        if early is c:
-            return shallowest(variants(c))
-        if len(c.instructions) > _SCHEDULE_BOTH_LIMIT:
-            return shallowest(variants(early, blocks=False))
-        cands = variants(c)
-        if _depth(early, two_qubit_only=True) < _depth(cands[0], two_qubit_only=True):
-            cands += variants(early)
-        return shallowest(cands)
+        return _finish_one(c, plan, optimization_level)
 
     # --- pre-routing -----------------------------------------------------
     t0 = time.perf_counter()
@@ -1225,6 +1476,21 @@ def _transpile(
             )
             cands = cands + comm
             to_eval += comm[:_COMM_EVALUATIONS]
+        if comm_logical is not None and _PLAIN_EVALUATIONS > 0:
+            plain = _plain_candidates(
+                target,
+                comm_logical,
+                iter_num=iter_num,
+                seed=seed,
+                initial_layout=initial_layout,
+                layout_trials=lt,
+                swap_trials=st,
+                elide_permutations=elide_permutations,
+                work_limit=work_limit,
+                time_limit=time_limit,
+            )
+            cands = cands + plain
+            to_eval += plain[:_PLAIN_EVALUATIONS]
         stats.num_candidates = len(cands)
         stats.stage_seconds["route"] = time.perf_counter() - t0
         if optimization_level >= _LNS_LEVEL:
@@ -1286,9 +1552,11 @@ def _transpile(
                 family = family.split("/", 1)[1]
             return [
                 (0, 0.0) if family.startswith("exact/") else gate_approx,
-                # 对易感知候选路由的是逐门近似后的 CX 级线路，不含逐块近似；
+                # 对易感知 / 普通门级候选路由的是逐门近似后的 CX 级线路，不含逐块近似；
                 # exact/ 候选路由的是未近似的线路
-                (0, 0.0) if family.startswith(("comm/", "exact/")) else block_approx,
+                (0, 0.0)
+                if family.startswith(("comm/", "plain/", "exact/"))
+                else block_approx,
                 post_approx,
             ]
 
@@ -1327,13 +1595,97 @@ def _transpile(
         wires, final = chosen.initial_mapping, chosen.final_mapping
         stats.stage_seconds["post"] = time.perf_counter() - t0
 
+    if (
+        optimization_level >= _NUMERIC_3Q_LEVEL
+        and _NUMERIC_3Q
+        and time_limit is None
+        and not pre_phase_regions
+        and consolidate is not None
+        and logical.num_qubits == 3
+    ):
+        # 三比特线路：整个酉矩阵做数值实例化搜索（布局自由，见 _instantiate），
+        # 严格更少两比特门且通过逐元素验证才用；原结果留作最后比较的候选
+        t0 = time.perf_counter()
+        numeric = _numeric_three_qubit(
+            circuit, _count_two_qubit(best), wires, target, elide_permutations
+        )
+        if numeric is not None:
+            fallbacks.insert(
+                0,
+                _Choice(
+                    best,
+                    best_routed,
+                    list(wires),
+                    list(final),
+                    stats.selected,
+                    stats.num_swaps,
+                    approx_parts,
+                ),
+            )
+            raw_numeric, wires, final = numeric
+            best = translate_to_target(decompose.run(raw_numeric), plan)
+            if optimization_level >= 2 and plan.needs_translation:
+                tuned = final_optimize.run(best)
+                if _count_two_qubit(tuned) <= _count_two_qubit(best):
+                    best = tuned
+            best_routed = None
+            stats.selected, stats.num_swaps = "numeric3q", 0
+            approx_parts = [(0, 0.0), (0, 0.0), (0, 0.0)]
+        stats.stage_seconds["numeric"] = time.perf_counter() - t0
+    if (
+        optimization_level >= _NUMERIC_3Q_LEVEL
+        and _NUMERIC_BLOCKS
+        and _NUMERIC_BLOCKS_MODE in ("inside", "both")
+        and time_limit is None
+        and consolidate is not None
+        and logical.num_qubits > 3
+        and _NUMERIC_BLOCK_MIN_CZ <= _count_two_qubit(best) <= _NUMERIC_BLOCKS_MAX_2Q
+    ):
+        # 路由后的三比特块（≥ _NUMERIC_BLOCK_MIN_CZ 个两比特门）做数值实例化搜索，
+        # 布局固定、只在严格更少两比特门时替换；原结果留作最后比较的候选
+        t0 = time.perf_counter()
+        edges = _wire_edges(target, wires) if target.coupling_graph else None
+        block_pass = NumericThreeQubitBlockPass(
+            edges,
+            free_output=elide_permutations,
+            min_cz=_NUMERIC_BLOCK_MIN_CZ,
+            block_budget=_NUMERIC_BLOCK_BUDGET,
+            total_budget=_NUMERIC_BLOCKS_BUDGET,
+            restarts=_NUMERIC_BLOCK_RESTARTS,
+        )
+        blocked = block_pass.run(best)
+        if blocked is not best:
+            blk_out = translate_to_target(decompose.run(blocked), plan)
+            if optimization_level >= 2 and plan.needs_translation:
+                tuned = final_optimize.run(blk_out)
+                if _count_two_qubit(tuned) <= _count_two_qubit(blk_out):
+                    blk_out = tuned
+            if _count_two_qubit(blk_out) < _count_two_qubit(best):
+                fallbacks.insert(
+                    0,
+                    _Choice(
+                        best,
+                        best_routed,
+                        list(wires),
+                        list(final),
+                        stats.selected,
+                        stats.num_swaps,
+                        approx_parts,
+                    ),
+                )
+                best = blk_out
+                final = _moved(final, block_pass.wire_moves, wires)
+                stats.selected = f"numeric-blocks/{stats.selected}"
+        stats.stage_seconds["numeric_blocks"] = time.perf_counter() - t0
     t0 = time.perf_counter()
     best = finish(best, best_routed, wires)
     for fallback in fallbacks:
         # 最后的单比特 / SWAP 面阶段还能去掉双比特门，与路由后流程的打分不完全单调：
         # LNS 精炼胜出时（小线路）也完成最好的原候选，按最终结果取优
         alt_final = finish(fallback.post, fallback.routed, fallback.wires)
-        if _finish_key(alt_final) < _finish_key(best):
+        if _weighted_finish_key(alt_final, depth_weight) < _weighted_finish_key(
+            best, depth_weight
+        ):
             best = alt_final
             wires, final = fallback.wires, fallback.final
             stats.selected, stats.num_swaps = fallback.label, fallback.num_swaps
@@ -1741,6 +2093,44 @@ def _commutation_candidates(
     return [replace(c, is_default=False, label=f"comm/{c.label}") for c in cands]
 
 
+def _plain_candidates(
+    target: CompilationTarget,
+    logical: QuantumCircuit,
+    *,
+    iter_num: int,
+    seed: int | None,
+    initial_layout: Sequence[int] | None,
+    layout_trials: int,
+    swap_trials: int,
+    elide_permutations: bool,
+    work_limit: int,
+    time_limit: float | None,
+) -> list[_CandidatePlan]:
+    """Level-3 candidates of plain gate-level SABRE on the CX-level circuit
+    (no block nodes, mirror gates, commutation or fusion bonus), relabelled
+    ``plain/...``."""
+    sabre = SABRE(
+        target,
+        permutation_synthesis=True,
+        dilation_layouts=_DILATION_LAYOUTS,
+    )
+    cands = sabre._candidate_plans(
+        logical,
+        iter_num=iter_num,
+        seed=seed,
+        initial_mapping=initial_layout,
+        layout_trials=layout_trials,
+        swap_trials=swap_trials,
+        reference_trials=1,
+        exact_layout=False,
+        elide_permutations=elide_permutations,
+        work_limit=max(1, int(_PLAIN_WORK * work_limit)),
+        time_limit=time_limit,
+        swap_keep=_LEVEL3_SWAP_KEEP,
+    )
+    return [replace(c, is_default=False, label=f"plain/{c.label}") for c in cands]
+
+
 def _pick_evaluations(
     cands: list[_CandidatePlan], max_evaluations: int | None
 ) -> list[_CandidatePlan]:
@@ -2030,6 +2420,15 @@ def _finish_key(circuit: QuantumCircuit) -> tuple[int, int, int, int]:
     if stats is not None:
         return stats
     return (_count_two_qubit(circuit), *_depth_key(circuit))
+
+
+def _weighted_finish_key(
+    circuit: QuantumCircuit, depth_weight: float
+) -> tuple[float, int, int, int, int]:
+    """:func:`_finish_key` led by ``2q + depth_weight · (2q depth)`` (the
+    order is that of :func:`_finish_key` when ``depth_weight`` is 0)."""
+    key = _finish_key(circuit)
+    return (key[0] + depth_weight * key[2], *key)
 
 
 def _score(circuit: QuantumCircuit) -> tuple[int, int, int]:

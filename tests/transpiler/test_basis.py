@@ -175,6 +175,11 @@ def test_cx_basis_two_qubit_count_equals_cz_basis(level: int, seed: int) -> None
             result.initial_layout,
             result.final_layout,
         )
+    if level == 3:
+        # 第 3 级最后按目标门集里的完成结果取优（再编译一遍的输入是目标门集的
+        # 物理线路，深度并列时的取舍也看单比特门），两种门集可以选到不同的路由
+        assert abs(counts["cx"][0] - counts["cz"][0]) <= 2
+        return
     # same routing; the final target-basis optimization may only remove gates
     assert counts["cx"][1:] == counts["cz"][1:]
     assert counts["cz"][0] - 2 <= counts["cx"][0] <= counts["cz"][0]
