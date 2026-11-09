@@ -7,7 +7,8 @@ to the device basis, optimize, then route it on the device coupling graph.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -174,3 +175,64 @@ def compile_for_device(
         layout = list(initial_layout)
 
     return circuit, layout
+
+
+def select_region(
+    size: int,
+    available: Sequence[int],
+    coupling_map: Sequence[Sequence[int]],
+    qubit_fidelity: Mapping[int, float],
+    edge_fidelity: Mapping[tuple[int, int], float],
+) -> list[int] | None:
+    """Pick a connected set of ``size`` qubits with the best calibration.
+
+    Every usable qubit seeds a greedy growth that repeatedly adds the
+    neighbour maximizing ``edge fidelity × qubit fidelity``; the region with
+    the largest product of its qubit and joining-edge fidelities wins (ties:
+    lowest qubit indices).  Qubits without calibration data count as
+    perfect; qubits whose calibration is ``0`` are never used.  Returns
+    ``None`` when no connected region of that size exists.
+    """
+    usable = {q for q in available if qubit_fidelity.get(q, 1.0) > 0.0}
+    adjacency: dict[int, set[int]] = {q: set() for q in usable}
+    for a, b in coupling_map:
+        if (
+            a in usable
+            and b in usable
+            and edge_fidelity.get((min(a, b), max(a, b)), 1.0) > 0
+        ):
+            adjacency[a].add(b)
+            adjacency[b].add(a)
+
+    def log(value: float) -> float:
+        return math.log(max(value, 1e-12))
+
+    best: tuple[float, list[int]] | None = None
+    for start in sorted(usable):
+        region = [start]
+        members = {start}
+        score = log(qubit_fidelity.get(start, 1.0))
+        while len(region) < size:
+            candidates = [
+                (
+                    log(edge_fidelity.get((min(u, v), max(u, v)), 1.0))
+                    + log(qubit_fidelity.get(v, 1.0)),
+                    -v,
+                    v,
+                )
+                for u in region
+                for v in adjacency[u]
+                if v not in members
+            ]
+            if not candidates:
+                break
+            gain, _, chosen = max(candidates)
+            region.append(chosen)
+            members.add(chosen)
+            score += gain
+        if len(region) < size:
+            continue
+        ordered = sorted(region)
+        if best is None or score > best[0] + 1e-12:
+            best = (score, ordered)
+    return None if best is None else best[1]

@@ -573,7 +573,7 @@ print(batch.by_label("one").counts)   # {'1': 128}
 
 ## Cloud QPU
 
-QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)**, **Quafu-SQC (夸父)** and **Origin Quantum (本源量子)** are supported; additional platforms can be added by implementing `CloudBackend`.
+QuSpect provides a **unified `Backend` interface** — the same `backend.run(circuit, shots=N)` API works for both local simulators and remote quantum hardware. Currently **LogicalQubit (逻辑比特)**, **Quafu-SQC (夸父)**, **Origin Quantum (本源量子)** and **Tianyan (天衍)** are supported; additional platforms can be added by implementing `CloudBackend`.
 
 ### Cloud Setup
 
@@ -910,6 +910,48 @@ result = backend.run(qc, shots=2000)
   limited by the chip's `MaxShots` (49 600 on `WK_C180_2`).
 - A malformed program is not rejected by the cloud — the task simply never
   finishes — so always pass a `timeout` to `result()`.
+
+### Tianyan (天衍)
+
+[Tianyan](https://qc.zdxlz.com) is China Telecom Quantum Group's quantum
+cloud. QuSpect generates QCIS itself and calls the cloud's HTTPS API directly
+(standard library only), so **cqlib is not needed**.
+
+```bash
+export TIANYAN_LOGIN_KEY=...   # "API Token" in the personal center of qc.zdxlz.com
+```
+
+```python
+from quspect.backends.tianyan import TianyanProvider
+
+provider = TianyanProvider()
+print(provider.list_backends())                 # {'tianyan176': 'running', 'tianyan_sw': 'running', ...}
+backend = provider.get_backend("tianyan176")    # QPU; "tianyan_sw" is the full-amplitude simulator
+result = backend.run(qc, shots=2000)
+```
+
+- **QuSpect compiles and places everything.** The cloud does no layout or
+  routing: a `CZ` between uncoupled qubits or any use of a disabled qubit is
+  rejected. With `transpile=True` (default) QuSpect lowers to the QCIS basis
+  and routes with SABRE on the best-calibrated connected region of enabled
+  qubits and couplers (or on `physical_qubits=[...]`); `transpile=False`
+  submits the circuit's own indices as physical qubits.
+- **Bit order** — results use QuSpect's convention. Tianyan reports the
+  measured qubits and every shot in `M` order, and its `probability` keys put
+  the first measured qubit rightmost; QuSpect measures each measured qubit
+  once, at the end, in ascending order, and decodes through the measurement
+  map stored in the job reference. Only terminal measurements are supported.
+- **Results** — `result.counts` are the measured shots; `result.probabilities`
+  is Tianyan's distribution (readout-corrected on QPUs) when provided
+  (`metadata["probabilities_source"]`).
+- **Batches** — a native QPU batch must measure the same qubits in every
+  program, so requests are grouped into runs with identical measurements
+  (at most 49 programs each) and returned as one recoverable job.
+- The gateway answers many requests with HTTP 504. Reads are retried, and so
+  are submissions (`submit_retries`, default 3): a timed-out submission may
+  still have created its task, so a retry can occasionally duplicate one —
+  each retry is logged as a warning. Pass
+  `TianyanProvider(submit_retries=0)` on paid machines if that matters.
 
 ---
 
