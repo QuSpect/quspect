@@ -23,7 +23,12 @@ Two rules apply:
   mixed: pass only :mod:`quspect.pulse` envelopes to a consumer imported under
   the stand-in.
 
-The stand-in does not provide envelopes-qc's pure-Python ``evp`` module.
+The stand-in has the top-level names of envelopes-qc's ``envelopes``
+package (``evc``, ``envelopes_cpp`` and the two dtypes) except the
+pure-Python ``evp`` / ``envelopes_py`` module, which it does not provide:
+importing that raises :class:`ImportError` with the reason.  As in
+envelopes-qc, envelope classes are attributes of ``evc``
+(``evc.GaussianDRAG``), not of the package itself.
 
 Example:
     A reusable pytest fixture that runs a test against the stand-in:
@@ -76,6 +81,33 @@ _EVP_MESSAGE = (
     "envelopes.evp (the pure-Python implementation of envelopes-qc) is not "
     "provided by quspect.pulse; use envelopes.evc"
 )
+_EVP_MODULE_NAMES = ("envelopes.evp", "envelopes.envelopes_py")
+
+
+class _EvpFinder:
+    """Meta-path finder that says why ``envelopes.evp`` cannot be imported.
+
+    ``from envelopes import evp`` looks the name up as an attribute, then
+    tries to import the submodule, and reports a bare "cannot import name"
+    when both fail; the :class:`AttributeError` of the stand-in never
+    reaches the user.  This finder answers the submodule import with an
+    :class:`ImportError` that carries the reason.  It only acts while the
+    ``envelopes`` module in :data:`sys.modules` is the stand-in.
+    """
+
+    @staticmethod
+    def find_spec(fullname: str, path: object = None, target: object = None) -> None:
+        if fullname in _EVP_MODULE_NAMES:
+            current = sys.modules.get("envelopes")
+            if current is not None and getattr(current, _SHIM_MARKER, False):
+                raise ImportError(_EVP_MESSAGE, name=fullname)
+
+    @staticmethod
+    def invalidate_caches() -> None:
+        """Nothing is cached."""
+
+
+_EVP_FINDER = _EvpFinder()
 
 
 class _EnvelopesModule(types.ModuleType):
@@ -101,7 +133,9 @@ def make_envelopes_module() -> types.ModuleType:
     Returns:
         A new module object named ``"envelopes"``.  Accessing ``evp`` on it
         raises :class:`AttributeError`, because the pure-Python
-        implementation is not provided.
+        implementation is not provided; once the module is registered,
+        ``from envelopes import evp`` raises :class:`ImportError` with the
+        same explanation.
 
     Example:
         >>> import quspect._pulse
@@ -137,6 +171,8 @@ def _register(shim: types.ModuleType) -> None:
     sys.modules["envelopes"] = shim
     sys.modules["envelopes.envelopes_cpp"] = _pulse
     sys.modules["envelopes.evc"] = _pulse
+    if _EVP_FINDER not in sys.meta_path:
+        sys.meta_path.insert(0, _EVP_FINDER)
 
 
 def _sync_parent_attribute(name: str, module: object) -> None:
@@ -169,8 +205,10 @@ def use_as_envelopes(
     :data:`sys.modules` entries are restored exactly: modules imported inside
     the block are dropped again and the previously cached modules (including a
     real envelopes-qc) come back, together with the matching attributes on
-    their parent packages.  Blocks can be nested.  The function edits global
-    interpreter state and is not thread-safe.
+    their parent packages.  The finder that explains a failed import of
+    ``envelopes.evp`` is removed from :data:`sys.meta_path` again.  Blocks can
+    be nested.  The function edits global interpreter state and is not
+    thread-safe.
 
     Args:
         purge: Top-level or dotted module names whose cached modules are
@@ -197,11 +235,14 @@ def use_as_envelopes(
             saved[name] = sys.modules.pop(name)
     for name in ENVELOPES_MODULE_NAMES:
         saved.setdefault(name, _MISSING)
+    finder_was_installed = _EVP_FINDER in sys.meta_path
     shim = make_envelopes_module()
     _register(shim)
     try:
         yield shim
     finally:
+        if not finder_was_installed and _EVP_FINDER in sys.meta_path:
+            sys.meta_path.remove(_EVP_FINDER)
         for name in list(sys.modules):
             if _matches(name, prefixes):
                 del sys.modules[name]

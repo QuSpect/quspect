@@ -177,6 +177,62 @@ def test_consumer_runs_on_quspect_pulse(consumer_path: Path) -> None:
     assert snapshot() == before
 
 
+def test_importing_evp_says_why() -> None:
+    """Known issue: ``from envelopes import evp`` gave a bare "cannot import name"."""
+    meta_path = list(sys.meta_path)
+    with use_as_envelopes():
+        with pytest.raises(ImportError, match="pure-Python .* not provided") as info:
+            from envelopes import evp  # noqa: F401
+        assert not isinstance(info.value, ModuleNotFoundError)
+        assert info.value.name == "envelopes.evp"
+        with pytest.raises(ImportError, match="not provided by quspect.pulse"):
+            import envelopes.evp  # noqa: F401
+        with pytest.raises(ImportError, match="not provided by quspect.pulse"):
+            from envelopes.envelopes_py import Gaussian  # noqa: F401
+        import envelopes
+
+        # Probing stays an ordinary attribute lookup.
+        assert not hasattr(envelopes, "evp")
+        assert getattr(envelopes, "evp", None) is None
+        with use_as_envelopes(), pytest.raises(ImportError, match="not provided"):
+            import envelopes.evp  # noqa: F401
+        with pytest.raises(ImportError, match="not provided"):
+            import envelopes.evp  # noqa: F401
+    assert sys.meta_path == meta_path
+
+
+def test_top_level_names_are_those_of_envelopes_qc() -> None:
+    """Envelope classes live in ``evc``, as in envelopes-qc itself.
+
+    The ``envelopes`` package of envelopes-qc 0.1.5 has ``evc``,
+    ``envelopes_cpp``, ``evp``, ``envelopes_py`` and the two dtypes at its
+    top level; ``from envelopes import GaussianDRAG`` fails there as well.
+    """
+    with use_as_envelopes() as shim:
+        public = {name for name in vars(shim) if not name.startswith("__")}
+        assert public == {
+            "evc",
+            "envelopes_cpp",
+            "EVC_COMPLEX_DTYPE",
+            "EVC_FLOAT_DTYPE",
+        }
+        with pytest.raises(ImportError, match="cannot import name 'GaussianDRAG'"):
+            from envelopes import GaussianDRAG  # noqa: F401
+        from envelopes import evc as imported
+
+        assert imported.GaussianDRAG is evc.GaussianDRAG
+
+
+def test_evp_finder_is_inert_for_a_real_envelopes_package() -> None:
+    """The explanation never fires for an ``envelopes`` that is not the stand-in."""
+    real = types.ModuleType("envelopes")
+    real.__path__ = []  # type: ignore[attr-defined]
+    with use_as_envelopes():
+        sys.modules["envelopes"] = real
+        with pytest.raises(ModuleNotFoundError, match="No module named"):
+            import envelopes.evp  # noqa: F401
+
+
 def test_restores_real_envelopes_and_cached_consumers(consumer_path: Path) -> None:
     real = types.ModuleType("envelopes")
     real_cpp = types.ModuleType("envelopes.envelopes_cpp")
