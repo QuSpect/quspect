@@ -6,6 +6,8 @@ provides a Python-friendly API for mixed-state quantum simulation.
 
 from __future__ import annotations
 
+import operator
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -31,16 +33,36 @@ class DensityMatrix:
     def __init__(self, num_qubits: int) -> None:
         """Create a density matrix initialized to |0…0⟩⟨0…0|.
 
+        The matrix holds ``4**num_qubits`` complex128 entries, that is
+        ``16 * 4**num_qubits`` bytes: 16 MiB for 10 qubits, 4 GiB for 14.
+
         Args:
-            num_qubits: Number of qubits. Must be >= 0.
+            num_qubits: Number of qubits. Must be >= 0 and at most
+                ``DensityMatrix64.max_qubits`` of the native extension (29
+                on 64-bit platforms), beyond which the matrix cannot be
+                addressed.
 
         Raises:
-            ValueError: If ``num_qubits < 0``.
+            ValueError: If ``num_qubits`` is negative or above that limit.
+            MemoryError: If the matrix does not fit in memory.
         """
         _ensure_core()
+        num_qubits = operator.index(num_qubits)
         if num_qubits < 0:
             raise ValueError(f"num_qubits must be >= 0, got {num_qubits}")
-        self._cpp = _core.DensityMatrix64(num_qubits)
+        max_qubits = int(_core.DensityMatrix64.max_qubits)
+        if num_qubits > max_qubits:
+            raise ValueError(
+                f"num_qubits must be <= {max_qubits} for a density matrix "
+                f"(16 * 4**num_qubits bytes), got {num_qubits}"
+            )
+        try:
+            self._cpp = _core.DensityMatrix64(num_qubits)
+        except MemoryError:
+            raise MemoryError(
+                f"Cannot allocate a {num_qubits}-qubit density matrix "
+                f"({16 * 4**num_qubits} bytes)"
+            ) from None
 
     # -- properties --------------------------------------------------------
 
@@ -409,7 +431,8 @@ def _partial_trace_numpy(
     for i in range(d_total):
         for j in range(d_total):
             val = rho[i, j]
-            if abs(val) < 1e-15:
+            # Skip exact zeros only: small entries belong to the reduced state.
+            if val == 0:
                 continue
             match = True
             for q in trace_out:
