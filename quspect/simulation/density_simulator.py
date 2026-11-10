@@ -15,6 +15,7 @@ import numpy as np
 
 from quspect.backends._base import Backend
 from quspect.gates._matrix_utils import gate_matrix
+from quspect.simulation._seeding import RunSeeds, validate_seed
 from quspect.simulation.density_matrix import DensityMatrix, _outcome_mask
 from quspect.simulation.result import SimulationResult
 
@@ -35,6 +36,12 @@ class DensityMatrixSimulator(Backend):
     application.  Suitable for circuits with noise channels and for
     systems up to ~12 qubits.
 
+    Sampling follows the same rule as :class:`~quspect.simulation.Simulator`:
+    every :meth:`run` draws from its own random stream, and with a ``seed``
+    the sequence of runs is reproducible (the first run draws from
+    ``numpy.random.default_rng(seed)``).  Assigning :attr:`seed` restarts
+    the sequence.
+
     Example:
         >>> from quspect import QuantumCircuit
         >>> from quspect.simulation.density_simulator import (
@@ -47,6 +54,16 @@ class DensityMatrixSimulator(Backend):
 
     def __init__(self, *, seed: int | None = None) -> None:
         self.seed = seed
+
+    @property
+    def seed(self) -> int | None:
+        """The seed given at construction, or None for system entropy."""
+        return self._seed
+
+    @seed.setter
+    def seed(self, seed: int | None) -> None:
+        self._seed = validate_seed(seed)
+        self._run_seeds = RunSeeds(self._seed)
 
     @property
     def name(self) -> str:
@@ -153,7 +170,7 @@ class DensityMatrixSimulator(Backend):
             keys = list(distribution)
             pvals = np.clip(np.array([distribution[k] for k in keys]), 0.0, None)
             pvals = pvals / pvals.sum()
-            rng = np.random.default_rng(self.seed)
+            rng = np.random.default_rng(self._run_seeds.next())
             sampled = rng.multinomial(shots, pvals)
             for key, cnt in zip(keys, sampled, strict=True):
                 if cnt:

@@ -501,7 +501,7 @@ compare_results(result1, result2, label_a="Ideal", label_b="Noisy")
 from quspect import QuantumCircuit
 from quspect.simulation import Simulator
 
-sim = Simulator(seed=42)          # 设置随机种子以保证采样可复现
+sim = Simulator(seed=42)          # 设置随机种子以保证采样序列可复现
 
 # 无测量线路：保存最终态矢量
 state_circ = QuantumCircuit(name="bell_state").h(0).cx(0, 1)
@@ -523,6 +523,8 @@ print(result.top_outcomes(3))     # 前 3 个最常见结果
 
 - **末尾测量** — 所有 `measure` 操作位于线路末尾：仅演化一次，然后采样
 - **中间测量** — 测量与门操作交错排列：每次采样独立重新执行，每次测量后坍缩状态
+
+**随机种子：** 每次 `run()` 使用各自的随机流，同一个模拟器的多次运行是相互独立的采样。`Simulator(seed=s)` 使这一运行序列可复现：第一次运行直接以 `s` 为种子，之后的运行使用由 `s` 和运行序号派生的种子；以同样方式使用另一个 `Simulator(seed=s)` 会得到相同的结果。`DensityMatrixSimulator` 与 `MonteCarloSimulator` 遵循同一规则。
 
 ### 后端无关的参数扫描
 

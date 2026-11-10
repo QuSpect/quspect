@@ -212,16 +212,29 @@ def test_unseeded_simulators_differ() -> None:
     assert a != b
 
 
-def test_repeated_runs_on_one_seeded_simulator_repeat() -> None:
-    """Documented behaviour: each ``run`` restarts from the simulator seed.
+@pytest.mark.parametrize("mid", [False, True])
+def test_repeated_runs_on_one_seeded_simulator_form_a_sequence(mid: bool) -> None:
+    """Each ``run`` of a seeded simulator uses the next random stream.
 
-    Repeated runs on one seeded instance therefore return identical counts
-    (like qiskit-aer's ``seed_simulator``); averaging them adds no
-    information.
+    Repeated runs on one seeded instance return different counts (unlike
+    qiskit-aer's ``seed_simulator``, which restarts on every run), and a
+    second instance with the same seed reproduces the whole sequence.
     """
-    sim = Simulator(seed=5)
     circ = _uniform5()
-    assert sim.run(circ, shots=300).counts == sim.run(circ, shots=300).counts
+    if mid:
+        circ.h(0).measure([0], [5])
+    sim = Simulator(seed=5)
+    runs = [sim.run(circ, shots=300).counts for _ in range(3)]
+    assert runs[0] != runs[1] and runs[1] != runs[2] and runs[0] != runs[2]
+    again = Simulator(seed=5)
+    assert [again.run(circ, shots=300).counts for _ in range(3)] == runs
+
+
+def test_repeated_runs_on_one_unseeded_simulator_differ() -> None:
+    """An unseeded simulator does not repeat its first sample."""
+    sim = Simulator()
+    circ = _uniform5()
+    assert sim.run(circ, shots=300).counts != sim.run(circ, shots=300).counts
 
 
 # =============================================================================

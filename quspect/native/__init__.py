@@ -141,7 +141,10 @@ class NativeExecutor:
 
     Args:
         precision: ``"double"`` (default) or ``"single"``.
-        seed: Random seed for reproducible sampling.
+        seed: Random seed for reproducible sampling. Every :meth:`run`
+            starts again from this seed unless it is given its own
+            ``seed``; :class:`~quspect.simulation.Simulator` passes a
+            different seed to each run.
 
     Example::
 
@@ -168,6 +171,7 @@ class NativeExecutor:
         return_statevector: bool = False,
         return_expectations: bool = False,
         return_samples: bool = False,
+        seed: int | None = None,
     ) -> ExecutionResult:
         """Decode QSAL JSON, validate, and execute.
 
@@ -180,6 +184,9 @@ class NativeExecutor:
             return_statevector: If True, return the final state vector.
             return_expectations: If True, compute and return observable expectations.
             return_samples: If True, return raw packed samples.
+            seed: Random seed of this call, in ``[0, 2**64)``. ``None``
+                (default) uses the executor's seed, so repeated calls
+                return the same samples.
 
         Returns:
             An :class:`ExecutionResult` with the requested outputs.
@@ -190,7 +197,7 @@ class NativeExecutor:
         core_result = _core.decode_qsal_and_run(
             qsal_json,
             self._precision,
-            self._seed,
+            self._seed if seed is None else seed,
             shots,
             return_statevector,
             return_expectations,

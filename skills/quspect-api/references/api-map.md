@@ -204,6 +204,7 @@ Execution behavior:
 - Terminal measurements evolve once, then sample.
 - Mid-circuit measurements re-execute per shot with collapse.
 - Native executor is used via QSAL; unbound symbolic parameters raise `ValueError`.
+- Each `.run()` uses its own random stream: repeated runs of one simulator differ. With `seed=s` the sequence of runs is reproducible (run 0 is seeded with `s`, run `k` with a seed derived from `(s, k)`); a new `Simulator(seed=s)` starts the sequence again. `DensityMatrixSimulator` and `MonteCarloSimulator` follow the same rule.
 
 `SimulationResult`:
 
@@ -611,7 +612,7 @@ from quspect.native import NativeExecutor, NativeImportError
 API:
 
 - `NativeExecutor(precision="double", seed=0)`
-- `.run(qsal_json, shots=0, return_statevector=False, return_expectations=False, return_samples=False)`
+- `.run(qsal_json, shots=0, return_statevector=False, return_expectations=False, return_samples=False, seed=None)` (every call restarts from the executor's seed unless `seed` is given)
 - `.decode(qsal_json)`
 - `.run_program(program, shots=0, return_statevector=False, return_expectations=False, return_samples=False)`
 - Internal `_prepare_adjoint(qsal_json)` creates the reusable native plan used by
