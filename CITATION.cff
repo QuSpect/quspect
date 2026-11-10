@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "QuSpect: a quantum computing SDK"
+type: software
+license: Apache-2.0
+repository-code: "https://github.com/QuSpect/quspect"
+authors:
+  - family-names: "Xu"
+    given-names: "Xusheng"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Zhou"
+    given-names: "Ruoyu"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Xue"
+    given-names: "Hongtao"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Zhang"
+    given-names: "Runqing"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Han"
+    given-names: "Jize"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Wen"
+    given-names: "Jingwei"
+    affiliation: "QuSpect Technology Co., Ltd."
+  - family-names: "Hu"
+    given-names: "Xiaoxiao"
+    affiliation: "QuSpect Technology Co., Ltd."
+keywords:
+  - quantum computing
+  - quantum circuits
+  - quantum compiler
+  - SDK

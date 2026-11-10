@@ -1,0 +1,43 @@
+{
+  "title": "QuSpect: a quantum computing SDK",
+  "upload_type": "software",
+  "description": "QuSpect is an open-source quantum computing SDK for research and education: circuit construction and visualization, C++ state-vector simulation with adjoint gradients, a circuit compiler (quspect.transpiler), variational objectives, QUBO/Ising tools, Hamiltonian simulation, control-pulse envelopes and backends for several cloud quantum processors.",
+  "creators": [
+    {
+      "name": "Xu, Xusheng",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Zhou, Ruoyu",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Xue, Hongtao",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Zhang, Runqing",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Han, Jize",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Wen, Jingwei",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    },
+    {
+      "name": "Hu, Xiaoxiao",
+      "affiliation": "QuSpect Technology Co., Ltd."
+    }
+  ],
+  "license": "Apache-2.0",
+  "keywords": [
+    "quantum computing",
+    "quantum circuits",
+    "quantum compiler",
+    "transpiler",
+    "SDK"
+  ]
+}
