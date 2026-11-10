@@ -456,6 +456,40 @@ class TestStatevectorRegression:
         with pytest.raises(ValueError, match="mid-circuit"):
             Simulator(seed=0).statevector(circ)
 
+    @pytest.mark.parametrize(
+        "circ",
+        [
+            QuantumCircuit().h(0).amplitude_damp(0.5, 0),
+            QuantumCircuit().h(0).depolarize(0.1, 0).cx(0, 1),
+            QuantumCircuit().bit_flip(0.0, 0),
+            QuantumCircuit().h(0).phase_damp(0.3, 0).measure([0], [0]),
+        ],
+    )
+    def test_noise_channel_raises(self, circ: QuantumCircuit) -> None:
+        """A noisy circuit has no single final state vector."""
+        with pytest.raises(ValueError, match="noise channel"):
+            Simulator(seed=0).statevector(circ)
+
+    def test_noisy_run_still_returns_one_trajectory_state(self) -> None:
+        """``run(save_statevector=True)`` is the documented trajectory path.
+
+        The qubit decays with probability 1/4 per trajectory; 64 seeds show
+        both outcomes whatever the platform's random stream is.
+        """
+        circ = QuantumCircuit().h(0).amplitude_damp(0.5, 0)
+        states = {
+            tuple(
+                np.round(
+                    Simulator(seed=seed).run(circ, save_statevector=True).statevector,
+                    6,
+                )
+            )
+            for seed in range(64)
+        }
+        decayed = (1.0 + 0j, 0j)
+        kept = (np.round(np.sqrt(2 / 3), 6) + 0j, np.round(np.sqrt(1 / 3), 6) + 0j)
+        assert states == {decayed, kept}
+
     def test_terminal_measurement_returns_pre_measurement_state(self) -> None:
         """Terminal measurements (and trailing barriers) are ignored."""
         circ = QuantumCircuit().h(0).measure([0], [0]).barrier().measure([0], [1])
