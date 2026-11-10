@@ -23,6 +23,7 @@ from typing import TypeAlias
 
 import numpy as np
 
+from quspect.hamsim._bounds import second_order_coefficient
 from quspect.hamsim._terms import PauliTerm
 
 Rotation: TypeAlias = tuple[str, tuple[int, ...], float]
@@ -270,10 +271,16 @@ def commutator_bound(
 
     Order 1: ``t²/(2r) Σ_{i<j} ‖[H_i, H_j]‖``.  Order 2 (Childs et al.,
     PRX 11, 011020, 2021): ``|t|³/(12 r²) Σ_i ‖[[H_i, H_{>i}], H_{>i}]‖ +
-    |t|³/(24 r²) Σ_i ‖[[H_i, H_{>i}], H_i]‖`` with each nested commutator
-    bounded by the triangle inequality over Pauli products.  The bound
-    depends on ``|t|`` only: a negative ``time`` (backward evolution) gives
-    the bound of ``|time|``.
+    |t|³/(24 r²) Σ_i ‖[[H_i, H_{>i}], H_i]‖``.  The nested commutators are
+    formed as operators and their norms are exact on up to six qubits
+    (wider ones are split into such clusters); the expression is evaluated
+    for the Pauli terms and for the runs of consecutive commuting terms,
+    which the formula exponentiates as one summand, and the smaller value is
+    returned (:mod:`quspect.hamsim._bounds`).  It is never above the
+    triangle inequality over all Pauli products, which releases up to 0.6.2
+    returned and which still applies to Hamiltonians too large to refine.
+    The bound depends on ``|t|`` only: a negative ``time`` (backward
+    evolution) gives the bound of ``|time|``.
 
     Args:
         num_qubits: Number of qubits.
@@ -321,4 +328,10 @@ def commutator_prefactor(
             t1 += w[r] * 2.0 * float(c[later][ak].sum())
             if _anti(x[i : i + 1], z[i : i + 1], rx[r], rz[r])[0]:
                 t2 += w[r] * 2.0 * c[i]
-    return abs(time) ** 3 * (t1 / 12.0 + t2 / 24.0)
+    coefficient = t1 / 12.0 + t2 / 24.0
+    # The same theorem with the nested commutators evaluated as operators
+    # (see quspect.hamsim._bounds); never above the triangle-inequality value.
+    refined = second_order_coefficient(terms)
+    if refined is not None:
+        coefficient = min(coefficient, refined)
+    return abs(time) ** 3 * coefficient
