@@ -716,6 +716,11 @@ print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线�
   基础门集（`h, rx, ry, rz, cz`）和耦合图；标定保真度为 0 的耦合器和比特会被剔除。
   线路经分解、优化后，用 SABRE 映射到夸父按保真度推荐的 `priority_qubits`
   中最小的连通子集上，再关闭服务端编译器提交，芯片按提交的物理线路原样执行。
+- **超出夸父推荐范围时，按标定数据选位。** 没有任何 `priority_qubits` 子集能容纳
+  线路时，QuSpect 会分别在整块可用芯片和标定最好的连通区域（与线路同样大小、
+  以及多两个比特）上编译，提交 CZ、单比特门与读出保真度乘积最高的那份程序。
+  估计值相同时保留整块芯片上的结果，所以标定平坦的芯片不会改变布局，除非某个
+  区域能省门。
 - `physical_qubits=[...]` / `initial_layout=[...]` 约束比特布局；`transpile=False`
   表示线路下标已是物理比特（本地会校验耦合）。
 - `server_compiler="quarkcircuit" | "qiskit" | "qsteed"`（需 `transpile=False`）

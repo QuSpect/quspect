@@ -847,6 +847,13 @@ How it works:
   smallest connected subset from Quafu's fidelity-ranked `priority_qubits`,
   then submitted with the server compiler disabled, so the chip runs exactly
   the submitted physical circuit.
+- **Past Quafu's suggestions, placement follows the calibration.** When no
+  `priority_qubits` subset holds the circuit, QuSpect compiles it on the
+  whole usable chip and on the best-calibrated connected regions (of the
+  circuit's size, and two qubits larger), and sends the program with the
+  highest product of CZ, single-qubit and readout fidelities. The whole-chip
+  program wins ties, so flat calibration does not move a circuit unless a
+  region saves gates.
 - `physical_qubits=[...]` / `initial_layout=[...]` constrain the placement;
   `transpile=False` submits a circuit whose indices are already physical
   (couplings are validated locally).
