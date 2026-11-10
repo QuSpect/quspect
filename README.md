@@ -903,8 +903,11 @@ result = backend.run(qc, shots=2000)
   Origin Quantum (`provider_mapping=True`). `readout_correction` maps to the
   provider's "amend" flag (on by default).
 - **Results** — Origin Quantum returns probabilities, so
-  `result.probabilities` is the provider distribution and `result.counts` is
-  `round(p * shots)` (`result.metadata["counts_source"] == "probabilities"`).
+  `result.probabilities` is the provider distribution and `result.counts`
+  allocates the shots to it by the largest-remainder rule, so the counts sum
+  to `shots` (`result.metadata["counts_source"] == "probabilities"`). Negative
+  readout-corrected values are clipped and the rest renormalized; the
+  provider's unmodified values are then in `metadata["quasi_probabilities"]`.
 - The `full_amplitude` simulator takes no options and no native batches;
   requests become one job per circuit. QPU shots are limited by the chip's
   `MaxShots` (49 600 on `WK_C180_2`).
@@ -912,7 +915,7 @@ result = backend.run(qc, shots=2000)
   `QCloudJob.cancel()` sends; it is never retried) and returns `True` when
   Origin Quantum accepted it, or `False` when it answered that the task cannot
   be cancelled. A network or HTTP error raises `JobError`. A native QPU batch
-  is one task and is cancelled as a whole. The request was checked against the
+  is one task, so the request names the batch. The request was checked against the
   SDK's, not against the live service, and the state a cancelled task reports
   is not known (pyqpanda3 has no cancelled status either): `job.status()`
   returns what the cloud reports, `unknown` for a state outside the five known

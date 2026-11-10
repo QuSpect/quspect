@@ -762,13 +762,15 @@ result = backend.run(qc, shots=2000)
   结果是错的；`transpile=False` 时由本源云端做映射
   （`provider_mapping=True`）。`readout_correction` 对应云端的 amend 选项（默认开）。
 - **结果**：本源返回概率，`result.probabilities` 为云端分布，`result.counts`
-  为 `round(p * shots)`（`metadata["counts_source"] == "probabilities"`）。
+  按最大余数法把 shots 分配到各结果，计数之和等于 shots
+  （`metadata["counts_source"] == "probabilities"`）。读出纠错产生的负值会被截断
+  并重新归一化，云端的原始值保留在 `metadata["quasi_probabilities"]`。
 - `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务。
   真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
 - **取消**：`job.cancel()` 只发送一次请求（与 pyqpanda3 的 `QCloudJob.cancel()`
   所发请求一致，不会重试）；本源接受时返回 `True`，本源答复任务无法取消时返回
-  `False`，网络或 HTTP 错误抛出 `JobError`。真机的原生批量是一个任务，会整体
-  取消。该请求只与 SDK 发出的请求做过比对，没有在真实云服务上验证；任务取消后
+  `False`，网络或 HTTP 错误抛出 `JobError`。真机的原生批量是一个任务，取消请求
+  针对的是整个批量。该请求只与 SDK 发出的请求做过比对，没有在真实云服务上验证；任务取消后
   云端报告什么状态尚不清楚（pyqpanda3 也没有“已取消”状态）：`job.status()`
   如实返回云端状态，五种已知状态之外的值为 `unknown`，因此取消之后调用
   `result()` 请传 `timeout`。
