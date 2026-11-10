@@ -93,8 +93,6 @@ Python API
        seed=7,
        num_reads=100,
        sweeps=1000,
-       beta_start=0.1,
-       beta_end=5.0,
    )
    result = solver.solve(hardware_program)
 
@@ -109,3 +107,28 @@ spins through the hardware program's decode metadata.
 hardware lowering.  It therefore includes compiled penalties when the input
 came from a constrained ``QuadraticProgram``; evaluate the retained
 ``CompilationResult`` to obtain the original business objective.
+
+Default temperature schedule
+----------------------------
+
+Beta rises linearly from ``beta_start`` in the first sweep to ``beta_end`` in
+the last.  Values passed to ``NativeIsingSolver`` are used exactly as given.
+When they are left out, the defaults ``0.1`` and ``5.0`` are divided by the
+largest coefficient modulus of the matrix being solved:
+
+.. math::
+
+   \beta_\text{start} = \frac{0.1}{\max_{ij} |M_{ij}|},\qquad \beta_\text{end} = \frac{5.0}{\max_{ij} |M_{ij}|}.
+
+``M`` and ``cM`` are therefore annealed alike, and a matrix whose largest
+coefficient has modulus 1 is solved exactly as before.  A matrix without any
+non-zero coefficient keeps ``0.1`` and ``5.0``.  ``default_beta_range(matrix)``
+returns the pair, and ``solver.beta_range(program)`` the pair a solver will use.
+If only one end is passed, the other is derived from the matrix.
+
+Releases up to 0.6.2 used ``beta_start=0.1`` and ``beta_end=5.0`` whatever the
+size of the coefficients.  A cut with weights between 10 and 60 then froze at
+once: on a 14-variable instance fewer than half of 64 reads reached the
+optimum, against all 64 with the scaled range.  Default results for a given
+seed therefore differ from those releases unless the largest coefficient has
+modulus 1; pass ``beta_start=0.1, beta_end=5.0`` to reproduce them.
