@@ -198,6 +198,27 @@ def _two_qubit_ops(u: np.ndarray, qa: int, qb: int) -> list[_Op]:
     return out
 
 
+def _compensated_sum(terms: list[float]) -> float:
+    """Neumaier-compensated sum of ``terms``, in order.
+
+    Bit-for-bit the float summation of the built-in ``sum`` of Python 3.12+;
+    written out so that Python 3.10 / 3.11 (plain left-to-right ``sum``) give
+    the same result.
+    """
+    total = 0.0
+    comp = 0.0
+    for x in terms:
+        t = total + x
+        if abs(total) >= abs(x):
+            comp += (total - t) + x
+        else:
+            comp += (x - t) + total
+        total = t
+    if comp and math.isfinite(comp):
+        total += comp
+    return total
+
+
 def _mux_ops(kind: str, angles: np.ndarray, c: int, s1: int, s2: int) -> list[_Op]:
     """Multiplexed ``kind`` (``"rz"``/``"ry"``) on ``c`` selected by (s1, s2).
 
@@ -205,7 +226,10 @@ def _mux_ops(kind: str, angles: np.ndarray, c: int, s1: int, s2: int) -> list[_O
     """
     # α = _MUX_INV @ angles，按固定顺序逐项求和（Python 浮点运算，与平台无关）
     vals = [float(a) for a in angles]
-    alphas = [sum(float(_MUX_INV[j, k]) * vals[k] for k in range(4)) for j in range(4)]
+    alphas = [
+        _compensated_sum([float(_MUX_INV[j, k]) * vals[k] for k in range(4)])
+        for j in range(4)
+    ]
     ops: list[_Op] = []
     for j, cx_ctrl in enumerate((s2, s1, s2, s1)):
         if abs(math.remainder(alphas[j], 4 * math.pi)) > 1e-15:

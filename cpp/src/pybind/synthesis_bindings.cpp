@@ -16,6 +16,7 @@
 
 #include "quspect_native/detmath/linalg.hpp"
 #include "quspect_native/synthesis/gate_matrices.hpp"
+#include "quspect_native/synthesis/instantiate.hpp"
 #include "quspect_native/synthesis/kak_synthesis.hpp"
 #include "quspect_native/synthesis/one_qubit_synthesis.hpp"
 #include "quspect_native/synthesis/pauli_network.hpp"
@@ -463,6 +464,38 @@ void BindSynthesis(py::module_& m) {
         "_three_qubit_distance",
         [](const ComplexArray& u, const ComplexArray& v) { return ThreeQubitDistance(ToM8(u), ToM8(v)); },
         py::arg("u"), py::arg("v"), "Phase-aligned max distance of two 8x8 matrices (inf if orthogonal).");
+    m.def(
+        "_instantiate_three_qubit",
+        [](const py::list& targets, const std::vector<std::array<int, 2>>& edges, int max_cz, std::int64_t budget,
+           int restarts, double tol, double heuristic_factor) {
+            std::vector<M8> ts;
+            ts.reserve(targets.size());
+            for (const auto& t : targets) {
+                ts.push_back(ToM8(t.cast<ComplexArray>()));
+            }
+            InstantiateOptions opt;
+            opt.max_cz = max_cz;
+            opt.budget = budget;
+            opt.restarts = restarts;
+            opt.tol = tol;
+            opt.heuristic_factor = heuristic_factor;
+            InstantiateResult r;
+            {
+                py::gil_scoped_release release;
+                r = InstantiateSearch(ts, edges, opt);
+            }
+            return py::make_tuple(r.found, r.target, r.czs, r.params, r.residual, r.iterations, r.nodes);
+        },
+        py::arg("targets"), py::arg("edges"), py::arg("max_cz"), py::arg("budget"), py::arg("restarts"),
+        py::arg("tol"), py::arg("heuristic_factor") = 10.0,
+        "Numerical instantiation search for 8x8 unitaries: (found, target, czs, params, residual, iterations, "
+        "nodes); see instantiate.hpp for the circuit template.");
+    m.def(
+        "_instantiate_three_qubit_unitary",
+        [](const std::vector<std::array<int, 2>>& czs, const std::vector<double>& params) {
+            return FromM8(InstantiateUnitary(czs, params));
+        },
+        py::arg("czs"), py::arg("params"), "8x8 unitary of the instantiation template.");
     m.def("_three_qubit_demultiplex", &DemultiplexPy, py::arg("a"), py::arg("b"),
           "(V, W, phases) with A = V D W, B = V D^dagger W, or None (deterministic eigendecomposition).");
     m.def("_three_qubit_cossin", &CosSinPy, py::arg("u"),
