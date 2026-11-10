@@ -3,7 +3,10 @@
 #include <cmath>
 
 #include <algorithm>
+#include <new>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 #include "quspect_native/common/parallel.hpp"
 
@@ -21,6 +24,46 @@ void FillZero(std::vector<std::complex<FP>>* amplitudes) {
     });
 }
 
+/// A state vector that cannot be allocated.
+///
+/// Derives from std::bad_alloc so that callers (and pybind11, which raises MemoryError with
+/// what()) treat it as an allocation failure, but says which state was requested instead of
+/// "std::bad_alloc" or the std::length_error text "vector".
+class StateAllocationError : public std::bad_alloc {
+ public:
+    explicit StateAllocationError(std::string message) : message_(std::move(message)) {
+    }
+
+    const char* what() const noexcept override {
+        return message_.c_str();
+    }
+
+ private:
+    std::string message_;
+};
+
+/// 分配 2^num_qubits 个振幅；无法分配时抛出带有比特数与所需内存的 StateAllocationError
+template <typename FP>
+std::vector<std::complex<FP>> AllocateAmplitudes(uint32_t num_qubits) {
+    const auto fail = [num_qubits]() {
+        // sizeof(std::complex<FP>) is 8 or 16 bytes: 2^3 or 2^4.
+        const uint32_t byte_exponent = num_qubits + (sizeof(std::complex<FP>) == 16 ? 4U : 3U);
+        return StateAllocationError("Cannot allocate a state vector of " + std::to_string(num_qubits)
+                                    + " qubits: it needs 2^" + std::to_string(num_qubits) + " amplitudes (2^"
+                                    + std::to_string(byte_exponent) + " bytes).");
+    };
+    if (num_qubits >= 64) {
+        throw fail();  // 1ULL << num_qubits 已经溢出
+    }
+    try {
+        return std::vector<std::complex<FP>>(1ULL << num_qubits);
+    } catch (const std::length_error&) {
+        throw fail();
+    } catch (const std::bad_alloc&) {
+        throw fail();
+    }
+}
+
 }  // namespace
 
 // ============================================================
@@ -28,13 +71,14 @@ void FillZero(std::vector<std::complex<FP>>* amplitudes) {
 // ============================================================
 
 template <typename FP>
-StateVector<FP>::StateVector(uint32_t num_qubits) : num_qubits_(num_qubits), amplitudes_(1ULL << num_qubits) {
+StateVector<FP>::StateVector(uint32_t num_qubits)
+    : num_qubits_(num_qubits), amplitudes_(AllocateAmplitudes<FP>(num_qubits)) {
     SetZeroState();
 }
 
 template <typename FP>
 StateVector<FP>::StateVector(uint32_t num_qubits, uint64_t basis)
-    : num_qubits_(num_qubits), amplitudes_(1ULL << num_qubits) {
+    : num_qubits_(num_qubits), amplitudes_(AllocateAmplitudes<FP>(num_qubits)) {
     SetComputationalBasis(basis);
 }
 
