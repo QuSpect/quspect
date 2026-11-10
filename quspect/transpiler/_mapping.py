@@ -15,7 +15,8 @@ with the refinements of:
 Algorithm overview:
 
 * The circuit is compressed into a dependency DAG whose nodes are the
-  two-qubit gates and measurements (measurements act as scheduling fences).
+  two-qubit gates and measurements (measurements act as scheduling fences;
+  so does each qubit of a barrier or noise channel, which are kept).
   Single-qubit gates are attached to the next node on their qubit and are
   emitted just before it, so they never influence routing decisions.
 * Routing keeps a front layer ``F`` of blocked two-qubit gates and a
@@ -101,6 +102,22 @@ _DILATION_SEED_INDEX = 1 << 20
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class _FencePart:
+    """One qubit of a barrier or noise channel, routed like a measurement.
+
+    A barrier or channel on ``count`` qubits enters the routing as ``count``
+    fences (``_MappingGate.name == "measure"``), one per qubit, with this
+    object in place of the classical bit; ``position`` is the qubit's place
+    in the instruction (``count == 0``: a barrier without qubits, carried by
+    one fence per logical qubit).  :func:`_build_output_circuit` puts the
+    instruction back on the wires its qubits are on.
+    """
+
+    position: int
+    count: int
+
+
 @dataclass
 class _MappingGate:
     """Lightweight gate representation used internally by the mapping pass.
@@ -109,6 +126,11 @@ class _MappingGate:
     single-qubit gates are always executable regardless of mapping.  A
     ``ccx`` routed as a three-qubit unit has ``is_two_qubit=False`` and
     ``q3 >= 0`` (controls ``q1``, ``q2``, target ``q3``).
+
+    ``name == "measure"`` marks a *fence* on ``q1``: a measurement
+    (``clbit`` is its classical bit) or one qubit of a barrier or noise
+    channel (``clbit`` is a :class:`_FencePart`).  The router treats both
+    alike.
     """
 
     is_two_qubit: bool
@@ -116,7 +138,8 @@ class _MappingGate:
     q2: int  # second logical qubit (equals q1 for single-qubit gates)
     index: int  # original position in the instruction list
     name: str = ""  # for debugging
-    clbit: int | None = None  # original classical target for measurements
+    # classical target of a measurement, or the part of a barrier / channel
+    clbit: int | _FencePart | None = None
     gate: Gate | None = None  # synthesized gate (overrides the original one)
     q3: int = -1  # third logical qubit (target) of a routed ``ccx``, else -1
 
@@ -281,7 +304,9 @@ def _build_routing_dag(
 
     A measurement is a scheduling fence: it depends on every earlier node
     and every later node depends on it, so multi-qubit final measurements
-    are never interleaved with routing SWAPs on other qubits.
+    are never interleaved with routing SWAPs on other qubits.  Barriers and
+    noise channels are fences as well, one per qubit (see
+    :class:`_FencePart`): no gate is reordered across them.
 
     With ``commutation`` (needs ``circuit`` to look up the gates), nodes
     that commute are not ordered: on each qubit, consecutive multi-qubit
@@ -687,7 +712,9 @@ class SABRE:
           without native gates) and all later gates, including
           measurements, act on the exchanged qubits;
         - routing SWAPs followed by no gate other than measurements on
-          their qubits are dropped and those measurements redirected.
+          their qubits are dropped and those measurements redirected
+          (barriers and noise channels count as measurements here: they
+          follow their qubits).
 
         The returned mappings stay exact: the output circuit applied with
         wire ``w`` on physical ``initial_mapping[w]`` equals the input
@@ -2473,7 +2500,9 @@ def _elide_trailing_swaps(
 
     A routing SWAP whose two physical qubits are afterwards only measured
     (or swapped again by other dropped SWAPs) is removed; the later
-    measurements are redirected to where the state now stays.  Workspace
+    measurements are redirected to where the state now stays, and so are
+    the barriers and noise channels on them (fences like measurements, see
+    :class:`_FencePart`).  Workspace
     wires and the final mapping are recomputed from the kept SWAPs.
 
     Args:
@@ -2596,6 +2625,23 @@ def _extract_gates(
                         clbit=c,
                     )
                 )
+        else:
+            # A barrier or a noise channel: one fence per qubit (a barrier
+            # without qubits spans every qubit).  Dropping it here would let
+            # the later passes merge gates across it.
+            count = len(instr.qubits)
+            qubits = instr.qubits if count else tuple(range(circuit.num_qubits))
+            for position, q in enumerate(qubits):
+                gates.append(
+                    _MappingGate(
+                        is_two_qubit=False,
+                        q1=q,
+                        q2=q,
+                        index=idx,
+                        name="measure",
+                        clbit=_FencePart(position, count),
+                    )
+                )
 
     return gates, circuit.num_qubits
 
@@ -2632,13 +2678,39 @@ def _build_output_circuit(
     out = QuantumCircuit(name=original.name)
     # 连续的门（out.append / out.swap 的指令）成批构造
     pending: list[tuple[Gate, tuple[int, ...]]] = []
+    # 栅栏（barrier / 噪声信道）已到达的部分：原指令下标 -> {位置: 线}
+    open_fences: dict[int, dict[int, int]] = {}
 
     for pg in physical_gates:
         if pg.name == "swap":
-            pending.append((SWAP, (p2l[pg.q1], p2l[pg.q2])))
+            a, b = p2l[pg.q1], p2l[pg.q2]
+            pending.append((SWAP, (a, b)))
+            # 栅栏的各部分之间没有门；若其间有 SWAP，已记下的线跟着态走
+            for wires in open_fences.values():
+                for position, wire in wires.items():
+                    if wire == a:
+                        wires[position] = b
+                    elif wire == b:
+                        wires[position] = a
         elif pg.name == "measure":
             if pg.clbit is None:
                 raise ValueError("Routed measurement is missing its classical bit.")
+            if isinstance(pg.clbit, _FencePart):
+                part = pg.clbit
+                wires = open_fences.setdefault(pg.index, {})
+                wires[part.position] = p2l[pg.q1]
+                if len(wires) < (part.count or original.num_qubits):
+                    continue
+                del open_fences[pg.index]
+                out._instructions.extend(_gate_instructions(pending))
+                pending.clear()
+                out._instructions.append(
+                    replace(
+                        original[pg.index],
+                        qubits=tuple(wires[k] for k in range(part.count)),
+                    )
+                )
+                continue
             out._instructions.extend(_gate_instructions(pending))
             pending.clear()
             out.measure([p2l[pg.q1]], [pg.clbit])
