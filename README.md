@@ -634,6 +634,15 @@ By default `backend.run()` attempts to compile a bound circuit for the target:
 3. **Layout + Route** — SABRE finds an initial logical→physical mapping and
    inserts SWAP gates so every two-qubit gate respects the coupling topology
 
+With no `physical_qubits` or `initial_layout`, the placement follows the
+chip's calibration when it publishes one (`coupler_metrics[].cz_fidelity`,
+`qubit_metrics[].measure_f0/measure_f1` in the backend config). QuSpect
+compiles the circuit on the whole chip and on the best-calibrated connected
+regions (of the circuit's size, and two qubits larger), and submits the
+program with the highest product of the fidelities of the two-qubit gates and
+readouts it uses. The whole-chip program wins ties, and a chip without
+calibration is placed on topology alone, as before.
+
 ```python
 # A nontrivial logical circuit that may require routing.
 qc = QuantumCircuit(name="calibrated_subset")
