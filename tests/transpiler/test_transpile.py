@@ -247,6 +247,9 @@ def test_level2_matches_manual_pipeline(
     monkeypatch.setattr(transpile_module, "_SWAP_LATE", False)
     # the LNS refinement of the routing is tested in test_route_lns
     monkeypatch.setattr(transpile_module, "_LNS_LEVEL", 4)
+    # the level-1 result as a candidate (it wins on the Toffoli circuit) is
+    # tested in test_level_floor
+    monkeypatch.setattr(transpile_module, "_LEVEL1_FLOOR_LEVEL", 4)
     target = _grid(3, 3)
     circ = _random_circuit(9, 40, 3) if kind == "random" else _ccx_circuit(9, 30, 3)
     dec = DecomposePass(target)

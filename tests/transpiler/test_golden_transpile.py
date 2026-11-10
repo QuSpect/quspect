@@ -272,11 +272,11 @@ GOLDEN: dict[int, dict[str, str]] = {
         "qaoa_6": "2c4dbc6bd622c750",
         "heisenberg_6": "f30961cec70169b7",
         "random_6": "7e30a14e849ea97a",
-        "adder_6": "455d181f17402794",
+        "adder_6": "ac91b581a90f21b1",
         "three_qubit_5": "26ab34a56acc17d9",
         "qft_9": "992d646acffba0fc",
         "random_10": "073b4655ba0ed17d",
-        "adder_10": "d9c10317dd2cd3f8",
+        "adder_10": "6b993715a361fef4",
         "three_qubit_8": "0eb12243364e4e36",
     },
     3: {

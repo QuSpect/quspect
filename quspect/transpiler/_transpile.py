@@ -44,7 +44,9 @@ mirror gates (mirror decisions are greedy and occasionally hurt, e.g. 2-D
 Trotter circuits on a line); all families are merged by estimated
 two-qubit count.  Because the level-2 routing is always among
 the fully evaluated candidates, level 3 never produces more two-qubit
-gates than level 2 for the same seed.
+gates than level 2 for the same seed.  Levels 2 and 3 also compile the
+circuit at level 1 and return that result when it has fewer two-qubit
+gates, so no level is worse than the one below it.
 
 From level 2 on the selected routings are refined by a large-neighbourhood
 search: windows of consecutive SWAPs are re-routed exactly (A* with an
@@ -274,6 +276,9 @@ _REPASS_MAX_2Q = 1500
 _REPASS_NO_SWAPS = True
 # 再编译至多这么多遍（某一遍没有变好就停）
 _REPASS_ROUNDS = 2
+# 从这一级起把第 1 级的结果也作为候选（见 transpile）：更高的级别不比第 1 级多用
+# 两比特门
+_LEVEL1_FLOOR_LEVEL = 2
 
 
 @dataclass
@@ -292,7 +297,9 @@ class TranspileStats:
         num_evaluated: Candidates run through the full post-routing
             pipeline.
         selected: Label of the selected candidate (``"exact"``,
-            ``"trial3/swap1"``, ...).
+            ``"trial3/swap1"``, ...; ``"level1/..."`` when a higher level
+            returns the level-1 result, see :func:`transpile`; that result
+            is then also the last entry of ``candidate_scores``).
         candidate_scores: ``(label, two_qubit_gates, two_qubit_depth,
             total_gates)`` of every fully evaluated candidate.
         layout_trials: Layout trials used by SABRE.
@@ -428,13 +435,22 @@ def transpile(
       estimated routing overhead is kept (both are fully optimized and
       compared when the estimates are within 10 %); ``stats.selected``
       is then ``"exact-routing"``.  The three-qubit and folding passes need
-      declared native gates.
+      declared native gates.  Never more two-qubit gates than level 1 for
+      the same ``seed`` and arguments (see below).
     - ``3``: level 2 with a candidate search over many SABRE routings
       (layout trials × routing seeds, plus commutation-aware routings of
       the CX-level circuit with a SWAP-fusion bonus, and block routings
       without mirror gates) and selection by the
       final ``(two-qubit gates, two-qubit depth, total gates)``.  Never
       worse than level 2 in two-qubit count for the same ``seed``.
+
+    Levels 2 and 3 route on whole two-qubit blocks with mirror gates and a
+    SWAP-fusion bonus, which spends more SWAPs than level 1 on merges that a
+    sparse circuit does not always give back.  They therefore compile the
+    circuit at level 1 as well (a small fraction of their own time) and
+    return that result when its objective (two-qubit gates, plus
+    ``depth_weight`` times the two-qubit depth) is strictly smaller;
+    ``stats.selected`` then starts with ``"level1/"``.
 
     From level 2 on the routing is refined by a large-neighbourhood search
     (:mod:`quspect.transpiler._route_lns`): windows of 1–4 consecutive
@@ -684,7 +700,40 @@ def transpile(
             # 最后对选中的结果做一次三比特块的数值实例化（见 _polish_blocks）
             res = _polish_blocks(res, circuit, target, elide_permutations)
             res.stats.seconds = time.perf_counter() - t0
+        if optimization_level >= _LEVEL1_FLOOR_LEVEL:
+            # 第 2 级起的路由（块节点、镜像门、SWAP 融合折扣）用更多的 SWAP 换合并，
+            # 稀疏线路上未必换得回来：第 1 级的结果也算一遍（快），目标值严格更小时用它
+            floor = _transpile(circuit, target, **{**kwargs, "optimization_level": 1})
+            assert floor is not None
+            if _result_key(floor, depth_weight)[0] < _result_key(res, depth_weight)[0]:
+                res = _as_selected_floor(floor, res.stats)
+            res.stats.seconds = time.perf_counter() - t0
         return res
+
+
+def _as_selected_floor(
+    floor: TranspileResult, above: TranspileStats
+) -> TranspileResult:
+    """The level-1 result ``floor`` as the result of the higher level whose
+    own run has the statistics ``above`` (see :func:`transpile`).
+
+    The statistics describe the returned circuit; the search of the higher
+    level stays visible: its candidates are kept and the level-1 result is
+    listed as one more.
+    """
+    st = floor.stats
+    label = f"level1/{st.selected}"
+    st.candidate_scores = [
+        *above.candidate_scores,
+        (label, st.two_qubit_gates, st.two_qubit_depth, st.total_gates),
+    ]
+    st.num_candidates = above.num_candidates + 1
+    st.num_evaluated = above.num_evaluated + 1
+    st.layout_trials, st.swap_trials = above.layout_trials, above.swap_trials
+    st.stage_seconds = {**above.stage_seconds, "level1": st.seconds}
+    st.optimization_level = above.optimization_level
+    st.selected = label
+    return floor
 
 
 def _moved(
