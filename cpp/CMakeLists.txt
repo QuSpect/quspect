@@ -292,6 +292,7 @@ set(TRANSPILER_SRCS
   src/transpiler/dilation_layout.cpp
   src/transpiler/layer_routing.cpp
   src/transpiler/one_qubit_gauge.cpp
+  src/transpiler/phase_poly.cpp
   src/transpiler/ring_routing.cpp
   src/transpiler/route_lns.cpp
   src/transpiler/sabre_routing.cpp

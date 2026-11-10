@@ -151,3 +151,154 @@ def test_level3_uses_the_pass_and_level2_does_not() -> None:
         u = _unitary(res.wire_circuit, n)
         assert u.shape == (16, 16)
     assert o3.stats.two_qubit_gates <= o2.stats.two_qubit_gates
+
+
+# ---------------------------------------------------------------------------
+# 21.2：大区域（束搜索）、自由线、原生整轮流程、两个起点
+
+
+def _replay(n: int, moves: list[tuple[int, int]]) -> tuple[list[int], set[int]]:
+    rows = [1 << i for i in range(n)]
+    seen = set(rows)
+    for c, t in moves:
+        rows[t] ^= rows[c]
+        seen.add(rows[t])
+    return rows, seen
+
+
+def test_beam_search_finds_short_networks() -> None:
+    from quspect._native_loader import load_core
+
+    core = load_core()
+    n = 12
+    full = [(a, b) for a in range(n) for b in range(n) if a != b]
+    # 全连接纠缠层（所有 i < j 的 cx(i, j)）的线性映射：n - 1 个 CX 即可
+    rows = [1 << i for i in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            rows[j] ^= rows[i]
+    ((moves, perm),) = core._cnot_phase_synth_batch([(n, full, rows, [], 65, 0, 64, 0)])
+    assert len(moves) == n - 1
+    assert _replay(n, moves)[0] == rows
+    assert perm == list(range(n))
+    # 全部两体奇偶（ZZ 层）、恒等映射：远少于逐项的 2·C(n, 2) 个 CX
+    n = 8
+    full = [(a, b) for a in range(n) for b in range(n) if a != b]
+    req = [(1 << i) | (1 << j) for i in range(n) for j in range(i + 1, n)]
+    ((moves, _),) = core._cnot_phase_synth_batch(
+        [(n, full, [1 << i for i in range(n)], req, 2 * len(req) - 1, 0, 64, 0)]
+    )
+    end, seen = _replay(n, moves)
+    assert end == [1 << i for i in range(n)]
+    assert set(req) <= seen
+    assert len(moves) <= len(req) + n
+    # 上限之内无解
+    line = [(0, 1), (1, 0), (1, 2), (2, 1)]
+    assert core._cnot_phase_synth_batch(
+        [(3, line, [1, 2, 4], [3, 6], 3, 0, 64, 0)]
+    ) == [None]
+
+
+def test_free_wires_absorb_a_permutation() -> None:
+    from quspect._native_loader import load_core
+
+    core = load_core()
+    full = [(0, 1), (1, 0)]
+    # SWAP：固定线要 3 个 CX；两根线都自由时 0 个（输出置换）
+    ((moves, perm),) = core._cnot_phase_synth_batch(
+        [(2, full, [2, 1], [], 3, 0, 0, 10_000)]
+    )
+    assert len(moves) == 3
+    assert perm == [0, 1]
+    for beam in (0, 64):
+        ((moves, perm),) = core._cnot_phase_synth_batch(
+            [(2, full, [2, 1], [], 3, 3, beam, 10_000)]
+        )
+        assert moves == []
+        assert perm == [1, 0]
+
+
+def _same_gates(a: QuantumCircuit, b: QuantumCircuit) -> bool:
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=True):
+        assert x.gate is not None and y.gate is not None
+        if x.gate.name != y.gate.name or x.qubits != y.qubits:
+            return False
+        for p, q in zip(x.gate.params, y.gate.params, strict=True):
+            if abs(math.remainder(float(p) - float(q), 2 * math.pi)) > 1e-12:
+                return False
+    return True
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_native_rounds_match_the_python_reference(seed: int) -> None:
+    rng = random.Random(100 + seed)
+    n = rng.choice([4, 5, 7, 9])
+    edges = [(i, i + 1) for i in range(n - 1)] + [(0, n - 1)]
+    qc = QuantumCircuit()
+    for _ in range(rng.randint(20, 60)):
+        r = rng.random()
+        if r < 0.5:
+            a, b = rng.choice(edges)
+            if rng.random() < 0.5:
+                a, b = b, a
+            qc.cx(a, b)
+        elif r < 0.8:
+            qc.rz(rng.choice([math.pi / 4, math.pi / 2, 0.37, -1.1]), rng.randrange(n))
+        elif r < 0.9:
+            qc.h(rng.randrange(n))
+        else:
+            qc.x(rng.randrange(n))
+    for q in range(n):
+        qc.rz(0.1 * (q + 1), q)
+    settings = ((4, 50_000), (5, 5_000), (16, 5_000), (16, 5_000, True))
+    circ = _cz_form(qc)
+    native = PhasePolynomialPass(settings=settings, native=True).run(circ)
+    python = PhasePolynomialPass(settings=settings, native=False).run(circ)
+    assert _same_gates(native, python)
+    assert _phase_distance(_unitary(native, n), _unitary(circ, n)) < 1e-9
+
+
+def test_large_region_on_a_line() -> None:
+    # 8 根线上的全连接 CX 层（路由后只剩线上的比特对）：束搜索给出 7 个 CX
+    n = 8
+    qc = QuantumCircuit()
+    for i in range(n):
+        for j in range(i + 1, n):
+            qc.cx(i, j)
+    full = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    out = _check(_cz_form(qc), n, settings=((16, 1_000),), edges=full)
+    assert _two_qubit(out) == n - 1
+
+
+def test_reverse_partition_is_valid() -> None:
+    qc = QuantumCircuit().ccx(0, 1, 2).cx(0, 1).ccx(1, 2, 3).cx(2, 3).cx(3, 0)
+    routed = transpile(
+        qc,
+        CompilationTarget.from_coupling_map(
+            4, [(0, 1), (1, 2), (2, 3)], native_gates={"cz", "h", "rz", "x"}
+        ),
+        optimization_level=2,
+        seed=0,
+    ).wire_circuit
+    for settings in (((4, 20_000, True),), ((16, 2_000, True), (5, 2_000))):
+        _check(routed, 4, settings=settings)
+
+
+def test_level3_second_start_resynthesizes_before_routing() -> None:
+    # RealAmplitudes 式的全连接纠缠层：路由前把它化为 CX 梯子，线上不需要 SWAP
+    n = 6
+    qc = QuantumCircuit()
+    for layer in range(2):
+        for q in range(n):
+            qc.ry(0.3 + 0.1 * q + layer, q)
+        for i in range(n):
+            for j in range(i + 1, n):
+                qc.cx(i, j)
+    target = CompilationTarget.from_coupling_map(
+        n, [(i, i + 1) for i in range(n - 1)], native_gates={"cz", "h", "rz", "x", "ry"}
+    )
+    o2 = transpile(qc, target, optimization_level=2, seed=0)
+    o3 = transpile(qc, target, optimization_level=3, seed=0)
+    assert o3.stats.two_qubit_gates <= 2 * (n - 1) < o2.stats.two_qubit_gates

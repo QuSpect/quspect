@@ -28,13 +28,29 @@ struct CnotPhaseResult {
     std::vector<std::pair<int, int>> moves;
     // 展开的状态数。
     std::int64_t expanded = 0;
+    // 结束时第 i 根线持有目标行 perm[i]（只有 free_mask 中的线可以与目标不同；没有自由线时为恒等）。
+    std::vector<int> perm;
 };
 
 // n：比特数（1..6）；edges：允许的有向 CX（控制, 目标）；target_rows[i]：结束时第 i 根线的奇偶
 // （n 位掩码，初始为 1 << i）；required：必须出现的奇偶掩码（重复与单位向量均可）；
 // max_cx：CX 数上限（含）；node_budget：最多展开的状态数。
+// free_mask：结束时可以互换的线（线路末端的线：输出相差一个置换由最终布局吸收）；这些线的终态只需
+// 作为多重集等于对应的目标行。启发式中“不同的行数”相应地改为“自由目标行中尚未出现的个数”，仍可采纳。
 CnotPhaseResult SynthesizeCnotPhase(int n, const std::vector<std::pair<int, int>>& edges,
                                     const std::vector<std::uint32_t>& target_rows,
-                                    const std::vector<std::uint32_t>& required, int max_cx, std::int64_t node_budget);
+                                    const std::vector<std::uint32_t>& required, int max_cx, std::int64_t node_budget,
+                                    std::uint32_t free_mask = 0);
+
+// 大区域（n ≤ 32）的启发式综合：逐层束搜索。状态 = (各线的奇偶行, 已出现的必需项)，一步 = 一条允许的 CX。
+// 同一层的状态按估计的剩余代价排序，保留 beam_width 个（去掉以前出现过的状态）：
+//     h = 2·缺的必需项数 + 2·Σ_{缺的 y} min_i |row_i ⊕ y| / P + 0.5·与目标不同的行数 + 0.5·Σ_i |E_i ⊕ e_i| / n，
+// 其中 E = R·T⁻¹ 是当前行矩阵 R 相对目标 T 的“剩余线性映射”（目标是单位阵；自由线的 E_i 只需是自由线的单位向量）。
+// 第一个满足全部条件的状态即返回（层数 = CX 数）；超过 max_cx 层则 found = false。不保证最优，
+// 调用方只在严格更省时采用。结果与线程无关（确定性的排序与去重）。
+CnotPhaseResult SynthesizeCnotPhaseBeam(int n, const std::vector<std::pair<int, int>>& edges,
+                                        const std::vector<std::uint32_t>& target_rows,
+                                        const std::vector<std::uint32_t>& required, int max_cx, int beam_width,
+                                        std::uint32_t free_mask = 0);
 
 }  // namespace quspect::native::transpiler

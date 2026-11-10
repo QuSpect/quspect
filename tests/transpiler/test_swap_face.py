@@ -95,8 +95,15 @@ def test_resynthesize_swap_face_blocks(native: frozenset[str], seed: int) -> Non
     assert all(i.gate is not None and i.gate.name in native for i in out)
 
 
-def test_routed_zz_chain_gets_single_rz_blocks() -> None:
+def test_routed_zz_chain_gets_single_rz_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A ZZ ring on a line: the SWAP-fused blocks need few single-qubit gates."""
+    import quspect.transpiler._transpile as transpile_module
+
+    # 第 3 级的第二个起点（路由前的 CNOT-相位重综合）把 ZZ 层改写成相位网络，
+    # 不再有 SWAP 面块；这里检查的是 SWAP 面模板本身，关掉它
+    monkeypatch.setattr(transpile_module, "_PHASE_POLY_PRE", False)
     qc = QuantumCircuit()
     n = 6
     for q in range(n):

@@ -23,27 +23,37 @@ local search over the three readings of each gate maximizes the number of
 monomial runs (the cost of a run depends only on the readings of its two
 neighbouring gates, so moves are evaluated in ``O(1)``).
 
-**Regions** are grown greedily in circuit order on at most ``max_qubits``
-wires: a wire leaves the region at its first non-monomial run, and a gate
-touching a wire that has left (or a two-qubit gate that would exceed the
-qubit cap) leaves the region as well, together with its wires, so the region
-is convex.  For each region with at least two two-qubit gates the native
-A* search (:func:`quspect._core_scalar._cnot_phase_synth_many`, see
-``cnot_phase_synth.hpp``) looks for a CX network with strictly fewer gates on
-the directed couplings among the region's wires; the heuristic ``max(missing
-parities, differing rows)`` is admissible, so a solution is optimal for the
-region.  Routed SWAPs are linear maps, so they merge with the surrounding
-CNOT-phase logic (e.g. a Toffoli next to a SWAP).
+**Regions** are grown greedily in circuit order (or from the end of the
+circuit) on at most ``max_qubits`` wires: a wire leaves the region at its
+first non-monomial run, and a gate touching a wire that has left (or a
+two-qubit gate that would exceed the qubit cap) leaves the region as well,
+together with its wires, so the region is convex.  For each region with at
+least two two-qubit gates a CX network with strictly fewer gates on the
+directed couplings among the region's wires is searched (see
+``cnot_phase_synth.hpp``): regions of at most 6 wires by A* with the
+admissible lower bound ``missing parities + differing rows whose target is
+not a missing parity`` (a solution is optimal for the region), regions of 5
+or more wires by a layer-wise beam search (heuristic; up to 16 wires: large
+linear maps such as all-to-all CX layers, ZZ layers, Toffoli arithmetic on
+dense couplings).  Routed SWAPs are linear maps, so they merge with the
+surrounding CNOT-phase logic (e.g. a Toffoli next to a SWAP).
+
+The rounds run in the native extension (``_phase_poly_run``, see
+``phase_poly.hpp``); the Python implementation below is the reference (same
+results) and the fallback without the extension.
 
 **Couplings.**  By default only qubit pairs that already carry a two-qubit
 gate in the circuit are used (they are couplings of the routed circuit);
 ``edges`` adds further allowed pairs.
 
-Every replacement is verified on its emitted gates: the ``2^k × 2^k``
-unitaries of the old and new region must agree up to global phase with
-``max|U − e^{iφ}V| ≤ 1e-9`` (phase-aligned, element-wise), otherwise the
-region is kept.  The output uses ``cz``, ``h``, ``rz`` and ``x``; merge the
-single-qubit runs afterwards (e.g. with :class:`OptimizePass`).
+Every replacement is verified on its emitted gates: up to 6 wires the
+``2^k × 2^k`` unitaries of the old and new region must agree up to global
+phase with ``max|U − e^{iφ}V| ≤ 1e-9`` (phase-aligned, element-wise);
+larger regions must have the same linear map, constants and phase
+polynomial recomputed from the emitted gates and, up to 14 wires, agree on
+two pseudo-random states; otherwise the region is kept.  The output uses
+``cz``, ``h``, ``rz`` and ``x``; merge the single-qubit runs afterwards (e.g.
+with :class:`OptimizePass`).
 """
 
 from __future__ import annotations
@@ -65,6 +75,15 @@ _VERIFY_ATOL = 1e-9
 _MONO_ATOL = 1e-10
 _ZERO_ANGLE = 1e-12
 _TWO_PI = 2.0 * math.pi
+# 区域线数：≤ _EXACT_WIRES 用 A*（最优）；≥ _BEAM_MIN_WIRES 用束搜索
+# （5–6 根线两者都做，取短的）；最多 _MAX_WIRES 根线
+_EXACT_WIRES = 6
+_BEAM_MIN_WIRES = 5
+_MAX_WIRES = 16
+# 验证：≤ _DENSE_WIRES 比较整个酉矩阵；更大的区域做符号验证，
+# ≤ _STATE_WIRES 时再做两个随机态的数值验证（与原生实现相同）
+_DENSE_WIRES = 6
+_STATE_WIRES = 14
 _SQRT_HALF = 0.7071067811865476  # 1/√2，正确舍入
 
 # 2×2 复矩阵 [[a, b], [c, d]] 记为 8 个实数
@@ -246,13 +265,20 @@ class PhasePolynomialPass:
     count; when nothing improves, :meth:`run` returns its input object.
 
     Args:
-        max_qubits: Largest number of wires in a region (2..6).
+        max_qubits: Largest number of wires in a region (2..16).  Regions of
+            at most 6 wires are solved exactly (A*), larger ones (and 5–6
+            wire regions the A* budget does not settle) by a beam search.
         node_budget: A* expansions per region before giving up.
         max_rounds: Maximum number of improve-and-reread rounds.
-        settings: Several ``(max_qubits, node_budget)`` partitions to try in
-            every round (the orientation is shared); the one with the fewest
-            two-qubit gates is kept.  Overrides ``max_qubits`` /
-            ``node_budget``.
+        settings: Several ``(max_qubits, node_budget[, reverse])``
+            partitions to try in every round (the orientation is shared);
+            the one with the fewest two-qubit gates is kept.  ``reverse``
+            grows the regions from the end of the circuit instead of the
+            front.  Overrides ``max_qubits`` / ``node_budget``.
+        beam_width: Beam width of the heuristic search for large regions.
+        native: Run the rounds in the native extension (same results as
+            the Python reference implementation, which is used when the
+            extension is missing or ``native=False``).
         edges: Extra allowed qubit pairs (unordered) besides those used by
             two-qubit gates of the circuit.
 
@@ -271,11 +297,18 @@ class PhasePolynomialPass:
         node_budget: int = 200_000,
         max_rounds: int = 3,
         edges: Iterable[tuple[int, int]] = (),
-        settings: Sequence[tuple[int, int]] = (),
+        settings: Sequence[tuple[int, ...]] = (),
+        beam_width: int = 64,
+        native: bool = True,
     ) -> None:
-        self.settings = tuple(settings) or ((max_qubits, node_budget),)
-        if not all(2 <= cap <= 6 for cap, _ in self.settings):
-            raise ValueError("max_qubits must be in 2..6.")
+        self.settings: tuple[tuple[int, int, bool], ...] = tuple(
+            (int(s[0]), int(s[1]), bool(s[2]) if len(s) > 2 else False)
+            for s in (tuple(settings) or ((max_qubits, node_budget),))
+        )
+        if not all(2 <= cap <= _MAX_WIRES for cap, _, _ in self.settings):
+            raise ValueError(f"max_qubits must be in 2..{_MAX_WIRES}.")
+        self.beam_width = beam_width
+        self.native = native
         self.max_rounds = max_rounds
         self.extra_edges: set[tuple[int, int]] = {
             (min(a, b), max(a, b)) for a, b in edges
@@ -296,6 +329,10 @@ class PhasePolynomialPass:
             The rewritten circuit, equal to ``circuit`` up to global phase.
         """
         self.stats = PhasePolynomialStats()
+        if self.native:
+            out = self._run_native(circuit)
+            if out is not None:
+                return out
         current = circuit
         for _ in range(self.max_rounds):
             new = self._round(current)
@@ -304,6 +341,94 @@ class PhasePolynomialPass:
                 break
             current = new
         return current
+
+    # ------------------------------------------------------------------
+    def _run_native(self, circuit: QuantumCircuit) -> QuantumCircuit | None:
+        """All rounds in ``_phase_poly_run``; ``None`` if it is unavailable."""
+        from quspect._native_loader import load_core
+
+        core = load_core()
+        fn = None if core is None else getattr(core, "_phase_poly_run", None)
+        if fn is None:  # pragma: no cover - extension missing
+            return None
+        kinds: list[int] = []
+        qa: list[int] = []
+        qb: list[int] = []
+        hint: list[int] = []
+        index: list[int] = []
+        mats: list[_M] = []
+        opaque: list[int] = []
+        singles: list[CircuitInstruction] = []
+        n_two = 0
+        for ins in circuit:
+            gate = ins.gate
+            if not ins.is_gate or gate is None:
+                return circuit
+            qs = ins.qubits
+            if len(qs) == 1:
+                m = _gate_m(gate)
+                kinds.append(0)
+                qa.append(qs[0])
+                qb.append(-1)
+                hint.append(-1)
+                index.append(len(singles))
+                singles.append(ins)
+                mats.append(_I2 if m is None else m)
+                opaque.append(1 if m is None else 0)
+            elif len(qs) == 2 and gate.name in ("cz", "cx"):
+                a, b = qs
+                n_two += 1
+                if gate.name == "cx":
+                    kinds += [1, 2, 1]
+                    qa += [b, a, b]
+                    qb += [-1, b, -1]
+                    hint += [-1, 0, -1]
+                    index += [-1, -1, -1]
+                else:
+                    kinds.append(2)
+                    qa.append(a)
+                    qb.append(b)
+                    hint.append(-1)
+                    index.append(-1)
+            else:
+                return circuit
+        if n_two < 2:
+            self.stats.rounds = 1
+            return circuit
+        res, st = fn(
+            kinds,
+            qa,
+            qb,
+            hint,
+            index,
+            mats,
+            opaque,
+            sorted(self.extra_edges),
+            list(self.settings),
+            self.beam_width,
+            self.max_rounds,
+        )
+        self.stats.regions, self.stats.replaced, self.stats.saved, self.stats.rounds = (
+            st
+        )
+        if res is None:
+            return circuit
+        from quspect.gates.parameterized import RZ
+        from quspect.gates.standard import CZ, X
+
+        out: list[CircuitInstruction] = []
+        for k, a, b, i, ang in zip(*res, strict=True):
+            if k == 0:
+                out.append(singles[i])
+            elif k == 1:
+                out.append(_h(a))
+            elif k == 2:
+                out.append(_gate_ins(CZ, (a, b)))
+            elif k == 3:
+                out.append(_gate_ins(RZ.with_params(ang), (a,)))
+            else:
+                out.append(_gate_ins(X, (a,)))
+        return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
 
     # ------------------------------------------------------------------
     def _round(self, circuit: QuantumCircuit) -> QuantumCircuit | None:
@@ -491,8 +616,8 @@ class PhasePolynomialPass:
 
         # 5. 区域与综合：每种划分各做一次，取两比特门最少的
         best: tuple[int, list[CircuitInstruction], int, int] | None = None
-        for cap, budget in self.settings:
-            result = self._resynthesize(oriented, pairs, cap, budget)
+        for cap, budget, reverse in self.settings:
+            result = self._resynthesize(oriented, pairs, cap, budget, reverse)
             if result is not None and (best is None or result[0] < best[0]):
                 best = result
         if best is None:
@@ -508,11 +633,12 @@ class PhasePolynomialPass:
         pairs: set[tuple[int, int]],
         cap: int,
         budget: int,
+        reverse: bool = False,
     ) -> tuple[int, list[CircuitInstruction], int, int] | None:
         """(two-qubit count, gates, regions replaced, saved) or ``None``."""
-        regions = _split_regions(oriented, cap)
-        problems = []
-        meta = []
+        regions = _split_regions(oriented, cap, reverse=reverse)
+        problems: list[tuple[Any, ...]] = []
+        meta: list[tuple[int, dict[int, float], list[int], int]] = []
         for ridx, (wires, reg) in enumerate(regions):
             if reg is None:
                 continue
@@ -530,25 +656,37 @@ class PhasePolynomialPass:
                 if a in local and b in local
             ]
             edges = edges + [(b, a) for a, b in edges]
-            problems.append((len(wires), edges, rows, sorted(terms), n2 - 1))
-            meta.append((ridx, terms, consts))
+            k = len(wires)
+            base = (k, edges, rows, sorted(terms), n2 - 1, 0)
+            # ≤ 6 根线：A*（最优）；5 根线起再加一次束搜索（A* 预算用完时的
+            # 后备）；更大：只用束搜索
+            if k <= _EXACT_WIRES:
+                problems.append((*base, 0, budget))
+                meta.append((ridx, terms, consts, n2))
+            if k >= _BEAM_MIN_WIRES:
+                problems.append((*base, self.beam_width, 0))
+                meta.append((ridx, terms, consts, n2))
         if not problems:
             return None
-        solutions = _solve(problems, budget)
+        solutions = _solve(problems)
+        best_sol: dict[int, list[tuple[int, int]]] = {}
+        for (ridx, _, _, n2), sol in zip(meta, solutions, strict=True):
+            if sol is None or len(sol[0]) >= n2:
+                continue
+            if ridx not in best_sol or len(sol[0]) < len(best_sol[ridx]):
+                best_sol[ridx] = list(sol[0])
+        info_of = {m[0]: m for m in meta}
         replaced: dict[int, list[tuple[Any, ...]]] = {}
         saved = 0
-        for (ridx, terms, consts), sol, prob in zip(
-            meta, solutions, problems, strict=True
-        ):
-            if sol is None:
-                continue
+        for ridx, moves in sorted(best_sol.items()):
+            _, terms, consts, n2 = info_of[ridx]
             wires, reg = regions[ridx]
             assert reg is not None
-            new = _emit(wires, sol, terms, consts)
+            new = _emit(wires, moves, terms, consts)
             if not _verify(wires, reg, new):
                 continue
             replaced[ridx] = new
-            saved += prob[4] + 1 - len(sol)
+            saved += n2 - len(moves)
         if not replaced:
             return None
 
@@ -586,9 +724,19 @@ class PhasePolynomialPass:
 
 
 def _split_regions(
-    oriented: list[tuple[Any, ...]], cap: int
+    oriented: list[tuple[Any, ...]], cap: int, *, reverse: bool = False
 ) -> list[tuple[Any, list[tuple[Any, ...]] | None]]:
-    """Split into ``(item, None)`` and ``(wires, items)`` (regions), in order."""
+    """Split into ``(item, None)`` and ``(wires, items)`` (regions), in order.
+
+    ``reverse`` grows the regions from the end of the circuit (the regions
+    are convex either way, so reading the result backwards gives a valid
+    split in circuit order).
+    """
+    if reverse:
+        back = _split_regions(oriented[::-1], cap)
+        return [
+            (wires, None if reg is None else reg[::-1]) for wires, reg in back[::-1]
+        ]
     out: list[tuple[Any, list[tuple[Any, ...]] | None]] = []
     rest = oriented
     while rest:
@@ -671,6 +819,13 @@ def _phase_polynomial(
         terms[mask] = terms.get(mask, 0.0) + (-angle if const else angle)
 
     for it in reg:
+        if it[0] == "rz":
+            i = local[it[1]]
+            add(rows[i], consts[i], it[2])
+            continue
+        if it[0] == "x":
+            consts[local[it[1]]] ^= 1
+            continue
         if it[0] == _U:
             i = local[it[1]]
             m = it[3]
@@ -707,20 +862,25 @@ _SOLVE_CACHE: dict[tuple[Any, ...], Any] = {}
 _SOLVE_CACHE_MAX = 200_000
 
 
-def _solve(problems: list[tuple[Any, ...]], budget: int) -> list[Any]:
+def _solve(problems: list[tuple[Any, ...]]) -> list[Any]:
+    """Solve ``(n, edges, rows, terms, max_cx, free_mask, beam, budget)`` problems.
+
+    Returns ``(moves, perm)`` or ``None`` per problem (see
+    ``_cnot_phase_synth_batch``).
+    """
     from quspect._native_loader import load_core
 
     keys = [
-        (budget, n, tuple(edges), tuple(rows), tuple(terms), max_cx)
-        for n, edges, rows, terms, max_cx in problems
+        (n, tuple(edges), tuple(rows), tuple(terms), max_cx, free, beam, budget)
+        for n, edges, rows, terms, max_cx, free, beam, budget in problems
     ]
     todo = [i for i, k in enumerate(keys) if k not in _SOLVE_CACHE]
     if todo:
         core = load_core()
-        fn = None if core is None else getattr(core, "_cnot_phase_synth_many", None)
+        fn = None if core is None else getattr(core, "_cnot_phase_synth_batch", None)
         if fn is None:  # pragma: no cover - extension missing
             return [_SOLVE_CACHE.get(k) for k in keys]
-        found: list[Any] = fn([problems[i] for i in todo], budget)
+        found: list[Any] = fn([problems[i] for i in todo])
         if len(_SOLVE_CACHE) + len(todo) > _SOLVE_CACHE_MAX:
             _SOLVE_CACHE.clear()
         for i, sol in zip(todo, found, strict=True):
@@ -802,13 +962,53 @@ def _unitary(wires: Sequence[int], items: Iterable[tuple[Any, ...]]) -> np.ndarr
 def _verify(
     wires: Sequence[int], old: Sequence[tuple[Any, ...]], new: Sequence[tuple[Any, ...]]
 ) -> bool:
-    """Phase-aligned element-wise comparison of the two region unitaries.
+    """Check that the new region equals the old one up to global phase.
 
+    Up to ``_DENSE_WIRES`` wires the two ``2^k × 2^k`` unitaries are compared
+    (phase-aligned, element-wise).  Larger regions are checked symbolically
+    (the phase polynomial, linear map and constants recomputed from the
+    emitted gates must equal those of the old region) and, up to
+    ``_STATE_WIRES`` wires, also numerically on two pseudo-random states.
     Uses only exactly rounded arithmetic (squared magnitudes, ``math.sqrt``),
     no platform math functions.
     """
+    k = len(wires)
+    if k > _DENSE_WIRES:
+        if not _same_phase_polynomial(wires, old, new):
+            return False
+        if k > _STATE_WIRES:
+            return True
+        rng = np.random.default_rng(20261107)
+        start = rng.standard_normal((1 << k, 2)) + 1j * rng.standard_normal((1 << k, 2))
+        a = start.copy()
+        b = start
+        local = {q: i for i, q in enumerate(wires)}
+        for it in old:
+            _apply(a, local, it)
+        for it in new:
+            _apply(b, local, it)
+        return _phase_aligned_close(a, b)
     a = _unitary(wires, old)
     b = _unitary(wires, new)
+    return _phase_aligned_close(a, b)
+
+
+def _same_phase_polynomial(
+    wires: Sequence[int], old: Sequence[tuple[Any, ...]], new: Sequence[tuple[Any, ...]]
+) -> bool:
+    """Symbolic check: equal linear map, constants and phase polynomial (mod 2π)."""
+    a = _phase_polynomial(wires, old)
+    b = _phase_polynomial(wires, new)
+    if a is None or b is None or a[0] != b[0] or a[1] != b[1]:
+        return False
+    ta, tb = a[2], b[2]
+    if ta.keys() != tb.keys():
+        return False
+    return all(abs(math.remainder(ta[m] - tb[m], _TWO_PI)) <= _VERIFY_ATOL for m in ta)
+
+
+def _phase_aligned_close(a: np.ndarray, b: np.ndarray) -> bool:
+    """``max|a − e^{iφ} b|² ≤ atol²`` with ``φ`` from the largest entry of ``a``."""
     mag = a.real * a.real + a.imag * a.imag
     k = int(np.argmax(mag))
     i, j = divmod(k, a.shape[1])
