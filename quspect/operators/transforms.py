@@ -1,7 +1,8 @@
 """Fermion-to-qubit transformations.
 
 This module provides transformations that map fermionic operators to
-qubit operators: the Jordan-Wigner and Bravyi-Kitaev mappings.
+qubit operators: the Jordan-Wigner and Bravyi-Kitaev mappings, and the
+reverse Jordan-Wigner mapping from qubit operators back to fermions.
 """
 
 from __future__ import annotations
@@ -518,19 +519,136 @@ def _bk_ladder_operator(
     return QubitOperator({_pauli_key(x_parts): 0.5, _pauli_key(y_parts): y_coeff})
 
 
+# ---------------------------------------------------------------------------
+# Reverse Jordan-Wigner transformation
+# ---------------------------------------------------------------------------
+
+#: A fermionic term ``((mode, action), ...)``.
+_FermionTerm = tuple[tuple[int, int], ...]
+
+#: Qubit-``k`` letter and its replacement when an odd number of X/Y letters
+#: sits on higher qubits (their parity strings put one more Z on qubit
+#: ``k``): ``letter = factor * (replacement · Z)``.
+_RJW_UNDER_ODD_STRING: dict[str, tuple[str, complex]] = {
+    "I": ("Z", 1),
+    "X": ("Y", -1j),
+    "Y": ("X", 1j),
+    "Z": ("I", 1),
+}
+
+
+def _rjw_local_factor(mode: int, letter: str) -> list[tuple[_FermionTerm, complex]]:
+    """Fermionic operator on one mode whose Jordan-Wigner image is *letter*.
+
+    ``X`` and ``Y`` stand for the letter times the parity string
+    ``Z_{mode-1} ... Z_0``::
+
+        X_k Z_{<k} = a†_k + a_k
+        Y_k Z_{<k} = i a†_k - i a_k
+        Z_k        = 1 - 2 a†_k a_k
+    """
+    if letter == "X":
+        return [(((mode, 1),), 1), (((mode, 0),), 1)]
+    if letter == "Y":
+        return [(((mode, 1),), 1j), (((mode, 0),), -1j)]
+    return [((), 1), (((mode, 1), (mode, 0)), -2)]
+
+
+def _rjw_pauli_term(term: TermKey) -> dict[_FermionTerm, complex]:
+    """Reverse Jordan-Wigner image of one Pauli string with coefficient 1.
+
+    The string is written as ``phase * JW(f_0 f_1 ... f_n)`` with one
+    fermionic factor per mode, in ascending mode order.  An X or Y on qubit
+    ``j`` becomes an odd factor ``f_j`` whose image carries the parity
+    string ``Z_{<j}``; the letter needed on a lower qubit ``k`` is therefore
+    the given letter times one Z per odd factor above it
+    (:data:`_RJW_UNDER_ODD_STRING`).
+    """
+    if not term:
+        return {(): 1 + 0j}
+    letters = dict(term)
+    phase: complex = 1 + 0j
+    local: dict[int, str] = {}
+    odd_above = False
+    for qubit in range(term[-1][0], -1, -1):
+        letter = letters.get(qubit, "I")
+        needed = letter
+        if odd_above:
+            needed, factor = _RJW_UNDER_ODD_STRING[letter]
+            phase *= factor
+        if needed != "I":
+            local[qubit] = needed
+        if letter in ("X", "Y"):
+            odd_above = not odd_above
+
+    products: dict[_FermionTerm, complex] = {(): phase}
+    for mode in sorted(local):
+        factors = _rjw_local_factor(mode, local[mode])
+        products = {
+            ops + more: coeff * factor
+            for ops, coeff in products.items()
+            for more, factor in factors
+        }
+    return products
+
+
 def reverse_jordan_wigner(operator: QubitOperator) -> FermionOperator:
-    """Reverse the Jordan-Wigner transformation. (Not yet implemented.)
+    """Reverse the Jordan-Wigner transformation.
+
+    Maps a qubit operator back to the fermionic operator whose
+    :func:`jordan_wigner` image it is (qubit ``k`` is mode ``k``), using::
+
+        Z_k                     → 1 - 2 a†_k a_k
+        X_k Z_{k-1} ... Z_0     → a†_k + a_k
+        Y_k Z_{k-1} ... Z_0     → i a†_k - i a_k
+
+    so that ``jordan_wigner(reverse_jordan_wigner(op))`` equals ``op``, and
+    ``reverse_jordan_wigner(jordan_wigner(f))`` is the same operator as
+    ``f``.  A Pauli string acting on qubits up to ``k`` gives at most
+    ``2 ** (k + 1)`` fermionic terms.
+
+    The result is not normal-ordered: every term is a product in ascending
+    mode order with ``a†_k`` before ``a_k`` on a mode.  Call
+    :meth:`FermionOperator.normal_order` for the normal-ordered form and
+    :meth:`FermionOperator.compress` to drop round-off residues of terms
+    that cancel.
 
     Args:
-        operator: A QubitOperator to reverse-transform.
+        operator: A :class:`QubitOperator` to transform.
 
     Returns:
-        The equivalent FermionOperator.
+        The equivalent :class:`FermionOperator`.
 
     Raises:
-        NotImplementedError: Always — this transform is planned for a
-            future release.
+        ValueError: If any coefficient of the operator is symbolic (bind
+            parameters first).
+
+    Example:
+        >>> from quspect.operators import QubitOperator
+        >>> from quspect.operators.transforms import reverse_jordan_wigner
+        >>> reverse_jordan_wigner(QubitOperator({((0, "Z"),): 1.0}))
+        FermionOperator(I + -2 a†0 a0)
+        >>> hop = QubitOperator({((0, "X"), (1, "X")): 0.5, ((0, "Y"), (1, "Y")): 0.5})
+        >>> reverse_jordan_wigner(hop).normal_order()
+        FermionOperator(a†0 a1 + a†1 a0)
     """
-    raise NotImplementedError(
-        "Reverse Jordan-Wigner transformation is not yet implemented."
-    )
+    from quspect.circuit.parameter import Parameter, ParameterExpression
+
+    totals: dict[_FermionTerm, CoeffValue] = {}
+    for term, coeff in operator:
+        if isinstance(coeff, (Parameter, ParameterExpression)):
+            raise ValueError(
+                f"Coefficient {coeff} is symbolic.  Please call "
+                f"bind_parameters() on the QubitOperator before applying "
+                f"the reverse Jordan-Wigner transform."
+            )
+        for ops, factor in _rjw_pauli_term(term).items():
+            # Factors are products of ±1, ±i and 2: exactly real or imaginary.
+            value: complex = coeff * (factor.real if factor.imag == 0 else factor)
+            previous = totals.get(ops)
+            totals[ops] = (
+                value
+                if previous is None
+                else QubitOperator._add_coeffs(previous, value)
+            )
+    return FermionOperator(totals)

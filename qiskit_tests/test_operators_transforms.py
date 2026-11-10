@@ -398,7 +398,16 @@ def test_symbolic_coefficients_rejected(
     assert transform(bound) == QubitOperator({(): 1.0, ((0, "Z"),): -1.0})
 
 
-def test_reverse_jordan_wigner_not_implemented() -> None:
-    """reverse_jordan_wigner is a documented placeholder."""
-    with pytest.raises(NotImplementedError):
-        reverse_jordan_wigner(QubitOperator({((0, "Z"),): 1.0}))
+def test_reverse_jordan_wigner_inverts_jordan_wigner() -> None:
+    """jordan_wigner(reverse_jordan_wigner(q)) is q, as qiskit matrices."""
+    rng = np.random.default_rng(1622)
+    for n in range(1, 6):
+        for _ in range(20):
+            data: dict[tuple[tuple[int, str], ...], complex] = {}
+            for _ in range(int(rng.integers(1, 8))):
+                letters = rng.choice(list("IXYZ"), size=n)
+                term = tuple((q, str(p)) for q, p in enumerate(letters) if p != "I")
+                data[term] = data.get(term, 0) + complex(rng.normal(), rng.normal())
+            qop = QubitOperator(data)  # type: ignore[arg-type]
+            back = jordan_wigner(reverse_jordan_wigner(qop))
+            np.testing.assert_allclose(_qmat(back, n), _qmat(qop, n), atol=1e-12)

@@ -211,7 +211,9 @@ class QubitOperator:
     on specific qubits are stripped on construction.
 
     ``QubitOperator`` is immutable — all arithmetic operations return
-    new instances.
+    new instances.  ``+`` and ``-`` add operators, ``*`` and ``/`` scale by
+    a number or parameter, and ``*`` between two operators is the operator
+    product (Pauli algebra, e.g. ``X0 * Z0 == -1j * Y0``).
 
     Attributes:
         terms: A dict mapping sorted term tuples to coefficient values.
@@ -223,10 +225,13 @@ class QubitOperator:
         ...     ((2, 'Y'),): 1.0,
         ... })
         >>> H
-        QubitOperator(0.5 X0 Z1 + 1.0 Y2)
+        QubitOperator(0.5 X0 Z1 + Y2)
 
-        >>> QubitOperator.from_pauli_string('XZ', coeff=0.5)
+        >>> QubitOperator.from_pauli_string('XZ', coefficient=0.5)
         QubitOperator(0.5 X0 Z1)
+
+        >>> H.qubit_count()  # a method, like FermionOperator.mode_count()
+        3
     """
 
     __slots__ = ("_terms",)
@@ -409,7 +414,7 @@ class QubitOperator:
 
         Example:
             >>> QubitOperator.identity()
-            QubitOperator(1.0 I)
+            QubitOperator(I)
             >>> QubitOperator.identity(0.5)
             QubitOperator(0.5 I)
         """
@@ -442,7 +447,7 @@ class QubitOperator:
             >>> QubitOperator.from_pauli_string('XZ', coefficient=0.5)
             QubitOperator(0.5 X0 Z1)
             >>> QubitOperator.from_pauli_string('XY', qubits=(2, 3))
-            QubitOperator(1.0 X2 Y3)
+            QubitOperator(X2 Y3)
         """
         valid = {"I", "X", "Y", "Z"}
         pauli = pauli.upper()
@@ -496,6 +501,8 @@ class QubitOperator:
 
     def qubit_count(self) -> int:
         """Return the maximum qubit index + 1, or 0 if empty.
+
+        This is a method, not a property: call it as ``op.qubit_count()``.
 
         Example:
             >>> op = QubitOperator({((0, 'X'), (2, 'Z')): 1.0})
@@ -589,20 +596,61 @@ class QubitOperator:
             return NotImplemented
         return other.__sub__(self)
 
-    def __mul__(self, scalar: CoeffValue) -> QubitOperator:
-        """Multiply each coefficient by a scalar.
+    def _operator_product(self, other: QubitOperator) -> QubitOperator:
+        """Return the operator product ``self * other`` (``self`` on the left).
+
+        Every pair of terms is multiplied with the Pauli algebra of
+        :func:`_reduce_term`, the routine that also reduces repeated qubits
+        in the constructor, and equal Pauli strings are merged.
+        """
+        merged: dict[TermKey, CoeffValue] = {}
+        for term_a, coeff_a in self._terms.items():
+            for term_b, coeff_b in other._terms.items():
+                term, phase = _reduce_term(term_a + term_b)
+                coeff = self._multiply_coeffs(coeff_a, coeff_b)
+                if phase == -1:
+                    coeff = self._multiply_coeffs(coeff, -1)
+                elif phase != 1:
+                    coeff = self._multiply_coeffs(coeff, phase)
+                if term in merged:
+                    merged[term] = self._add_coeffs(merged[term], coeff)
+                else:
+                    merged[term] = coeff
+        return QubitOperator(merged)
+
+    def __mul__(self, scalar: QubitOperator | CoeffValue) -> QubitOperator:
+        """Multiply by a scalar, or by another operator.
+
+        With a number, ``Parameter`` or affine expression every coefficient
+        is scaled.  With a ``QubitOperator`` the result is the operator
+        product ``self * other`` (``self`` acts last on a state, as in the
+        matrix product): every pair of Pauli strings is multiplied with the
+        Pauli algebra and equal strings are merged.  Terms that cancel
+        exactly are dropped; use :meth:`compress` for round-off residues.
 
         Args:
-            scalar: A number, ``Parameter``, or affine expression.
+            scalar: A number, ``Parameter``, affine expression, or another
+                ``QubitOperator``.
 
         Returns:
-            A new ``QubitOperator`` with coefficients scaled.
+            A new ``QubitOperator``.
+
+        Raises:
+            ValueError: In an operator product, if two symbolic coefficients
+                meet (the result would not be affine), or a symbolic
+                coefficient would get an imaginary factor.
 
         Example:
             >>> op = QubitOperator({((0, 'X'),): 1.0})
             >>> 2.0 * op
-            QubitOperator(2.0 X0)
+            QubitOperator(2 X0)
+            >>> op * QubitOperator({((0, 'Z'),): 1.0})
+            QubitOperator(-1.0j Y0)
+            >>> op * QubitOperator({((1, 'Z'),): 0.5})
+            QubitOperator(0.5 X0 Z1)
         """
+        if isinstance(scalar, QubitOperator):
+            return self._operator_product(scalar)
         if not isinstance(
             scalar, (int, float, complex, Parameter, ParameterExpression)
         ):
@@ -668,7 +716,7 @@ class QubitOperator:
         """In-place subtraction (returns a new instance)."""
         return self.__sub__(other)
 
-    def __imul__(self, scalar: CoeffValue) -> QubitOperator:
+    def __imul__(self, scalar: QubitOperator | CoeffValue) -> QubitOperator:
         """In-place multiplication (returns a new instance)."""
         return self.__mul__(scalar)
 
@@ -691,7 +739,7 @@ class QubitOperator:
             >>> a = QubitOperator({((0, 'X'),): 1.0})
             >>> b = QubitOperator({((0, 'X'),): 2.0})
             >>> a + b
-            QubitOperator(3.0 X0)
+            QubitOperator(3 X0)
         """
         # Re-constructing through __init__ does the merge
         return QubitOperator(dict(self._terms))
@@ -714,7 +762,7 @@ class QubitOperator:
         Example:
             >>> op = QubitOperator({((0, 'X'),): 1e-15, ((1, 'Z'),): 1.0})
             >>> op.compress()
-            QubitOperator(1.0 Z1)
+            QubitOperator(Z1)
         """
         new_terms: dict[TermKey, CoeffValue] = {}
         for term, coeff in self._terms.items():
@@ -822,7 +870,7 @@ class QubitOperator:
 
         Example:
             >>> QubitOperator({((0, 'X'),): 1.0, ((1, 'Z'),): -0.5})
-            QubitOperator(1.0 X0 + -0.5 Z1)
+            QubitOperator(X0 + -0.5 Z1)
         """
         if self.is_zero:
             return "QubitOperator(0)"

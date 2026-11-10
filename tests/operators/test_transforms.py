@@ -255,11 +255,6 @@ class TestFutureTransforms:
         assert dict(qop)[()] == pytest.approx(0.5)
         assert dict(qop)[((0, "Z"),)] == pytest.approx(-0.5)
 
-    def test_reverse_jw_not_implemented(self) -> None:
-        qop = QubitOperator({((0, "X"),): 1.0})
-        with pytest.raises(NotImplementedError):
-            reverse_jordan_wigner(qop)
-
 
 # ---------------------------------------------------------------------------
 # Bravyi-Kitaev (Seeley-Richard-Love) — numpy-only regression tests
@@ -366,3 +361,141 @@ class TestBravyiKitaev:
     def test_column_sets_match_fenwick_tree(self) -> None:
         assert _build_bk_columns(4) == [{0, 1, 3}, {1, 3}, {2, 3}, {3}]
         assert _build_bk_columns(3) == [{0, 1}, {1}, {2}]
+
+
+# ---------------------------------------------------------------------------
+# Reverse Jordan-Wigner
+# ---------------------------------------------------------------------------
+
+
+def _fock(op: FermionOperator, n: int) -> np.ndarray:
+    """Dense matrix of a fermionic operator on ``n`` modes.
+
+    Built from the textbook ladder matrices (mode 0 is the rightmost tensor
+    factor, ``a_j = I ⊗ … ⊗ σ⁻ ⊗ Z ⊗ … ⊗ Z``), independently of the transforms.
+    """
+    lower = np.array([[0, 1], [0, 0]], dtype=complex)
+    z = np.diag([1.0, -1.0]).astype(complex)
+    annihilate = []
+    for mode in range(n):
+        mat = np.ones((1, 1), dtype=complex)
+        for qubit in range(n - 1, -1, -1):
+            factor = lower if qubit == mode else z if qubit < mode else np.eye(2)
+            mat = np.kron(mat, factor)
+        annihilate.append(mat)
+    total = np.zeros((2**n, 2**n), dtype=complex)
+    for term, coeff in op:
+        mat = np.eye(2**n, dtype=complex)
+        for mode, action in term:
+            ladder = annihilate[mode]
+            mat = mat @ (ladder.conj().T if action == 1 else ladder)
+        total += complex(coeff) * mat  # type: ignore[arg-type]
+    return total
+
+
+def _random_fermion_operator(rng: np.random.Generator, modes: int) -> FermionOperator:
+    data: dict[tuple[tuple[int, int], ...], complex] = {}
+    for _ in range(int(rng.integers(1, 7))):
+        length = int(rng.integers(0, 5))
+        term = tuple(
+            (int(rng.integers(0, modes)), int(rng.integers(0, 2)))
+            for _ in range(length)
+        )
+        coeff = complex(rng.normal(), rng.normal() if rng.random() < 0.5 else 0.0)
+        data[term] = data.get(term, 0) + coeff
+    return FermionOperator(data)  # type: ignore[arg-type]
+
+
+def _random_qubit_operator(rng: np.random.Generator, n: int) -> QubitOperator:
+    data: dict[tuple[tuple[int, str], ...], complex] = {}
+    for _ in range(int(rng.integers(1, 9))):
+        letters = rng.choice(list("IXYZ"), size=n)
+        term = tuple((q, str(p)) for q, p in enumerate(letters) if p != "I")
+        coeff = complex(rng.normal(), rng.normal() if rng.random() < 0.5 else 0.0)
+        data[term] = data.get(term, 0) + coeff
+    return QubitOperator(data)  # type: ignore[arg-type]
+
+
+class TestReverseJordanWigner:
+    """``reverse_jordan_wigner`` inverts ``jordan_wigner``."""
+
+    def test_single_qubit_paulis(self) -> None:
+        assert reverse_jordan_wigner(QubitOperator({((0, "Z"),): 1.0})) == (
+            FermionOperator({(): 1.0, ((0, 1), (0, 0)): -2.0})
+        )
+        assert reverse_jordan_wigner(QubitOperator({((0, "X"),): 1.0})) == (
+            FermionOperator({((0, 1),): 1.0, ((0, 0),): 1.0})
+        )
+        assert reverse_jordan_wigner(QubitOperator({((0, "Y"),): 1.0})) == (
+            FermionOperator({((0, 1),): 1j, ((0, 0),): -1j})
+        )
+
+    def test_zero_and_identity(self) -> None:
+        assert reverse_jordan_wigner(QubitOperator.zero()).is_zero
+        assert reverse_jordan_wigner(QubitOperator.identity(0.5)) == (
+            FermionOperator.identity(0.5)
+        )
+
+    def test_real_operator_keeps_real_coefficients(self) -> None:
+        fop = reverse_jordan_wigner(QubitOperator({((0, "X"), (1, "X")): 0.5}))
+        assert fop.terms
+        assert all(isinstance(coeff, float) for coeff in fop.terms.values())
+
+    def test_number_and_hopping_terms_come_back(self) -> None:
+        number = FermionOperator.number_operator(2, coefficient=1.5)
+        assert reverse_jordan_wigner(jordan_wigner(number)) == number
+        hop = FermionOperator.hopping_term(0, 2, coefficient=0.75)
+        back = reverse_jordan_wigner(jordan_wigner(hop)).normal_order().compress()
+        assert back == hop
+
+    @pytest.mark.parametrize("modes", [1, 2, 3, 4, 5])
+    def test_round_trip_from_random_fermion_operators(self, modes: int) -> None:
+        rng = np.random.default_rng(160 + modes)
+        for _ in range(40):
+            fop = _random_fermion_operator(rng, modes)
+            qop = jordan_wigner(fop)
+            back = reverse_jordan_wigner(qop)
+            # Same operator on Fock space, and the same Pauli sum again.
+            np.testing.assert_allclose(
+                _fock(back, modes), _fock(fop, modes), atol=1e-12
+            )
+            np.testing.assert_allclose(
+                _dense(jordan_wigner(back), modes), _dense(qop, modes), atol=1e-12
+            )
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    def test_round_trip_from_random_qubit_operators(self, n: int) -> None:
+        rng = np.random.default_rng(1600 + n)
+        for _ in range(40):
+            qop = _random_qubit_operator(rng, n)
+            fop = reverse_jordan_wigner(qop)
+            np.testing.assert_allclose(_fock(fop, n), _dense(qop, n), atol=1e-12)
+            np.testing.assert_allclose(
+                _dense(jordan_wigner(fop), n), _dense(qop, n), atol=1e-12
+            )
+
+    def test_every_pauli_string_on_three_qubits(self) -> None:
+        for index in range(4**3):
+            letters = ["IXYZ"[(index >> (2 * q)) & 3] for q in range(3)]
+            qop = QubitOperator.from_pauli_string("".join(letters))
+            fop = reverse_jordan_wigner(qop)
+            assert jordan_wigner(fop).compress() == qop
+
+    def test_terms_are_ordered_by_mode(self) -> None:
+        fop = reverse_jordan_wigner(
+            QubitOperator({((0, "Y"), (2, "X"), (3, "Z")): 1.0})
+        )
+        for term in fop.terms:
+            modes = [mode for mode, _ in term]
+            assert modes == sorted(modes)
+
+    def test_symbolic_coefficient_is_refused(self) -> None:
+        from quspect.circuit.parameter import Parameter
+
+        t = Parameter("t")
+        with pytest.raises(ValueError, match="bind_parameters"):
+            reverse_jordan_wigner(QubitOperator({((0, "Z"),): t}))
+        bound = QubitOperator({((0, "Z"),): t}).bind_parameters({t: 2.0})
+        assert reverse_jordan_wigner(bound) == FermionOperator(
+            {(): 2.0, ((0, 1), (0, 0)): -4.0}
+        )

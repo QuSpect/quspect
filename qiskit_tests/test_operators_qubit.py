@@ -7,11 +7,11 @@ Conventions pinned here (see ``test_term_key_maps_to_reversed_qiskit_label``):
   label ``s`` with ``s[n - 1 - q] = P``.
 * ``QubitOperator.from_pauli_string(s)`` puts ``s[i]`` on qubit ``i`` (leftmost
   character = qubit 0), i.e. it equals ``SparsePauliOp(s[::-1])``.
-* ``QubitOperator`` has **no** matrix export, operator product, adjoint or
-  commutator.  Matrices are therefore built here through ``SparsePauliOp``
-  (little-endian, same as quspect statevectors); operator products use the
-  Pauli-algebra routine ``quspect.operators.transforms._operator_mul`` (the
-  only product implementation in the package); adjoint / commutator are
+* ``QubitOperator`` has **no** matrix export, adjoint or commutator.
+  Matrices are therefore built here through ``SparsePauliOp`` (little-endian,
+  same as quspect statevectors); operator products use ``a * b`` and the
+  Pauli-algebra routine ``quspect.operators.transforms._operator_mul`` that
+  the fermion-to-qubit transforms multiply with; adjoint / commutator are
   composed from public arithmetic and checked against qiskit.
 """
 
@@ -335,9 +335,8 @@ def test_unsupported_operand_types() -> None:
     assert op.__rsub__("x") is NotImplemented  # type: ignore[arg-type]
     other = QubitOperator({((1, "Z"),): 1.0})
     assert op.__rsub__(other) == other - op
-    # Operator-operator product is not supported by QubitOperator itself.
-    with pytest.raises(TypeError):
-        op * other  # type: ignore[operator]
+    # ``op * op`` is the operator product.
+    assert op * other == QubitOperator({((0, "X"), (1, "Z")): 1.0})
     assert (op == 1.0) is False
 
 
@@ -360,6 +359,7 @@ def test_operator_product_matches_qiskit_compose(seed: int) -> None:
     ref = sa.dot(sb).simplify(atol=1e-14)
     np.testing.assert_allclose((sa @ sb).to_matrix(), ref.to_matrix(), atol=1e-12)
     np.testing.assert_allclose(sb.compose(sa).to_matrix(), ref.to_matrix(), atol=1e-12)
+    np.testing.assert_allclose(_matrix(a * b, n), ref.to_matrix(), atol=1e-12)
     np.testing.assert_allclose(
         _matrix(prod, n), _matrix(a, n) @ _matrix(b, n), atol=1e-12
     )
