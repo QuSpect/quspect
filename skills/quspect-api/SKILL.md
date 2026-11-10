@@ -1,6 +1,6 @@
 ---
 name: quspect-api
-description: QuSpect SDK architecture and API guidance for building, editing, explaining, or debugging code that uses the `quspect` Python package. Use for QuSpect circuits, gates, affine parameters, operators, variational objectives, VQE/QAOA/Max-Cut workflows, exact adjoint or shot-based gradients, external optimizer integration, batch and recoverable jobs, simulation, noise, DAG passes, OpenQASM/QSAL, visualization, transpilation, physical-qubit pools and initial layouts, native execution, or LogicalQubit cloud backends.
+description: QuSpect SDK architecture and API guidance for building, editing, explaining, or debugging code that uses the `quspect` Python package. Use for QuSpect circuits, gates, affine parameters, operators, variational objectives, VQE/QAOA/Max-Cut workflows, exact adjoint or shot-based gradients, external optimizer integration, batch and recoverable jobs, simulation, noise, DAG passes, OpenQASM/QSAL, visualization, compiling with `transpile()` for a gate set and coupling graph, two-qubit synthesis, Hamiltonian simulation with product formulas, physical-qubit pools and initial layouts, pulse envelopes, native execution, or the LogicalQubit, Quafu, Origin Quantum and Tianyan cloud backends.
 ---
 
 # QuSpect API
@@ -31,11 +31,15 @@ quantum-circuit SDK.
 3. For variational algorithms, gradients, VQE, QAOA, Max-Cut, optimizer loops,
    parameter sweeps, sampled objectives, or hardware recovery, read
    [references/variational.md](references/variational.md) before coding.
-4. For LogicalQubit compilation, calibrated physical-qubit selection, initial
+4. For compiling a circuit to a gate set and coupling graph with
+   `transpile()`, for two-qubit synthesis, or for Hamiltonian simulation
+   (`compile_evolution`), read
+   [references/compilation.md](references/compilation.md).
+5. For LogicalQubit compilation, calibrated physical-qubit selection, initial
    layouts, SABRE behavior, or mapping/result-order investigations, read
    [references/hardware-routing.md](references/hardware-routing.md).
-5. Inspect the matching source and tests before relying on a signature.
-6. Run the narrowest matching tests first; broaden when changing shared circuit,
+6. Inspect the matching source and tests before relying on a signature.
+7. Run the narrowest matching tests first; broaden when changing shared circuit,
    IR, backend, or result behavior.
 
 ## Preserve the architecture
@@ -52,6 +56,11 @@ quantum-circuit SDK.
 - Use the public LogicalQubit `physical_qubits` and `initial_layout` options for
   constrained compilation; do not call private backend transpilation methods in
   application code.
+- Compile for a device with `transpile(circuit, target)` and read placements
+  from its `TranspileResult`; do not assemble decompose/route/optimize passes by
+  hand for an ordinary compile.
+- Compile `exp(-i H t)` with `quspect.hamsim.compile_evolution`, which chooses
+  the product formula's steps and the cheaper of two exact syntheses.
 - Operate optimization passes on `DAGCircuit`; convert back with the existing
   compiler path.
 - Let `Simulator` delegate to the native QSAL executor.
@@ -80,7 +89,9 @@ from quspect.noise import DepolarizingChannel, NoiseModel
 from quspect.ir import QASM2Exporter, dumps, loads, qasm2_loads
 from quspect.visualization import compare_results, draw_svg_circuit
 from quspect.backends.logicalqubit import LogicalQubitProvider
-from quspect.transpiler import CompilationTarget, SABRE
+from quspect.transpiler import CompilationTarget, SABRE, transpile
+from quspect.synthesis import TwoQubitBasis, synthesize_two_qubit
+from quspect.hamsim import compile_evolution
 ```
 
 ## Key conventions
@@ -103,6 +114,14 @@ from quspect.transpiler import CompilationTarget, SABRE
   wire and routing SWAP, while `initial_layout[logical] = physical` fixes the
   starting assignment. With `transpile=False`, only direct provider
   `initial_layout` pass-through is supported.
+- `transpile` returns physical-qubit indices: logical qubit `q` starts on
+  `initial_layout[q]` and ends on `final_layout[q]`. Measurements keep their
+  classical bits, so counts need no reordering. Pass `seed` for a reproducible
+  result.
+- A compilation target needs an entangler (`cz` or `cx`) and single-qubit
+  gates that reach every rotation, such as `{rz, sx}` or `{rz, h}`.
+- Hamiltonian terms are `(letters, qubits, coeff)` with real coefficients, in
+  the order the product formula applies them.
 - The native simulator can raise `NativeImportError` when the C++ extension is
   unavailable.
 
@@ -122,6 +141,26 @@ from quspect import Parameter, QuantumCircuit
 theta = Parameter("theta")
 template = QuantumCircuit().rx(2 * theta + 0.1, 0)
 bound = template.bind_parameters({theta: 0.5})
+```
+
+```python
+from quspect import QuantumCircuit
+from quspect.transpiler import CompilationTarget, transpile
+
+line = CompilationTarget.from_coupling_map(
+    4, [(0, 1), (1, 2), (2, 3)], native_gates={"cz", "rz", "sx", "x"}
+)
+ghz = QuantumCircuit().h(0).cx(0, 1).cx(0, 2).cx(0, 3).measure_all()
+compiled = transpile(ghz, line, optimization_level=2, seed=7)
+print(compiled.stats.two_qubit_gates, compiled.initial_layout, compiled.final_layout)
+```
+
+```python
+from quspect.hamsim import compile_evolution
+
+heisenberg = [(p, (i, i + 1), 1.0) for i in range(3) for p in ("XX", "YY", "ZZ")]
+evolution = compile_evolution(heisenberg, 0.5, line, eps=1e-2, order=2)
+print(evolution.steps, evolution.two_qubit_gates, evolution.error_estimate)
 ```
 
 For a complete objective → gradient → external optimizer → decoded solution

@@ -2,9 +2,10 @@
 
 This reference summarizes the QuSpect architecture and public API surface
 discovered from source, docs, and tests. For end-to-end VQE/QAOA and optimizer
-workflows, also read [variational.md](variational.md). For physical-qubit
-selection and mapping semantics, read
-[hardware-routing.md](hardware-routing.md).
+workflows, also read [variational.md](variational.md). For `transpile()`,
+two-qubit synthesis and Hamiltonian simulation, read
+[compilation.md](compilation.md). For physical-qubit selection and mapping
+semantics on a cloud device, read [hardware-routing.md](hardware-routing.md).
 
 ## Contents
 
@@ -20,18 +21,22 @@ selection and mapping semantics, read
 10. [IR: QASM, QSAL, decomposition](#ir-qasm-qsal-decomposition)
 11. [Visualization](#visualization)
 12. [Variational objectives](#variational-objectives)
-13. [Backends and LogicalQubit](#backends-and-logicalqubit)
+13. [Backends and cloud providers](#backends-and-cloud-providers)
 14. [Transpiler](#transpiler)
-15. [Native bridge](#native-bridge)
-16. [Test targets](#test-targets)
-17. [Common pitfalls](#common-pitfalls)
+15. [Synthesis](#synthesis)
+16. [Hamiltonian simulation](#hamiltonian-simulation)
+17. [Pulse envelopes](#pulse-envelopes)
+18. [Native bridge](#native-bridge)
+19. [Test targets](#test-targets)
+20. [Common pitfalls](#common-pitfalls)
 
 ## Project Shape
 
 - Package root: `quspect/`
 - Core user API: `quspect/__init__.py`
 - Tests: `tests/`, organized by subpackage
-- Docs: `docs/source/{quickstart,api,architecture,variational}.rst`
+- Docs: `docs/source/` (`quickstart`, `api`, `architecture`, `variational`,
+  `optimization`, `ising_solver`, `pulse`, ...)
 - Complete algorithms: `examples/qaoa_max_cut.py`, `examples/grover_long.py`
 - Native backend: `cpp/` plus Python bridge `quspect/native/__init__.py`
 
@@ -45,8 +50,13 @@ Main architecture:
 - `noise/`: Kraus channels, noise models, circuit noise insertion
 - `operators/`: `QubitOperator`, `FermionOperator`, fermion-to-qubit transforms
 - `ir/`: OpenQASM 2.0 export/import, QSAL JSON, decomposition
-- `transpiler/`: target model, SABRE layout/routing, decomposition/optimization pipeline
-- `backends/`: abstract backend interfaces and LogicalQubit provider/backend/job
+- `transpiler/`: `transpile()`, target model, SABRE layout/routing, block
+  consolidation and optimization passes
+- `synthesis/`: exact two-qubit synthesis (KAK), target entanglers
+- `hamsim/`: product formulas for `exp(-i H t)` compiled for a target
+- `backends/`: abstract backend interfaces and the LogicalQubit, Quafu, Origin
+  Quantum and Tianyan providers
+- `pulse/`: control envelopes for pulse sequences (native extension)
 - `variational/`: observable objectives, exact adjoint plans, sampled
   parameter-shift plans, structured results, and recoverable objective jobs
 - `optimization/`: symbolic binary programs, BQM/QUBO and Ising intermediate
@@ -72,7 +82,10 @@ From `quspect`:
   `ExecutionBatch`, `JobReference`, `BackendCapabilities`,
   `PartialSubmissionError`
 
-Top-level exports are intentionally smaller than the full package. Use subpackage imports for noise, visualization, IR, transpiler, density simulation, and LogicalQubit.
+Top-level exports are intentionally smaller than the full package. Use
+subpackage imports for noise, visualization, IR, the transpiler, synthesis,
+Hamiltonian simulation, pulse envelopes, density simulation, and the cloud
+providers.
 
 Import the QFT circuit builder from its algorithms subpackage:
 
@@ -103,7 +116,8 @@ Constructor and properties:
 
 Gate builders:
 
-- Single qubit: `.id(q)`, `.h(q)`, `.x(q)`, `.y(q)`, `.z(q)`, `.s(q)`, `.sdg(q)`, `.t(q)`, `.tdg(q)`
+- Single qubit: `.id(q)`, `.h(q)`, `.x(q)`, `.y(q)`, `.z(q)`, `.s(q)`, `.sdg(q)`,
+  `.t(q)`, `.tdg(q)`, `.sx(q)`, `.sxdg(q)`
 - Parameterized one-qubit: `.rx(theta, q)`, `.ry(theta, q)`, `.rz(theta, q)`,
   `.p(theta, q)`, `.u1(lam, q)`, `.u2(phi, lam, q)`,
   `.u3(theta, phi, lam, q)`
@@ -143,7 +157,8 @@ Parameters and serialization:
 - `.to_json()`, `QuantumCircuit.from_json(data)`
 - `.draw()`
 - `.svg(style="official", width=None, scale=1.0)`
-- README mentions `.to_qasm()` and `.to_qsal()`; if using these, verify current source because the canonical implementations are in `quspect.ir`.
+- There is no `circuit.to_qasm()` or `circuit.to_qsal()`: export with
+  `quspect.ir` (`QASM2Exporter().export(circuit)`, `dumps(circuit)`).
 
 Important behavior:
 
@@ -170,7 +185,7 @@ from quspect.gates import Gate, gate_matrix, ALL_STANDARD, ALL_PARAMETERIZED
 
 Standard singleton gates:
 
-- `I`, `H`, `X`, `Y`, `Z`, `S`, `SDG`, `T`, `TDG`
+- `I`, `H`, `X`, `Y`, `Z`, `S`, `SDG`, `T`, `TDG`, `SX`, `SXDG`
 - `CX`, `CZ`, `SWAP`
 - `CCX`
 - `ALL_STANDARD`
@@ -191,7 +206,8 @@ Import:
 from quspect.simulation import Simulator, SimulationResult
 ```
 
-`Simulator(seed=None)` implements `Backend`.
+`Simulator(seed=None)` implements `Backend` (`seed` and the options of `run`
+are keyword-only).
 
 - `.run(circuit, shots=1024, save_statevector=False, **options) -> SimulationResult`
 - `.statevector(circuit) -> np.ndarray`
@@ -323,13 +339,14 @@ Passes:
 - `RotationMerging`
 - `SingleQubitGateFusion`
 - `EliminateDiagonalBeforeMeasurement`
+- `RemoveIdentityGates`
 
-Phase polynomial tools:
+Phase polynomial tools (from `quspect.dag`):
 
 - `PhaseTerm`
-- `ParityMatrix`
 - `PhasePolynomial`
 - `PhasePolynomialCompiler`
+- `ParityMatrix` lives in `quspect.dag.phase_polynomial`
 
 ## Operators
 
@@ -343,22 +360,34 @@ from quspect.operators.transforms import jordan_wigner
 `QubitOperator` represents weighted Pauli strings:
 
 - Constructor: `QubitOperator({((0, "X"), (1, "Z")): 0.5})`
-- Constructors: `.zero()`, `.identity(coeff=1.0)`, `.from_pauli_string("XZ", coeff=...)`
-- Properties: `.terms`, `.is_zero`, `.is_identity`, `.qubit_count`, `.parameters`
-- Methods: `.simplify()`, `.compress(abs_tol=...)`, `.bind_parameters(binding)`
-- Operators: immutable arithmetic is implemented; inspect tests for exact supported combinations.
+- Constructors: `.zero()`, `.identity(coefficient=1.0)`,
+  `.from_pauli_string("XZ", coefficient=1.0, qubits=None)`
+- Properties: `.terms`, `.is_zero`, `.is_identity`, `.parameters`
+- Methods: `.qubit_count()`, `.simplify()`, `.compress(tol=1e-12)`,
+  `.bind_parameters(binding)`
+- Arithmetic returns new operators: `+` and `-` with operators or numbers, `*`
+  by a number, `Parameter` or affine expression, `/` by a number. Coefficients
+  may be real, complex, or symbolic. Releases up to 0.6.2 have no
+  operator-operator product (`op * op` raises `TypeError`).
 
 `FermionOperator` represents ladder operators `(mode, action)` where `1` is creation and `0` is annihilation.
 
-- Constructors: `.zero()`, `.identity(...)`, `.number_operator(mode, coefficient)`, `.hopping_term(i, j, coefficient)`, `.coulomb_term(i, j, coefficient)`
-- Properties: `.terms`, `.is_zero`, `.is_identity`, `.mode_count`, `.parameters`
-- Methods: `.simplify()`, `.compress(...)`, `.normal_order()`, `.bind_parameters(binding)`
+- Constructors: `.zero()`, `.identity(coefficient=1.0)`,
+  `.number_operator(mode, coefficient=1.0)`,
+  `.hopping_term(i, j, coefficient=1.0)`,
+  `.coulomb_term(i, j, k, ell, coefficient=1.0)`
+- Properties: `.terms`, `.is_zero`, `.is_identity`, `.parameters`
+- Methods: `.mode_count()`, `.simplify()`, `.compress(tol=1e-12)`,
+  `.normal_order()`, `.bind_parameters(binding)`
 
-Transforms:
+Transforms (`quspect.operators.transforms`; bind symbolic coefficients first):
 
 - `jordan_wigner(fermion_op)`
-- `bravyi_kitaev(fermion_op)` exists but verify implementation before relying on it.
-- `reverse_jordan_wigner(qubit_op)`
+- `bravyi_kitaev(fermion_op, n_qubits=None)`: the encoding depends on the
+  number of qubits, so transform operators that will be combined with the same
+  `n_qubits`.
+- `reverse_jordan_wigner(qubit_op)` raises `NotImplementedError` in releases up
+  to 0.6.2; check the installed version before relying on it.
 
 ## IR: QASM, QSAL, Decomposition
 
@@ -375,13 +404,13 @@ OpenQASM:
 - `.export_to_file(circuit, path)`
 - `QASM2ExportConfig(...)`
 - `QASM2ExportMode`
-- `get_supported_gates()`
+- `quspect.ir.qasm2.get_supported_gates()`
 - `QASM2Importer().imports(source)`
-- `qasm2_loads(source)`
+- `qasm2_loads(source)`; malformed input raises `QASM2ParseError`
 
 QSAL:
 
-- `dumps(circuit, observables=None, name=None, **kwargs)`
+- `dumps(circuit, observables=None, name="", **kwargs)`
 - `loads(data)`
 - `dump(circuit, path, observables=None, **kwargs)`
 - `load(path)`
@@ -397,7 +426,7 @@ Decomposition:
 - `get_rules_for(gate_name)`
 - `decompose_gate(...)`
 - `decompose_circuit(circuit, supported_gates=...)`
-- `decompose_deep(circuit, supported_gates=...)`
+- `decompose_deep(circuit, supported_gates=..., max_passes=20)`
 
 Errors:
 
@@ -482,17 +511,20 @@ Results:
 Read [variational.md](variational.md) for complete VQE/QAOA, SciPy BFGS,
 finite-shot, hardware, sweep, recovery, limitation, and validation workflows.
 
-## Backends and LogicalQubit
+## Backends and Cloud Providers
 
 Import:
 
 ```python
 from quspect.backends import (
     Backend, BackendCapabilities, CircuitExperiment, CloudBackend,
-    CompositeJob, ExecutionBatch, ExecutionJob, ExecutionRequest,
-    JobReference, JobStatus,
+    CompletedJob, CompositeJob, ExecutionBatch, ExecutionJob,
+    ExecutionRequest, JobReference, JobStatus,
 )
 from quspect.backends.logicalqubit import LogicalQubitProvider
+from quspect.backends.originq import OriginQProvider
+from quspect.backends.quafu import QuafuProvider
+from quspect.backends.tianyan import TianyanProvider
 ```
 
 Requests and batches:
@@ -532,7 +564,7 @@ Recovery and capabilities:
 
 LogicalQubit:
 
-- `LogicalQubitProvider(api_key=None, url=None)`
+- `LogicalQubitProvider(api_key=None, url=None, *, store=None)`
 - `.url`
 - `.list_backends()`
 - `.get_backend(name)`
@@ -562,6 +594,20 @@ Operational notes:
 Read [hardware-routing.md](hardware-routing.md) for validation rules, workspace
 wires, mapping domains, result-order evidence, and debugging tests.
 
+Other providers follow the same `Provider.get_backend(name)` /
+`backend.run(...)` / `backend.submit(...)` / `provider.retrieve_job(reference)`
+shape and need no vendor SDK:
+
+- `QuafuProvider(token=None, url=None, ...)` (Quafu-SQC): `.list_backends()`,
+  `.get_backend(name, min_coupler_fidelity=0.0)`; `run`/`submit` take
+  `transpile`, `initial_layout` and `physical_qubits` like LogicalQubit.
+- `OriginQProvider(api_key=None, *, url=None)` (Origin Quantum) and
+  `TianyanProvider(login_key=None, *, url=None)` (Tianyan): `run`/`submit`
+  take `transpile`, `initial_layout` and `physical_qubits` as options.
+
+Credentials, device names and provider-specific options are in the README
+section "Cloud QPU" and in each `quspect/backends/<provider>/_backend.py`.
+
 Backend exceptions:
 
 - `BackendError`
@@ -578,18 +624,30 @@ Backend exceptions:
 Import:
 
 ```python
-from quspect.transpiler import CompilationTarget, SABRE
+from quspect.transpiler import CompilationTarget, SABRE, transpile
 ```
 
 Public exports:
 
+- `transpile(circuit, target, *, optimization_level=2, seed=None,
+  initial_layout=None, ...)` returns a `TranspileResult` (`circuit`,
+  `initial_layout`, `final_layout`, `wire_circuit`, `wire_layout`, `stats`).
+  This is the entry point for layout, routing, basis translation and
+  optimization.
+- `TranspileStats`, `RoutingCandidate`, `approximation_tolerance(degree)`
 - `CompilationTarget.from_backend(backend)`
 - `CompilationTarget.from_coupling_map(num_qubits, coupling_map, native_gates=None)`
 - `CompilationTarget.induced_subgraph(physical_qubits)` returns
   `(dense_target, dense_to_physical)`
 - `SABRE(target).solve(circuit, iter_num=3, seed=None,
   initial_mapping=None)` returns
-  `(routed_circuit, initial_mapping, final_mapping)`
+  `(routed_circuit, initial_mapping, final_mapping)`;
+  `.route_candidates(...)` returns `RoutingCandidate` objects
+- Passes with `.run(circuit)`: `HighLevelOptimizePass`,
+  `ConsolidateBlocksPass`, `ThreeQubitBlockPass`, `PhaseFoldingPass`, and
+  their stats classes
+- `check_compilation_consistency(circuit, compiler=None, atol=1e-8)` (needs
+  Qiskit) and `generate_random_circuit(num_qubits, depth, seed=None)`
 
 Internal-but-useful classes in `quspect.transpiler._passes`:
 
@@ -597,8 +655,67 @@ Internal-but-useful classes in `quspect.transpiler._passes`:
 - `LayoutRoutingPass(target, iter_num=3, seed=None,
   initial_mapping=None).run(circuit)` returns
   `(routed_circuit, initial_mapping, final_mapping)`
-- `OptimizePass().run(circuit)`
+- `OptimizePass().run(circuit)`, `OptimizePass.from_target(target)`
 - `TranspilerPipeline(passes).run(circuit)`
+
+Read [compilation.md](compilation.md) for optimization levels, options, layout
+semantics and worked examples.
+
+## Synthesis
+
+Import:
+
+```python
+from quspect.synthesis import TwoQubitBasis, synthesize_two_qubit
+```
+
+- `synthesize_two_qubit(unitary, *, atol=1e-9, verify_atol=1e-9, basis=None)`
+  returns a circuit on qubits 0 and 1 with the fewest entangling gates
+- `num_cz_required(unitary)`, `weyl_coordinates(unitary)`,
+  `kak_decompose(unitary) -> TwoQubitKAK`
+- `TwoQubitBasis(entangler="cz", euler="zxz")`, `TwoQubitBasis.from_gates(names)`
+- `Entangler`, `entangler(name)`, `register_entangler(name, matrix)`
+
+## Hamiltonian Simulation
+
+Import:
+
+```python
+from quspect.hamsim import compile_evolution
+```
+
+- `compile_evolution(hamiltonian, time, target=None, *, steps=None, order=2,
+  eps=None, term_order="input", error_metric="auto", ...)` returns an
+  `EvolutionResult`
+- Formula tools: `pauli_terms`, `product_formula`, `one_step`, `order_terms`,
+  `merge_commuting`
+- Error estimates: `state_error`, `commutator_bound`
+- Synthesis: `ladder_circuit`, `synthesize_network -> NetworkCircuit`
+- Term order: `select_term_order -> TermOrderChoice`
+- Graph helpers: `long_path`, `cycle_of_length`, `connected_active_set`
+- Types: `PauliTerm = (letters, qubits, coeff)`, `Rotation = (letters, qubits,
+  theta)` for `exp(-i theta P)`
+
+## Pulse Envelopes
+
+Import (needs the native extension `quspect._pulse`):
+
+```python
+from quspect.pulse import GaussianDRAG, WaveCache, align, decode_envelope
+```
+
+- Envelopes: `Gaussian`, `GaussianDRAG`, `CosineDRAG`, `Triangle`, `Rect`,
+  `Flattop`, `RippleRect`, `PowerSineCosine`, `GaussianXPower`, `Custom`
+- Composition: `+`, `* constant`, `>> shift`, `align(env, dt, amp)`,
+  `mix(env, df, phase, dynamical)`, `split(env, starts, ends)`
+- Sampling: `decode_envelope(env, WaveCache(resolution)[, start, end])`
+  returns `(start_time, wave)`
+- `serialization(env)`, `deserialization(data)`; envelopes pickle
+- `use_as_envelopes()` / `install_as_envelopes()` serve the module to code
+  written against envelopes-qc (`from envelopes import evc`)
+
+Read `docs/source/pulse.rst` for shapes, conventions and the differences from
+envelopes-qc.
 
 ## Native Bridge
 
@@ -632,13 +749,19 @@ Use these tests for focused validation:
 - Simulation: `tests/simulation/`, `tests/native/`
 - Noise: `tests/noise/`
 - Operators: `tests/operators/`
-- Transpiler: `tests/transpiler/test_sabre.py`
+- Transpiler: `tests/transpiler/` (`test_transpile.py`, `test_sabre.py`, ...)
+- Synthesis: `tests/synthesis/`
+- Hamiltonian simulation: `tests/hamsim/`
+- Pulse: `tests/pulse/`
+- Optimization: `tests/optimization/`
 - Visualization: `tests/visualization/`
 - Cloud backend: `tests/backends/test_logicalqubit.py`
 - Provider-neutral execution: `tests/backends/test_execution.py`
 - LogicalQubit batching/recovery: `tests/backends/test_logicalqubit_backend.py`,
   `test_logicalqubit_job.py`, `test_logicalqubit_provider.py`,
   `test_logicalqubit_translator.py`
+- Other providers: `tests/backends/test_quafu.py`, `test_originq.py`,
+  `test_tianyan.py`
 - Variational sampling: `tests/variational/`
 - Exact/adjoint gradients: `tests/native/test_gradient.py`,
   `tests/simulation/test_gradient.py`
@@ -664,6 +787,12 @@ Use these tests for focused validation:
   private backend `_transpile` method from application code.
 - Do not confuse SABRE's final mapping, the static provider initial layout,
   routed circuit-wire indices, and classical result-bit order.
+- Do not hand-assemble decompose/route/optimize passes for an ordinary compile;
+  call `transpile()` and read layouts from its `TranspileResult`.
+- Do not read `TranspileResult.circuit` qubit indices as logical qubits: they
+  are physical qubits, related by `initial_layout` and `final_layout`.
+- Do not call `QubitOperator.qubit_count` or `FermionOperator.mode_count`
+  without parentheses; both are methods.
 - Do not persist credentials with `JobReference`; it intentionally contains only
   recovery metadata and is not an authenticity signature.
 - Do not treat `Gate` as a matrix container; call `gate_matrix` when a numeric matrix is needed.
