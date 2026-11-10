@@ -11,6 +11,7 @@ import pytest
 from quspect import QuantumCircuit
 from quspect.transpiler import ThreeQubitBlockPass
 from quspect.transpiler._three_qubit import (
+    _compensated_sum,
     _local_perm,
     _ops_unitary,
     synthesize_three_qubit,
@@ -141,3 +142,24 @@ def test_measurement_and_barrier_are_boundaries() -> None:
     assert pass_.stats.blocks_replaced == 2
     names = [i.gate.name if i.gate else "measure" for i in out]
     assert names.count("measure") == 1
+
+
+def test_compensated_sum_is_python_independent() -> None:
+    """Multiplexor angles do not depend on the interpreter's ``sum``.
+
+    Python 3.12+ ``sum`` compensates float rounding while 3.10 / 3.11 add
+    left to right; the helper gives the 3.12+ result on every version.
+    """
+    xs = [
+        float.fromhex(h)
+        for h in (
+            "0x1.556c184fc6bddp-2",
+            "-0x1.19a44c1fc5762p-1",
+            "-0x1.891f7258dc4e8p-1",
+            "-0x1.310523b63b536p-2",
+        )
+    ]
+    # 朴素左折叠得到 -0x1.48482215ee07cp+0（Python 3.10 / 3.11 的 sum）
+    assert _compensated_sum(xs) == float.fromhex("-0x1.48482215ee07bp+0")
+    assert _compensated_sum([1e16, 1.0, -1e16]) == 1.0
+    assert _compensated_sum([-0.0]) == 0.0
