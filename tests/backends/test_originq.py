@@ -12,7 +12,7 @@ import re
 import pytest
 
 from quspect import QuantumCircuit
-from quspect.backends import JobReference, JobStatus
+from quspect.backends import ExecutionRequest, JobReference, JobStatus
 from quspect.backends._exceptions import (
     AuthenticationError,
     BackendError,
@@ -25,11 +25,19 @@ from quspect.backends.originq import _provider as provider_module
 from quspect.backends.originq._backend import OriginQBackend
 from quspect.backends.originq._job import parse_task_result
 from quspect.backends.originq._translator import decode_distribution, translate
+from tests.backends._measurement_cases import (
+    FULL_SPELLINGS,
+    measurements_are_last,
+    random_measured_circuits,
+    used_after_measurement,
+)
 from tests.backends._originq_fakes import (
     KEY,
     WK_C180_2_AVAILABLE,
     FakeCloud,
+    assert_same_distribution,
     chip_info_payload,
+    quspect_exact_distribution,
 )
 
 URL = "http://cloud.invalid"
@@ -388,3 +396,72 @@ def test_placement_without_calibration_falls_back_to_largest_component() -> None
     backend = _backend(FakeCloud(chips=chips), "X")
     assert backend.placement_qubits(2) == [0, 1]
     assert backend.placement_qubits(4) == [0, 1, 2]  # nothing fits: whole component
+
+
+# ------------------------------------------------- terminal measurements
+
+
+def _prepare_one(backend: OriginQBackend, circuit: QuantumCircuit):
+    request = ExecutionRequest.single(circuit, label="c", shots=100)
+    prepared, _ = backend._prepare(request)
+    return prepared[0].program
+
+
+def _routed(backend: OriginQBackend, circuit: QuantumCircuit) -> QuantumCircuit:
+    routed, _ = backend._compile(
+        circuit,
+        "c",
+        initial_layout=None,
+        physical_qubits=backend.placement_qubits(circuit.num_qubits),
+    )
+    return routed
+
+
+def test_per_qubit_measurements_are_not_refused_after_routing() -> None:
+    """Regression: "qubit(s) [...] are used after being measured".
+
+    One measure instruction per qubit let the router swap through a wire the
+    optimizer had already measured, and the translator refused the result.
+    """
+    chips = {"LINE5": chip_info_payload(5, range(5), [(i, i + 1) for i in range(4)])}
+    backend = _backend(FakeCloud(chips=chips), "LINE5")
+    circuit = QuantumCircuit()
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [qubit])
+
+    program = _prepare_one(backend, circuit)
+
+    lines = program.text.splitlines()
+    assert [line.split()[0] for line in lines[-3:]] == ["MEASURE"] * 3
+    assert not any(line.startswith("MEASURE") for line in lines[:-3])
+    routed = _routed(backend, circuit)
+    assert any(i.is_gate and i.gate.name == "cz" for i in routed.instructions)
+    assert used_after_measurement(routed) == []
+    assert_same_distribution(
+        quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+    )
+
+
+@pytest.mark.parametrize("spelling", FULL_SPELLINGS)
+def test_random_circuits_keep_terminal_measurements_on_wk_c180(spelling: str) -> None:
+    backend = _wk_c180_backend()
+    for circuit in random_measured_circuits(spelling, count=25):
+        program = _prepare_one(backend, circuit)  # refused before the fix
+        assert program.measurement.num_clbits == circuit.num_clbits
+        routed = _routed(backend, circuit)
+        assert used_after_measurement(routed) == []
+        assert measurements_are_last(routed)
+        assert_same_distribution(
+            quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+        )
+
+
+def test_mid_circuit_measurement_in_the_input_is_still_refused() -> None:
+    chips = {"LINE5": chip_info_payload(5, range(5), [(i, i + 1) for i in range(4)])}
+    backend = _backend(FakeCloud(chips=chips), "LINE5")
+    circuit = QuantumCircuit()
+    circuit.x(0).measure([0], [0]).x(0).cx(0, 1).measure([0, 1], [1, 2])
+    with pytest.raises(TranslationError, match="used after being measured"):
+        _prepare_one(backend, circuit)
