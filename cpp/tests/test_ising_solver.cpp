@@ -220,6 +220,60 @@ TEST(SimulatedAnnealingTest, IsReproducibleForFixedSeed) {
     ExpectSameResult(SolveIsingSimulatedAnnealing(model, options), SolveIsingSimulatedAnnealing(model, options));
 }
 
+// On a flat landscape every proposed flip is accepted, so a read is a pure function of its random
+// stream and two reads are equal only when their streams are.  Forty spins make a chance match
+// (probability 2^-40 per pair) irrelevant.
+std::size_t CountSharedReads(const quspect::native::optimization::IsingSolverResult& left,
+                             const quspect::native::optimization::IsingSolverResult& right) {
+    std::size_t shared = 0;
+    for (const auto& left_sample : left.samples) {
+        for (const auto& right_sample : right.samples) {
+            if (left_sample.spins == right_sample.spins) {
+                ++shared;
+            }
+        }
+    }
+    return shared;
+}
+
+TEST(SimulatedAnnealingTest, AdjacentSeedsUseUnrelatedReadStreams) {
+    constexpr std::size_t kNumSpins = 40;
+    const DenseIsingModel flat(std::vector<double>(kNumSpins * kNumSpins, 0.0), kNumSpins);
+    IsingSolverOptions options;
+    options.num_reads = 32;
+    options.sweeps = 3;
+
+    for (const std::uint64_t base_seed : {std::uint64_t{0}, std::uint64_t{7}, std::uint64_t{982451653},
+                                          std::numeric_limits<std::uint64_t>::max() - 40}) {
+        options.seed = base_seed;
+        const auto base = SolveIsingSimulatedAnnealing(flat, options);
+        // Reads of one run are distinct: only the diagonal pairs match.
+        EXPECT_EQ(CountSharedReads(base, base), options.num_reads) << "seed " << base_seed;
+        for (std::uint64_t offset = 1; offset <= 40; ++offset) {
+            options.seed = base_seed + offset;
+            EXPECT_EQ(CountSharedReads(base, SolveIsingSimulatedAnnealing(flat, options)), 0U)
+                << "seeds " << base_seed << " and " << base_seed + offset;
+        }
+    }
+}
+
+TEST(SimulatedAnnealingTest, ReadOfOneSeedIsNotFirstReadOfAnotherSeed) {
+    constexpr std::size_t kNumSpins = 40;
+    const DenseIsingModel flat(std::vector<double>(kNumSpins * kNumSpins, 0.0), kNumSpins);
+    IsingSolverOptions options;
+    options.seed = 123456789;
+    options.num_reads = 8;
+    options.sweeps = 3;
+    const auto many = SolveIsingSimulatedAnnealing(flat, options);
+
+    options.num_reads = 1;
+    for (std::size_t read_index = 1; read_index < many.samples.size(); ++read_index) {
+        options.seed = 123456789 + read_index;
+        const auto single = SolveIsingSimulatedAnnealing(flat, options);
+        EXPECT_NE(single.samples.front().spins, many.samples[read_index].spins) << "read " << read_index;
+    }
+}
+
 TEST(SimulatedAnnealingTest, IsIndependentOfOpenMpThreadCount) {
 #ifdef _OPENMP
     const DenseIsingModel model = MakeDenseFerromagnet(8);
