@@ -576,43 +576,29 @@ class QuafuBackend(CloudBackend):
         initial_layout: Sequence[int] | None,
         physical_qubits: Sequence[int] | None,
     ) -> tuple[QuantumCircuit, list[int]]:
-        """Decompose, optimise and route; return a physically indexed circuit."""
-        from quspect.backends._compile import defer_terminal_measurements
-        from quspect.ir.compilation import decompose_circuit
-        from quspect.transpiler._passes import (
-            DecomposePass,
-            LayoutRoutingPass,
-            OptimizePass,
-        )
+        """Compile for the chip; return a physically indexed circuit.
+
+        The compilation itself is the backends' shared
+        :func:`~quspect.backends._compile.compile_for_device`; this method
+        picks the qubit pool and reports what Quafu would refuse.
+        """
+        from quspect.backends._compile import compile_for_device
+        from quspect.transpiler._passes import DecomposePass
 
         device = self.compilation_target()
         if not device.native_gates:
             raise TranslationError(f"{self._name} reports no basis gates.")
 
-        # SABRE handles one- and two-qubit gates only.
-        wide = {
-            _gate_name(instruction)
-            for instruction in circuit
-            if instruction.is_gate and len(instruction.qubits) > 2
-        }
-        if wide:
-            names = {_gate_name(i) for i in circuit if i.is_gate}
-            circuit = decompose_circuit(circuit, supported_gates=names - wide)
-        circuit = DecomposePass(device).run(circuit)
-        circuit = OptimizePass.from_target(device).run(circuit)
-        # Keep terminal measurements terminal: routed after every gate, so no
-        # SWAP crosses a measured qubit.
-        circuit = defer_terminal_measurements(circuit)
-
+        width = circuit.num_qubits
         if physical_qubits is not None:
             pool = list(physical_qubits)
         elif initial_layout is not None:
             pool = self._component_containing(initial_layout)
         else:
-            pool = self.default_physical_qubits(circuit.num_qubits)
-        if circuit.num_qubits > len(pool):
+            pool = self.default_physical_qubits(width)
+        if width > len(pool):
             raise TranslationError(
-                f"Circuit uses {circuit.num_qubits} qubits but only {len(pool)} "
+                f"Circuit uses {width} qubits but only {len(pool)} "
                 "physical qubits are available for it."
             )
         unusable = sorted(set(pool) - set(self.config["usable_qubits"]))
@@ -620,33 +606,27 @@ class QuafuBackend(CloudBackend):
             raise TranslationError(
                 f"physical_qubits contains uncalibrated qubits: {unusable}."
             )
-        target, dense_to_physical = device.induced_subgraph(pool)
-        if circuit.num_qubits > 1 and not _connected(
-            pool, _adjacency(self.coupling_map)
-        ):
+        if width > 1 and not _connected(pool, _adjacency(self.coupling_map)):
             raise TranslationError(
                 "physical_qubits must induce a connected coupling subgraph."
             )
-
-        dense_initial = None
         if initial_layout is not None:
-            index = {
-                physical: dense for dense, physical in enumerate(dense_to_physical)
-            }
-            outside = [q for q in initial_layout if q not in index]
+            outside = [q for q in initial_layout if q not in set(pool)]
             if outside:
                 raise TranslationError(
                     "initial_layout contains qubits outside the routing pool: "
                     f"{outside}."
                 )
-            dense_initial = [index[q] for q in initial_layout]
 
-        routed, mapping, _ = LayoutRoutingPass(
-            target, iter_num=3, seed=0, initial_mapping=dense_initial
-        ).run(circuit)
-        # Routing inserts SWAPs; lower them into the chip basis.
-        routed = DecomposePass(target).run(routed)
-        layout = [dense_to_physical[dense] for dense in mapping[: routed.num_qubits]]
+        routed, layout = compile_for_device(
+            device, circuit, initial_layout=initial_layout, physical_qubits=pool
+        )
+        # Lower the routing SWAPs the earlier pipeline leaves in; a circuit
+        # compiled by transpile() is already in the chip basis.
+        routed = DecomposePass(device).run(routed)
+        if layout is None:
+            # A pool without couplings (one qubit) is not routed.
+            layout = pool[: routed.num_qubits]
         return _relabel(routed, layout), layout
 
     def _component_containing(self, qubits: Sequence[int]) -> list[int]:

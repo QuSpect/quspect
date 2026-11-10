@@ -536,6 +536,8 @@ class TianyanBackend(CloudBackend):
                 initial_layout=initial_layout,
                 physical_qubits=pool if pool is not None else self.available_qubits,
             )
+            # Lower the routing SWAPs the earlier pipeline leaves in (a
+            # circuit compiled by transpile() is already in the QCIS basis).
             routed = DecomposePass(target).run(routed)
         except Exception as exc:
             raise TranslationError(

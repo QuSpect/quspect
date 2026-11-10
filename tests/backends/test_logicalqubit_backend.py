@@ -443,13 +443,23 @@ def test_transpile_preserves_results_after_swap_routing() -> None:
     routed, layout = backend._transpile(circuit)
 
     assert layout is not None
-    assert any(
-        instruction.is_gate
-        and instruction.gate is not None
-        and instruction.gate.name == "swap"
+    # Qubit 0 has three partners and a line gives it two neighbours: routing
+    # must move a qubit, so some classical bit is read from another wire.
+    # (The compiler lowers its SWAPs or merges them into neighbouring gates.)
+    measured = {
+        clbit: wire
         for instruction in routed
-    )
-    assert all(instruction.is_measure for instruction in routed.instructions[-4:])
+        if instruction.is_measure
+        for wire, clbit in zip(instruction.qubits, instruction.clbits, strict=True)
+    }
+    assert measured != {3: 0, 1: 1, 0: 2, 2: 3}
+    for instruction in routed:
+        if instruction.is_gate and len(instruction.qubits) == 2:
+            a, b = (layout[wire] for wire in instruction.qubits)
+            assert abs(a - b) == 1
+    measurements = [i for i in routed.instructions if i.is_measure]
+    tail = routed.instructions[-len(measurements) :]
+    assert all(instruction.is_measure for instruction in tail)
 
     from quspect import Simulator
 

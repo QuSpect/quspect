@@ -9,6 +9,7 @@ import pytest
 
 from quspect import QuantumCircuit, Simulator
 from quspect.backends._compile import (
+    _compile_with_passes,
     compile_for_device,
     defer_terminal_measurements,
 )
@@ -27,6 +28,34 @@ from tests.backends._originq_fakes import (
 LINE = [(i, i + 1) for i in range(6)]
 GRID = [(i, i + 1) for i in range(16) if i % 4 < 3] + [(i, i + 4) for i in range(12)]
 CZ_BASIS = {"cz", "h", "rx", "ry", "rz"}
+
+
+#: The seam the backends call (``transpile()`` where it can take the circuit)
+#: and the earlier pipeline it keeps for everything else.
+COMPILERS = pytest.mark.parametrize(
+    "compiler", [compile_for_device, _compile_with_passes], ids=["seam", "passes"]
+)
+
+
+def _moved_measurements(circuit: QuantumCircuit, routed: QuantumCircuit) -> int:
+    """Classical bits read from another wire than their logical qubit.
+
+    Wire ``w`` starts as logical qubit ``w``, so a measurement on another
+    wire shows that routing moved the qubit there.
+    """
+    source = {
+        clbit: qubit
+        for ins in circuit.instructions
+        if ins.is_measure
+        for qubit, clbit in zip(ins.qubits, ins.clbits, strict=True)
+    }
+    return sum(
+        1
+        for ins in routed.instructions
+        if ins.is_measure
+        for wire, clbit in zip(ins.qubits, ins.clbits, strict=True)
+        if source[clbit] != wire
+    )
 
 
 def _shape(circuit: QuantumCircuit) -> list[tuple]:
@@ -127,7 +156,8 @@ def test_defer_treats_barriers_as_transparent_and_instructions_as_units() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_swap_is_not_routed_through_a_measured_wire() -> None:
+@COMPILERS
+def test_swap_is_not_routed_through_a_measured_wire(compiler) -> None:
     """Regression: per-qubit measurements became mid-circuit after routing.
 
     The optimizer emits ``measure(2)`` before ``cx(0, 1)``; routing that gate
@@ -140,10 +170,12 @@ def test_swap_is_not_routed_through_a_measured_wire() -> None:
         circuit.measure([qubit], [qubit])
     target = CompilationTarget.from_coupling_map(5, LINE[:4])
 
-    routed, layout = compile_for_device(target, circuit)
+    routed, layout = compiler(target, circuit)
 
     assert layout is not None
-    assert any(i.is_gate and i.gate.name == "swap" for i in routed.instructions)
+    if compiler is _compile_with_passes:
+        assert any(i.is_gate and i.gate.name == "swap" for i in routed.instructions)
+    assert _moved_measurements(circuit, routed) > 0
     assert used_after_measurement(routed) == []
     assert all(i.is_measure for i in routed.instructions[-3:])
     assert_same_distribution(
@@ -162,16 +194,18 @@ def test_swap_is_not_routed_through_a_measured_wire() -> None:
     ],
     ids=["line", "line-cz", "grid", "grid-cz"],
 )
+@COMPILERS
 def test_terminal_measurements_stay_terminal_for_random_circuits(
+    compiler,
     spelling: str,
     num_qubits: int,
     edges: list[tuple[int, int]],
     native: set[str] | None,
 ) -> None:
     target = CompilationTarget.from_coupling_map(num_qubits, edges, native_gates=native)
-    swaps = 0
+    moved = 0
     for circuit in random_measured_circuits(spelling, count=40):
-        routed, layout = compile_for_device(target, circuit)
+        routed, layout = compiler(target, circuit)
 
         assert layout is not None
         assert used_after_measurement(routed) == [], _shape(circuit)
@@ -182,10 +216,10 @@ def test_terminal_measurements_stay_terminal_for_random_circuits(
         assert_same_distribution(
             quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
         )
-        swaps += sum(
-            1 for ins in routed.instructions if ins.is_gate and ins.gate.name == "swap"
-        )
-    assert swaps > 0  # the sample must exercise routing
+        moved += _moved_measurements(circuit, routed)
+    # The sample must exercise routing.  (transpile() lowers its SWAPs or
+    # merges them into neighbouring gates, so there is no ``swap`` to count.)
+    assert moved > 0
 
 
 def test_mid_circuit_measurement_keeps_its_order_through_compilation() -> None:

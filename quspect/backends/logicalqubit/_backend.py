@@ -458,10 +458,11 @@ class LogicalQubitBackend(CloudBackend):
         initial_layout: Sequence[int] | None = None,
         physical_qubits: Sequence[int] | None = None,
     ) -> tuple[QuantumCircuit, list[int] | None]:
-        """Decompose, optimize, then deterministically route a bound circuit.
+        """Compile a bound circuit for the device, deterministically.
 
         ``physical_qubits`` restricts routing to an induced device subgraph.
         ``initial_layout`` fixes the starting logical-to-physical mapping.
+        See :func:`~quspect.backends._compile.compile_for_device`.
         """
         from quspect.backends._compile import compile_for_device
         from quspect.transpiler._target import CompilationTarget

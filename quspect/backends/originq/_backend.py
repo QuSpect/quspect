@@ -649,8 +649,10 @@ class OriginQBackend(CloudBackend):
                 initial_layout=initial_layout,
                 physical_qubits=physical_qubits,
             )
-            # Lower routing SWAPs into the chip basis.  Decomposition is
-            # local to each gate's qubits, so the placement stays valid.
+            # Lower the routing SWAPs the earlier pipeline leaves in (a
+            # circuit compiled by transpile() is already in the chip basis).
+            # Decomposition is local to each gate's qubits, so the placement
+            # stays valid.
             routed = DecomposePass(target).run(routed)
         except Exception as exc:
             raise TranslationError(
