@@ -17,15 +17,20 @@ from quspect.backends._exceptions import TranslationError
 # Gate mapping
 # ---------------------------------------------------------------------------
 
-
-def _sx(qc: Any, q: list[int], *, dagger: bool) -> None:
-    """√X (or its inverse) as ``H · S · H`` (``H · Sdg · H``), exactly."""
-    qc.h(q[0])
-    if dagger:
-        qc.sdg(q[0])
-    else:
-        qc.s(q[0])
-    qc.h(q[0])
+#: lqcloud's names for native gates that QuSpect knows under another name,
+#: mapped to the QuSpect gate this translator sends as exactly that native
+#: gate: ``sx``/``sxdg`` go out as lqcloud's ``sx``/``sxdg``, which lqcloud
+#: serializes as ``xhalf``/``mxhalf``, and ``u3`` goes out as ``u``, one
+#: ``su2``.  A chip that declares its native gates in lqcloud's names is read
+#: through this table (``LogicalQubitBackend.native_gate_set``).  Native
+#: gates without a QuSpect counterpart (``yhalf``, ``xyhalf``, ...) are not
+#: listed; the compiler simply does not use them.
+LQCLOUD_NATIVE_GATE_NAMES: dict[str, str] = {
+    "xhalf": "sx",
+    "mxhalf": "sxdg",
+    "su2": "u3",
+    "u": "u3",
+}
 
 
 def _build_gate_map() -> dict[str, Callable[..., None]]:
@@ -47,8 +52,10 @@ def _build_gate_map() -> dict[str, Callable[..., None]]:
     _reg("sdg", lambda qc, q, p: qc.sdg(q[0]))
     _reg("t", lambda qc, q, p: qc.t(q[0]))
     _reg("tdg", lambda qc, q, p: qc.tdg(q[0]))
-    _reg("sx", lambda qc, q, p: _sx(qc, q, dagger=False))
-    _reg("sxdg", lambda qc, q, p: _sx(qc, q, dagger=True))
+    # lqcloud 0.6 has √X and its inverse: ``sx``/``sxdg`` are aliases of the
+    # native ``xhalf``/``mxhalf`` pulses, one pulse instead of ``H · S · H``.
+    _reg("sx", lambda qc, q, p: qc.sx(q[0]))
+    _reg("sxdg", lambda qc, q, p: qc.sxdg(q[0]))
 
     # single-qubit, parameterized
     _reg("rx", lambda qc, q, p: qc.rx(float(p[0]), q[0]))
