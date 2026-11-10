@@ -13,6 +13,14 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
 ``POST /oqcs/task/origin/taskDetail.json``  ``{"taskId": id}``
     ``taskState`` and ``taskResult``.  Requires a ``task_mode`` header;
     pyqpanda3 sends ``0`` when it does not know how the task was submitted.
+``POST /oqcs/task/cancelTask.json``  ``{"taskId": id}``
+    Ask the cloud to cancel a task, with header ``task_mode: 0`` however the
+    task was submitted.  The answer carries no payload: ``success`` is
+    ``true`` when the request was accepted and ``false`` when the task
+    cannot be cancelled.  Unlike the endpoints above this one was not
+    recorded from live traffic: the request is the one
+    ``pyqpanda3.qcloud.QCloudJob.cancel()`` sends to a stand-in server, and
+    the answer is read the way the SDK reads it.
 
 Every request is authenticated with ``Authorization: oqcs_auth=<api key>``.
 Responses wrap their payload as ``{"success", "code", "message", "obj"}``
@@ -22,6 +30,7 @@ with ``code == 10000`` on success.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +38,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from quspect.backends._exceptions import AuthenticationError, BackendError
+
+_logger = logging.getLogger(__name__)
 
 #: ``(method, url, headers, body) -> (status, response bytes)``
 Transport = Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]]
@@ -38,6 +49,7 @@ _RESOURCES = "/oqcs/task/getResourceList.json"
 _CHIP_INFO = "/oqcs/task/origin/chipInfo.json"
 _SUBMIT = "/oqcs/task/origin/submit.json"
 _TASK_DETAIL = "/oqcs/task/origin/taskDetail.json"
+_CANCEL = "/oqcs/task/cancelTask.json"
 
 
 def urllib_transport(timeout: float = 30.0) -> Transport:
@@ -59,7 +71,7 @@ def urllib_transport(timeout: float = 30.0) -> Transport:
 
 
 class OriginQClient:
-    """Authenticated access to the four Origin Quantum task endpoints.
+    """Authenticated access to the five Origin Quantum task endpoints.
 
     Args:
         api_key: Origin Quantum API key (sent verbatim in ``Authorization``).
@@ -67,7 +79,7 @@ class OriginQClient:
         transport: Optional transport for testing.
         retries: Extra attempts for idempotent reads on network errors or
             HTTP 5xx.  Submissions are never retried (a retry could create a
-            duplicate task).
+            duplicate task), and neither are cancellations.
         backoff: Initial delay between retries in seconds (doubles).
     """
 
@@ -157,6 +169,43 @@ class OriginQClient:
         if not isinstance(obj, Mapping):
             raise BackendError(f"Origin Quantum returned no detail for task {task_id}.")
         return dict(obj)
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Ask the cloud to cancel a task and return whether it accepted.
+
+        One request, never retried.  ``True`` means Origin Quantum accepted
+        the request, not that the task has already stopped; ``False`` means it
+        answered ``success: false``, which pyqpanda3 documents as "the task
+        cannot be cancelled".  As in the SDK, ``success`` alone decides.
+
+        Raises:
+            AuthenticationError: The API key was rejected (HTTP 401/403).
+            BackendError: Network failure, any other HTTP error, or an
+                answer without a boolean ``success``: whether the task was
+                cancelled is then unknown.
+        """
+        data = self._call(
+            "POST",
+            _CANCEL,
+            {"taskId": task_id},
+            idempotent=False,
+            task_mode="0",
+            wrapped=False,
+        )
+        success = data.get("success") if isinstance(data, Mapping) else None
+        if not isinstance(success, bool):
+            raise BackendError(
+                f"Origin Quantum {_CANCEL} returned no boolean 'success' "
+                f"for task {task_id}."
+            )
+        if not success:
+            _logger.info(
+                "Origin Quantum declined to cancel task %s (code %s): %s",
+                task_id,
+                data.get("code"),
+                data.get("message"),
+            )
+        return success
 
     # ------------------------------------------------------------------
 

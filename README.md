@@ -906,8 +906,17 @@ result = backend.run(qc, shots=2000)
   `result.probabilities` is the provider distribution and `result.counts` is
   `round(p * shots)` (`result.metadata["counts_source"] == "probabilities"`).
 - The `full_amplitude` simulator takes no options and no native batches;
-  requests become one job per circuit. Jobs cannot be cancelled. QPU shots are
-  limited by the chip's `MaxShots` (49 600 on `WK_C180_2`).
+  requests become one job per circuit. QPU shots are limited by the chip's
+  `MaxShots` (49 600 on `WK_C180_2`).
+- **Cancellation** — `job.cancel()` sends one request (the one pyqpanda3's
+  `QCloudJob.cancel()` sends; it is never retried) and returns `True` when
+  Origin Quantum accepted it, or `False` when it answered that the task cannot
+  be cancelled. A network or HTTP error raises `JobError`. A native QPU batch
+  is one task and is cancelled as a whole. The request was checked against the
+  SDK's, not against the live service, and the state a cancelled task reports
+  is not known (pyqpanda3 has no cancelled status either): `job.status()`
+  returns what the cloud reports, `unknown` for a state outside the five known
+  ones, so pass a `timeout` to `result()` after cancelling.
 - A malformed program is not rejected by the cloud — the task simply never
   finishes — so always pass a `timeout` to `result()`.
 
