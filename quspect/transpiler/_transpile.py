@@ -1510,7 +1510,7 @@ def _transpile(
                 comm_logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_layout=initial_layout,
+                initial_layout=layout_of(comm_logical),
                 layout_trials=lt,
                 swap_trials=st,
                 elide_permutations=elide_permutations,
@@ -1650,6 +1650,7 @@ def _transpile(
                     stats.selected,
                     stats.num_swaps,
                     approx_parts,
+                    routed_width,
                 ),
             )
             raw_numeric, wires, final = numeric
@@ -1701,6 +1702,7 @@ def _transpile(
                         stats.selected,
                         stats.num_swaps,
                         approx_parts,
+                        routed_width,
                     ),
                 )
                 best = blk_out
