@@ -587,7 +587,8 @@ class QuantumCircuit:
             Self, for method chaining.
 
         Raises:
-            ValueError: If ``len(qubits) != len(clbits)``.
+            ValueError: If ``len(qubits) != len(clbits)``, or a classical
+                bit is listed more than once.
         """
         qubits_tuple = tuple(qubits)
         clbits_tuple = tuple(clbits)

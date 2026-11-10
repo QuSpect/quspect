@@ -235,8 +235,11 @@ class Simulator(Backend):
             circuit: The circuit to validate.
 
         Raises:
-            ValueError: If any gate has symbolic parameters.
+            ValueError: If any gate has symbolic parameters, or a NaN or
+                infinite parameter.
         """
+        from math import isfinite
+
         from quspect.circuit.parameter import Parameter, ParameterExpression
 
         for instr in circuit.instructions:
@@ -255,6 +258,13 @@ class Simulator(Backend):
                     f"parameters. Bind all parameters before simulation "
                     f"using circuit.bind_parameters()."
                 )
+            if instr.is_gate and instr.gate is not None:
+                for p in instr.gate.params:
+                    if type(p) is float and not isfinite(p):
+                        raise ValueError(
+                            f"Gate '{instr.gate.name}' has a non-finite "
+                            f"parameter ({p!r}); gate angles must be finite."
+                        )
 
 
 def _has_mid_circuit_measurement(circuit: QuantumCircuit) -> bool:

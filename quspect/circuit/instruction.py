@@ -6,6 +6,7 @@ a gate application, a measurement, a barrier, or a noise channel.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -64,7 +65,13 @@ class CircuitInstruction:
     Gate and channel instructions must act on distinct qubits: an
     instruction such as ``cx(0, 0)`` is rejected with ``ValueError`` at
     construction time. Measurements may repeat a qubit (measuring the same
-    qubit into several classical bits).
+    qubit into several classical bits), but one measurement instruction
+    writes each classical bit at most once.
+
+    Qubit and classical-bit indices may be any integer-like object (one
+    with ``__index__``, such as a numpy integer); they are stored as plain
+    ``int``. ``bool`` and ``float`` values are rejected with ``TypeError``,
+    negative indices with ``ValueError``.
 
     Attributes:
         type: The type of instruction (GATE, MEASURE, BARRIER, or CHANNEL).
@@ -98,14 +105,18 @@ class CircuitInstruction:
         """Validate instruction consistency."""
         qubits = self.qubits
         # Fast path for the common case (plain non-negative ints); anything
-        # else goes through the full check, which raises the precise error.
+        # else goes through the full check, which raises the precise error
+        # or returns the indices as plain ints (numpy integers, ...).
         for index in qubits:
             if type(index) is not int or index < 0:
-                _validate_bit_indices(qubits, "qubit")
+                qubits = _normalize_bit_indices(qubits, "qubit")
+                object.__setattr__(self, "qubits", qubits)
                 break
         for index in self.clbits:
             if type(index) is not int or index < 0:
-                _validate_bit_indices(self.clbits, "clbit")
+                object.__setattr__(
+                    self, "clbits", _normalize_bit_indices(self.clbits, "clbit")
+                )
                 break
 
         kind = self.type
@@ -133,6 +144,8 @@ class CircuitInstruction:
                     f"MEASURE requires equal number of qubits and clbits, "
                     f"got {len(qubits)} qubits and {len(self.clbits)} clbits."
                 )
+            if len(qubits) > 1:
+                _validate_distinct_clbits(self.clbits)
         elif kind is _BARRIER:
             if self.gate is not None:
                 raise ValueError("BARRIER instruction should not have a gate.")
@@ -197,27 +210,65 @@ class CircuitInstruction:
         return self.type is _CHANNEL
 
 
-def _validate_bit_indices(indices: tuple[int, ...], kind: str) -> None:
-    """Require bit indices to be non-negative integers.
+def _normalize_bit_indices(indices: Sequence[object], kind: str) -> tuple[int, ...]:
+    """Return bit indices as a tuple of plain non-negative ``int``.
+
+    Any integer-like index (an object with ``__index__``, e.g. ``np.int64``
+    from a loop over ``np.arange``) is accepted and converted, so that every
+    later consumer (serialization, hashing, the native extension) sees plain
+    ints.  Booleans (``bool`` and ``np.bool_``) and floats are not indices.
 
     Keeping this validation on the immutable instruction object covers every
     construction path (named gate helpers, generic append, measurements,
     barriers, and noise channels) and prevents malformed circuits from failing
     later while inferring their size.
+
+    Raises:
+        TypeError: If an index is not integer-like.
+        ValueError: If an index is negative.
     """
+    normalized: list[int] = []
     for index in indices:
-        if type(index) is int and index >= 0:  # fast path (the common case)
-            continue
-        if isinstance(index, bool) or not isinstance(index, int):
-            raise TypeError(
-                f"{kind.capitalize()} index must be a non-negative integer, "
-                f"got {index!r}."
-            )
+        if type(index) is not int:
+            if isinstance(index, (bool, np.bool_)) or not hasattr(index, "__index__"):
+                raise TypeError(
+                    f"{kind.capitalize()} index must be a non-negative integer, "
+                    f"got {index!r}."
+                )
+            try:
+                index = operator.index(index)
+            except TypeError:
+                raise TypeError(
+                    f"{kind.capitalize()} index must be a non-negative integer, "
+                    f"got {index!r}."
+                ) from None
         if index < 0:
             raise ValueError(
                 f"{kind.capitalize()} index must be a non-negative integer, "
                 f"got {index}."
             )
+        normalized.append(index)
+    return tuple(normalized)
+
+
+def _validate_distinct_clbits(clbits: tuple[int, ...]) -> None:
+    """Require one measurement instruction to write each clbit once.
+
+    ``measure([0, 1], [0, 0])`` would store two outcomes in one classical
+    bit and silently keep only the last one.
+
+    Raises:
+        ValueError: If a classical bit appears more than once.
+    """
+    seen: set[int] = set()
+    for clbit in clbits:
+        if clbit in seen:
+            raise ValueError(
+                f"MEASURE writes classical bit {clbit} more than once "
+                f"(clbits {clbits}); give every measured qubit its own "
+                f"classical bit."
+            )
+        seen.add(clbit)
 
 
 def _validate_distinct_qubits(qubits: tuple[int, ...], what: str) -> None:

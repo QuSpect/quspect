@@ -124,7 +124,7 @@ def test_qubit_map_places_wires_before_canonical_ordering() -> None:
     ("build", "message"),
     [
         (lambda c: c.h(0).measure([0], [0]).x(0), "after being measured"),
-        (lambda c: c.x(0).measure([0, 1], [0, 0]), "more than once"),
+        (lambda c: c.x(0).measure([0], [0]).measure([1], [0]), "more than once"),
         (lambda c: c.h(0), "no measurement"),
     ],
 )

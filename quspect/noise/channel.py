@@ -32,6 +32,7 @@ variables (K0, K1, ...) use uppercase naming as per physics convention.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -146,6 +147,11 @@ class PauliChannel(NoiseChannel):
 
     def __post_init__(self) -> None:
         _require_single_qubit(self)
+        if not all(math.isfinite(p) for p in (self.px, self.py, self.pz)):
+            raise ValueError(
+                "Pauli channel probabilities must be finite numbers, got "
+                f"px={self.px}, py={self.py}, pz={self.pz}"
+            )
         if self.px < 0 or self.py < 0 or self.pz < 0:
             raise ValueError("Pauli channel probabilities must be non-negative")
         if self.px + self.py + self.pz > 1.0:
