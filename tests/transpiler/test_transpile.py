@@ -216,6 +216,9 @@ def test_level3_never_worse_than_level2(
     # level-3-only CNOT-phase resynthesis changes the candidate scores, so it
     # is switched off for this structural check).
     monkeypatch.setattr(transpile_module, "_PHASE_POLY_LEVEL", 4)
+    # 选中结果之后的精炼（再编译一遍、三比特块数值实例化）不改候选，也关掉
+    monkeypatch.setattr(transpile_module, "_REPASS", False)
+    monkeypatch.setattr(transpile_module, "_NUMERIC_BLOCKS", False)
     o3 = transpile(circ, target, optimization_level=3, seed=seed)
     o2_score = o2.stats.candidate_scores[0][1:]
     assert any(score[1:] == o2_score for score in o3.stats.candidate_scores)
@@ -355,7 +358,11 @@ def test_exact_layout_short_circuits_search() -> None:
     assert result.stats.two_qubit_gates == 8
 
 
-def test_level3_budget_respected() -> None:
+def test_level3_budget_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    import quspect.transpiler._transpile as transpile_module
+
+    # 再编译一遍的统计是第二次编译的；这里只看第一次的候选
+    monkeypatch.setattr(transpile_module, "_REPASS", False)
     target = _grid(3, 4)
     circ = _random_circuit(12, 60, 5)
     result = transpile(
@@ -370,14 +377,14 @@ def test_level3_budget_respected() -> None:
     stats = result.stats
     assert (stats.layout_trials, stats.swap_trials) == (3, 2)
     # trivial and low-dilation (unrefined + refined) + 3 random layouts,
-    # 2 routings each, for the mirror, the block-only and the
-    # commutation-aware candidate family
-    assert stats.num_candidates <= 3 * (3 + 2 + 2) * 2
+    # 2 routings each, for the mirror, the block-only, the
+    # commutation-aware and the plain gate-level candidate family
+    assert stats.num_candidates <= 4 * (3 + 2 + 2) * 2
     # best candidate + level-2 default + best commutation-aware candidate +
-    # beam-search candidate, each possibly with its LNS refinement (plus the
-    # light refinement of the default when the large-window sweep improved it
-    # further)
-    assert stats.num_evaluated <= 2 * 4 + 1
+    # beam-search candidate + 4 plain gate-level candidates, each possibly
+    # with its LNS refinement (plus the light refinement of the default when
+    # the large-window sweep improved it further)
+    assert stats.num_evaluated <= 2 * 8 + 1
     assert len(stats.candidate_scores) == stats.num_evaluated
 
 
@@ -406,9 +413,10 @@ def test_time_limit_stops_search() -> None:
     result = transpile(
         circ, target, optimization_level=3, seed=0, layout_trials=20, time_limit=0.0
     )
-    # Only the level-2 reference trials (and the first block-only and
-    # commutation-aware trials) run once the (zero) budget is spent.
-    assert result.stats.num_candidates <= 6 + 4 + 5 + 5
+    # Only the level-2 reference trials (and the first block-only,
+    # commutation-aware and plain gate-level trials) run once the (zero)
+    # budget is spent.
+    assert result.stats.num_candidates <= 6 + 4 + 5 + 5 + 5
     o2 = transpile(circ, target, optimization_level=2, seed=0)
     assert result.stats.two_qubit_gates <= o2.stats.two_qubit_gates
 
@@ -687,8 +695,15 @@ def test_pick_evaluations_keeps_non_embedded_candidates() -> None:
     assert [c.label for c in _pick_evaluations(big, None)] == ["e0", "e1"]
 
 
-def test_depth_weight_selection() -> None:
+def test_depth_weight_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     """``depth_weight`` picks the candidate minimizing 2q + w·(2q depth)."""
+    import quspect.transpiler._transpile as transpile_module
+
+    # 候选打分之外的阶段（两级打分中的完整区域重综合、选中之后的再编译与
+    # 三比特块）会改变选中候选的分数，这里只检查按打分的取舍
+    monkeypatch.setattr(transpile_module, "_PHASE_POLY_LEVEL", 4)
+    monkeypatch.setattr(transpile_module, "_REPASS", False)
+    monkeypatch.setattr(transpile_module, "_NUMERIC_BLOCKS", False)
     circ = _qft(10)
     target = _grid(3, 4)
     base = transpile(circ, target, optimization_level=3, seed=0)
@@ -698,8 +713,10 @@ def test_depth_weight_selection() -> None:
         res = transpile(circ, target, optimization_level=3, seed=0, depth_weight=w)
         scores = res.stats.candidate_scores
         best = min(s[1] + w * s[2] for s in scores)
-        chosen = next(s for s in scores if s[0] == res.stats.selected)
-        assert chosen[1] + w * chosen[2] == best
+        assert any(s[0] == res.stats.selected for s in scores)
+        # 最后阶段（单比特 / SWAP 面）之后按同一个加权分数在候选与其后备间取优
+        st = res.stats
+        assert st.two_qubit_gates + w * st.two_qubit_depth <= best
     with pytest.raises(ValueError, match="depth_weight"):
         transpile(circ, target, optimization_level=3, depth_weight=-1.0)
 
