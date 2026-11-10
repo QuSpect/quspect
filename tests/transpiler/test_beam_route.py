@@ -102,6 +102,9 @@ def test_level3_with_beam_is_valid_and_not_worse(
 ) -> None:
     target = _grid(3, 4)
     qc = _random_cx(10, 90, seed=seed)
+    # 只比较路由候选：CNOT-相位重综合（第 3 级）改变候选打分，而最后阶段（SWAP 面
+    # 改写）不随打分单调，会让“选中束搜索候选”与最终门数的先后关系翻转
+    monkeypatch.setattr(transpile_module, "_PHASE_POLY_LEVEL", 4)
     with_beam = transpile(qc, target, optimization_level=3, seed=seed)
     _assert_equivalent(qc, with_beam, target)
     assert any(

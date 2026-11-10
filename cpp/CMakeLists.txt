@@ -285,6 +285,7 @@ set(OPTIMIZATION_SRCS
 # Transpiler kernels (SABRE routing core, CPython-compatible MT19937)
 set(TRANSPILER_SRCS
   src/transpiler/beam_routing.cpp
+  src/transpiler/cnot_phase_synth.cpp
   src/transpiler/cpython_random.cpp
   src/transpiler/cx_orientation.cpp
   src/transpiler/depth_schedule.cpp
@@ -611,6 +612,7 @@ if(QSPECT_BUILD_TESTS)
     tests/test_ring_routing.cpp
     tests/test_su4_routing.cpp
     tests/test_beam_routing.cpp
+    tests/test_cnot_phase_synth.cpp
     tests/test_depth_schedule.cpp
     tests/test_dilation_layout.cpp
     tests/test_one_qubit_gauge.cpp

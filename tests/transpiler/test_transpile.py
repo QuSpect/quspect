@@ -200,13 +200,23 @@ def test_deterministic_with_seed(level: int) -> None:
 )
 @pytest.mark.parametrize("seed", [0, 1])
 def test_level3_never_worse_than_level2(
-    circ: QuantumCircuit, rows: int, cols: int, seed: int
+    circ: QuantumCircuit,
+    rows: int,
+    cols: int,
+    seed: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quspect.transpiler._transpile as transpile_module
+
     target = _grid(rows, cols)
     o2 = transpile(circ, target, optimization_level=2, seed=seed)
     o3 = transpile(circ, target, optimization_level=3, seed=seed)
     assert o3.stats.two_qubit_gates <= o2.stats.two_qubit_gates
-    # The level-2 result is among the fully evaluated level-3 candidates.
+    # The level-2 result is among the fully evaluated level-3 candidates (the
+    # level-3-only CNOT-phase resynthesis changes the candidate scores, so it
+    # is switched off for this structural check).
+    monkeypatch.setattr(transpile_module, "_PHASE_POLY_LEVEL", 4)
+    o3 = transpile(circ, target, optimization_level=3, seed=seed)
     o2_score = o2.stats.candidate_scores[0][1:]
     assert any(score[1:] == o2_score for score in o3.stats.candidate_scores)
     assert o3.stats.num_candidates >= 1

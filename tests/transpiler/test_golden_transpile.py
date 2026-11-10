@@ -281,15 +281,15 @@ GOLDEN: dict[int, dict[str, str]] = {
     },
     3: {
         "qft_6": "0f9c5b36d2d8479c",
-        "qaoa_6": "8a2db9e9dce6a633",
+        "qaoa_6": "0c5e81060ed4ac22",
         "heisenberg_6": "dc5f5a1003058005",
         "random_6": "776d6a5b60872b61",
-        "adder_6": "a3e948d4dde9aead",
-        "three_qubit_5": "5266d589e92eae68",
-        "qft_9": "e0a9f89fceadceac",
-        "random_10": "b407e1f281116650",
-        "adder_10": "62e4f5d59565808b",
-        "three_qubit_8": "2838694d01ac288c",
+        "adder_6": "fbda240ab3c258e2",
+        "three_qubit_5": "f49bfbc1e036c6d0",
+        "qft_9": "faaa83525e9a4d2c",
+        "random_10": "0ee69d69d6faa127",
+        "adder_10": "005508e02856d99c",
+        "three_qubit_8": "8008c3c922d78d92",
     },
 }
 
