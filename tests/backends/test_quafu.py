@@ -33,6 +33,16 @@ from quspect.backends.quafu._job import (
 )
 from quspect.ir import qasm2_loads
 from quspect.simulation import Simulator
+from tests.backends._measurement_cases import (
+    FULL_SPELLINGS,
+    measurements_are_last,
+    random_measured_circuits,
+    used_after_measurement,
+)
+from tests.backends._originq_fakes import (
+    assert_same_distribution,
+    quspect_exact_distribution,
+)
 
 TOKEN = "secret-token"
 URL = "https://quafu.example"
@@ -363,6 +373,54 @@ def test_bell_distribution_survives_compilation(backend) -> None:
     result = backend.run(_ghz(3))
     assert set(result.counts) <= {"000", "111"}
     assert 400 < result.counts.get("000", 0) < 624
+
+
+def test_per_qubit_measurements_stay_terminal_in_submitted_qasm(backend, fake) -> None:
+    """Regression: a SWAP was routed through an already measured qubit."""
+    circuit = QuantumCircuit(name="per_qubit")
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [qubit])
+
+    # A line of three physical qubits: the three-way interaction needs a SWAP.
+    backend.submit(circuit, physical_qubits=[0, 1, 2])
+
+    sent = qasm2_loads(next(iter(fake.tasks.values()))["body"]["circuit"])
+    assert used_after_measurement(sent) == []
+    assert measurements_are_last(sent)
+    assert_same_distribution(
+        quspect_exact_distribution(sent), quspect_exact_distribution(circuit)
+    )
+
+
+@pytest.mark.parametrize("spelling", FULL_SPELLINGS)
+def test_random_circuits_keep_terminal_measurements(backend, fake, spelling) -> None:
+    for circuit in random_measured_circuits(spelling, count=25):
+        backend.submit(circuit)
+        sent = qasm2_loads(fake.tasks[max(fake.tasks)]["body"]["circuit"])
+        assert used_after_measurement(sent) == []
+        assert measurements_are_last(sent)
+        assert_same_distribution(
+            quspect_exact_distribution(sent), quspect_exact_distribution(circuit)
+        )
+
+
+def test_mid_circuit_measurement_is_submitted_in_the_written_order(
+    backend, fake
+) -> None:
+    circuit = QuantumCircuit(name="mid")
+    circuit.x(0).measure([0], [0]).x(0).h(1).measure([1], [1]).measure([0], [2])
+
+    backend.submit(circuit)
+
+    sent = qasm2_loads(next(iter(fake.tasks.values()))["body"]["circuit"])
+    kinds = ["m" if i.is_measure else "g" for i in sent.instructions]
+    # measure(0 -> c0) stays between the two X gates of its qubit ...
+    assert kinds.index("m") < len(kinds) - 1 - kinds[::-1].index("g")
+    # ... and the two terminal measurements are issued last.
+    assert kinds[-2:] == ["m", "m"]
+    assert [i.clbits for i in sent.instructions if i.is_measure][0] == (0,)
 
 
 def test_transpile_false_requires_physical_couplers(backend) -> None:

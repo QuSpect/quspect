@@ -135,6 +135,19 @@ class TestLogicalQubitMeasurementBarriers:
         assert [row[2] for row in barrier_rows] == [[0], [1]]
         serialize_circuit(translated)
 
+    def test_consecutive_measurements_share_one_barrier(self) -> None:
+        circuit = QuantumCircuit().h(0).cx(0, 1).cx(1, 2)
+        for qubit in range(3):
+            circuit.measure([qubit], [qubit])
+
+        translated = _translate(circuit)
+        rows = _gate_rows(translated)
+
+        assert [row[0] for row in rows[-4:]] == ["barrier"] + ["measure"] * 3
+        assert rows[-4][2] == [0, 1, 2]
+        assert sum(row[0] == "barrier" for row in rows) == 1
+        serialize_circuit(translated)
+
     def test_repeated_measurement_gets_fresh_barrier(self) -> None:
         circuit = QuantumCircuit().x(0)
         circuit.measure([0], [0])

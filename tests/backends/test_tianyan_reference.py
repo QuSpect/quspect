@@ -151,6 +151,18 @@ def test_routing_on_a_line_forces_swaps_and_still_decodes() -> None:
     assert_same_distribution(result.probabilities, quspect_exact_distribution(circuit))
 
 
+def test_routing_keeps_per_qubit_measurements_terminal() -> None:
+    """One measure instruction per qubit was refused after routing a SWAP."""
+    circuit = QuantumCircuit()
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [2 - qubit])
+    cloud = FakeTianyan(chips={"line": line_config(5)})
+    result = _backend(cloud, "line").run(circuit, shots=100, poll_interval=1e-3)
+    assert_same_distribution(result.probabilities, quspect_exact_distribution(circuit))
+
+
 def test_batch_keeps_request_order_across_groups() -> None:
     cloud = FakeTianyan()
     names = sorted(CASES)
