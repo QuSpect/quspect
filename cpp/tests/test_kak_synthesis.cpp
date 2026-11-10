@@ -484,6 +484,10 @@ CM Gate1Matrix(const Gate1& g, const std::array<M2, kNumFixedGates>& fixed) {
             return {std::cos(g.p0 / 2), C(0, -std::sin(g.p0 / 2)), C(0, -std::sin(g.p0 / 2)), std::cos(g.p0 / 2)};
         case 3:
             return {std::cos(g.p0 / 2), -std::sin(g.p0 / 2), std::sin(g.p0 / 2), std::cos(g.p0 / 2)};
+        case 5: {  // u2(φ, λ) = u3(π/2, φ, λ)
+            const double r = std::sqrt(0.5);
+            return {r, -r * std::exp(C(0, g.p1)), r * std::exp(C(0, g.p0)), r * std::exp(C(0, g.p0 + g.p1))};
+        }
         default: {
             const double c = std::cos(g.p0 / 2);
             const double s = std::sin(g.p0 / 2);
@@ -517,13 +521,19 @@ TEST(OneQubitSynthesizer, SynthesizesInSeveralBases) {
     for (int i = 0; i < 8; ++i) {
         mats.push_back(RandomUnitary(rng, 2));
     }
-    for (const OneQubitBasis* basis : {&zxz, &zsx, &u3}) {
+    OneQubitBasis xyx;  // {rx, ry}：没有 Z 旋转，走后备形式 rx·ry·rx
+    xyx.rx = xyx.ry = true;
+    OneQubitBasis u2;  // {u2}：后备形式 u2 / u2·u2
+    u2.u2 = true;
+    OneQubitBasis u2u1;  // {u2, u1}
+    u2u1.u2 = u2u1.rz = true;
+    // 对角矩阵（S、rz(0.3)）以及恰在容差边界上的 rz(1e-9)：每个通用门集都能表示
+    mats.push_back({std::exp(C(0, -0.15)), 0, 0, std::exp(C(0, 0.15))});
+    mats.push_back({std::exp(C(0, -5e-10)), 0, 0, std::exp(C(0, 5e-10))});
+    const std::vector<std::pair<const OneQubitBasis*, std::size_t>> bases = {
+        {&zxz, 5u}, {&zsx, 5u}, {&u3, 1u}, {&xyx, 3u}, {&u2, 2u}, {&u2u1, 2u}};
+    for (const auto& [basis, longest] : bases) {
         for (const CM& m : mats) {
-            if (basis == &u3 && std::abs(m[1]) < 1e-12 && std::abs(m[0] - m[3]) > 1e-9) {
-                // 没有 rz 类门时对角矩阵只能走 rz（与 Python 相同：无法表示）
-                EXPECT_FALSE(synth.Synthesize(ToArr<4>(m), *basis).has_value());
-                continue;
-            }
             const auto gates = synth.Synthesize(ToArr<4>(m), *basis);
             ASSERT_TRUE(gates.has_value());
             CM rebuilt = kI2;
@@ -531,9 +541,17 @@ TEST(OneQubitSynthesizer, SynthesizesInSeveralBases) {
                 rebuilt = MatMul(Gate1Matrix(g, fixed), rebuilt);
             }
             EXPECT_LT(DistanceUpToPhase(rebuilt, m), 1e-9);
-            EXPECT_LE(gates->size(), 5u);
+            EXPECT_LE(gates->size(), longest);
         }
     }
+    // {u3}：对角矩阵是一个 u3（Candidates 的对角分支只会用 rz 类门）
+    const auto s_u3 = synth.Synthesize(ToArr<4>(kSg), u3);
+    ASSERT_EQ(s_u3->size(), 1u);
+    EXPECT_EQ((*s_u3)[0].kind, 4);
+    // 后备形式不替换已有形式的结果：{rz, h, x} 上的 S 仍是一个 rz
+    const auto s_zxz = synth.Synthesize(ToArr<4>(kSg), zxz);
+    ASSERT_EQ(s_zxz->size(), 1u);
+    EXPECT_EQ((*s_zxz)[0].kind, 1);
     // 恒等、具名门
     EXPECT_TRUE(synth.Synthesize(ToArr<4>(kI2), zxz)->empty());
     const auto h = synth.Synthesize(ToArr<4>(kH), zxz);

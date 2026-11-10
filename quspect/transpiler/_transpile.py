@@ -475,7 +475,8 @@ def transpile(
     ``cx`` or one registered with
     :func:`~quspect.synthesis.two_qubit.register_entangler`) and a universal
     single-qubit set (e.g. ``{rz, h}``, ``{rz, sx}`` as on IBM devices
-    ``{cx, rz, sx, x}``, ``{rz, rx}``, ``{u3}``).  The whole pipeline runs in
+    ``{cx, rz, sx, x}``, ``{rz, rx}``, ``{rx, ry}``, ``{u2}``, ``{u3}``).  The
+    whole pipeline runs in
     a CZ-centred *working basis* (the target's single-qubit gates plus
     ``{cz, h, rz, x}``) and the result is translated at the end: each CZ
     becomes the target entangler (for CX a Hadamard pair on the target qubit,

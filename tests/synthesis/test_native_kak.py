@@ -471,7 +471,7 @@ def test_golden_digests_of_single_qubit_numerics() -> None:
 
 GOLDEN_1Q = {
     "gates": "91c229888f5abb35baac6015",
-    "one_qubit": "04ba2a951420a7602ec42a4a",
+    "one_qubit": "9120ecaf80c2f7adba2cb3d2",
     "zyz": "a1e44e28d40943bc0fe28bdb",
     "euler": "0988fabd9b14ae7ad47d6e72",
     "blocks": "a3350d350925bd4922a072ea",
@@ -494,6 +494,11 @@ ONE_QUBIT_BASES = [
     frozenset({"sx", "sxdg", "rz", "x"}),
     frozenset({"p", "h"}),
     frozenset({"u1", "sx"}),
+    # 靠后备形式才通用的门集（对角的 u3、XYX、u2·u2）
+    frozenset({"u3"}),
+    frozenset({"rx", "ry"}),
+    frozenset({"u2", "u1"}),
+    frozenset({"u2"}),
 ]
 
 

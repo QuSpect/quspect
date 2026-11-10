@@ -201,6 +201,8 @@ class NativeKak:
                 out.append(makers[0][idx])
             elif kind == 4:
                 out.append(makers[4](p0, p1, p2))
+            elif kind == 5:
+                out.append(makers[5](p0, p1))
             else:
                 out.append(makers[kind](p0))
         return True, out
@@ -218,7 +220,7 @@ class NativeKak:
                 raise KeyError
         except KeyError:
             return em, -1, ()
-        makers = (fixed, em._rz_maker, em.rx, em.ry, em.u3)
+        makers = (fixed, em._rz_maker, em.rx, em.ry, em.u3, em.u2)
         index = int(
             self._synth.add_one_qubit_basis(
                 em._rz_maker is not None,
@@ -231,6 +233,7 @@ class NativeKak:
                 em.u3 is not None,
                 words,
                 named,
+                em.u2 is not None,
             )
         )
         return em, index, makers

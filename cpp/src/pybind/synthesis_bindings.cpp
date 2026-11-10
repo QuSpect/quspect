@@ -239,7 +239,7 @@ class PyKakSynthesizer {
 
     // ---- 单比特合成 ----
     int AddOneQubitBasis(bool rz, bool h, bool x, bool sx, bool sxdg, bool rx, bool ry,
-                         bool u3, const py::dict& words, const std::vector<int>& named) {
+                         bool u3, const py::dict& words, const std::vector<int>& named, bool u2) {
         if (!one_qubit_) {
             one_qubit_ = std::make_unique<OneQubitSynthesizer>();
         }
@@ -252,6 +252,7 @@ class PyKakSynthesizer {
         b.rx = rx;
         b.ry = ry;
         b.u3 = u3;
+        b.u2 = u2;
         for (const auto item : words) {
             const int k = item.first.cast<int>();
             if (k < -4 || k > 4) {
@@ -444,7 +445,7 @@ void BindSynthesis(py::module_& m) {
         .def("num_cz", &PyKakSynthesizer::NumCz, py::arg("u"), py::arg("atol"))
         .def("add_one_qubit_basis", &PyKakSynthesizer::AddOneQubitBasis, py::arg("rz"), py::arg("h"), py::arg("x"),
              py::arg("sx"), py::arg("sxdg"), py::arg("rx"), py::arg("ry"), py::arg("u3"), py::arg("words"),
-             py::arg("named"))
+             py::arg("named"), py::arg("u2") = false)
         .def("synthesize_one_qubit", &PyKakSynthesizer::SynthesizeOneQubit, py::arg("m"), py::arg("basis"))
         .def("zyz_angles", &PyKakSynthesizer::ZyzAngles, py::arg("m"))
         .def("verified_euler", &PyKakSynthesizer::VerifiedEuler, py::arg("u"), py::arg("atol"), py::arg("euler"))
