@@ -42,7 +42,21 @@ class TranslationError(BackendError):
 
 
 class JobError(BackendError):
-    """Raised when a submitted job fails or encounters an error."""
+    """Raised when a submitted job fails or encounters an error.
+
+    Attributes:
+        error_type: A short classification of the error when one is known
+            (the provider's own error type, or a QuSpect value such as
+            ``"not_found"``); ``None`` otherwise.
+        job_id: The provider's job identifier, when known.
+        result_pending: Whether the job can still deliver its result.
+            ``False`` here: the job failed, was cancelled, is unknown to the
+            provider, or returned a result that cannot be decoded.  Only
+            :class:`JobTimeoutError` sets it to ``True``.
+    """
+
+    #: ``True`` only on :class:`JobTimeoutError`: reading again later can succeed.
+    result_pending: bool = False
 
     def __init__(
         self,
@@ -57,7 +71,20 @@ class JobError(BackendError):
 
 
 class JobTimeoutError(JobError):
-    """Raised when waiting for a cloud job result times out."""
+    """Raised when a job's result is not available within the wait.
+
+    The job has not failed.  It was still queued or running, or the provider
+    had not published its result yet, when the timeout expired; calling
+    ``result()`` again later can succeed.  Do not treat it as a failed job
+    or as an undecodable result.
+
+    This class subclasses :class:`JobError` for backward compatibility, so a
+    handler for ``JobError`` also receives it.  Such a handler must either
+    catch ``JobTimeoutError`` first or test ``exc.result_pending``, which is
+    ``True`` here and ``False`` on every other ``JobError``.
+    """
+
+    result_pending = True
 
 
 class BackendNotFoundError(BackendError):

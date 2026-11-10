@@ -863,6 +863,12 @@ How it works:
 - Each circuit is one Quafu task; `submit_request()` returns a recoverable
   `CompositeJob` for batches, and `provider.retrieve_job(job.reference)` or
   `provider.retrieve_job(task_id, backend_name="Haituo")` reattaches later.
+- Reading a job: `job.result(timeout=...)` raises `JobTimeoutError`
+  (`exc.result_pending` is `True`) while the result is not available yet, and
+  a plain `JobError` (`result_pending` is `False`) for a failed or cancelled
+  task, a task Quafu does not know (`error_type == "not_found"`) or a result
+  that cannot be decoded. `job.cancel()` returns whether Quafu acknowledged
+  the request; `job.provider_status()` gives Quafu's own status text.
 
 ### Origin Quantum (本源量子)
 

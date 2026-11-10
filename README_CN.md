@@ -730,6 +730,11 @@ print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线�
 - 每条线路对应一个夸父任务；批量提交返回可恢复的 `CompositeJob`，可用
   `provider.retrieve_job(job.reference)` 或
   `provider.retrieve_job(task_id, backend_name="Haituo")` 重新获取。
+- 读取任务：结果尚不可用时，`job.result(timeout=...)` 抛出 `JobTimeoutError`
+  （`exc.result_pending` 为 `True`）；任务失败、已取消、夸父查不到该任务
+  （`error_type == "not_found"`）或结果无法解码时，抛出普通的 `JobError`
+  （`result_pending` 为 `False`）。`job.cancel()` 返回夸父是否确认了取消请求；
+  `job.provider_status()` 返回夸父原始的状态文本。
 
 ### 本源量子（Origin Quantum）
 

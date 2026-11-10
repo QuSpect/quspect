@@ -371,6 +371,12 @@ class QuafuBackend(CloudBackend):
                     raise BackendError(
                         f"Quafu rejected experiment {item.label!r}: {str(tid)[:300]}"
                     )
+                if tid <= 0:
+                    # Task ids are positive; /task/status/0 is the chip list.
+                    raise BackendError(
+                        f"Quafu answered experiment {item.label!r} with an "
+                        f"invalid task id: {tid}."
+                    )
                 reference = JobReference(
                     platform="quafu",
                     backend_name=self._name,
