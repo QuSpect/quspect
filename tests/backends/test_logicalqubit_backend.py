@@ -752,3 +752,278 @@ def test_translator_gives_a_repeated_measurement_its_own_barrier(
         ("barrier", (0,)),
         ("measure", (0, 2)),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Automatic placement by calibration
+# ---------------------------------------------------------------------------
+
+
+def _line_edges(count: int) -> list[tuple[int, int]]:
+    return [(index, index + 1) for index in range(count - 1)]
+
+
+def _grid_edges(rows: int, cols: int) -> list[tuple[int, int]]:
+    edges = []
+    for row in range(rows):
+        for col in range(cols):
+            index = row * cols + col
+            if col + 1 < cols:
+                edges.append((index, index + 1))
+            if row + 1 < rows:
+                edges.append((index, index + cols))
+    return edges
+
+
+def _chip_backend(
+    edges: list[tuple[int, int]],
+    *,
+    cz: dict[tuple[int, int], object] | None = None,
+    readout: dict[int, object] | None = None,
+    nest: str | None = None,
+) -> tuple[LogicalQubitBackend, _FakeSDKBackend]:
+    """A chip whose config carries calibration the way LQCloud publishes it."""
+    raw = _FakeSDKBackend()
+    metrics: dict[str, list] = {}
+    if readout is not None:
+        metrics["qubit_metrics"] = [
+            {"id": qubit, "measure_f0": value, "measure_f1": value}
+            for qubit, value in readout.items()
+        ]
+    if cz is not None:
+        metrics["coupler_metrics"] = [
+            {"qubits": list(pair), "cz_fidelity": value} for pair, value in cz.items()
+        ]
+    raw.config = {
+        "qubits": max(max(edge) for edge in edges) + 1,
+        "supported_modes": ["circuit"],
+        "topology": {"coupling_map": [list(edge) for edge in edges]},
+        **(metrics if nest is None else {nest: metrics}),
+    }
+    backend = LogicalQubitBackend(raw)
+    backend._translator = _IdentityTranslator()
+    return backend, raw
+
+
+def _bell() -> QuantumCircuit:
+    circuit = QuantumCircuit(name="bell")
+    circuit.h(0)
+    circuit.cx(0, 1)
+    return circuit.measure([0, 1], [0, 1])
+
+
+def _random_circuits(count: int, seed: int) -> list[QuantumCircuit]:
+    import random
+
+    rng = random.Random(seed)
+    circuits = []
+    for index in range(count):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"random{index}")
+        for qubit in range(n):
+            circuit.h(qubit)
+        for _ in range(rng.randint(4, 20)):
+            if rng.random() < 0.4:
+                circuit.ry(round(rng.uniform(-3, 3), 3), rng.randrange(n))
+            else:
+                circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        circuits.append(circuit)
+    return circuits
+
+
+def _two_qubit_cost(circuit: QuantumCircuit) -> int:
+    return sum(
+        3 if instruction.gate.name == "swap" else 1
+        for instruction in circuit.instructions
+        if instruction.is_gate and len(instruction.qubits) == 2
+    )
+
+
+def _forbid_calibration_placement(monkeypatch) -> None:
+    import quspect.backends.logicalqubit._backend as module
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("placement_regions must not be consulted here")
+
+    monkeypatch.setattr(module, "placement_regions", unexpected)
+
+
+# The chip of the review that found the gap: on a six-qubit line the couplers
+# 0-1 and 1-2 are at 0.50 and qubits 0-2 read at 0.6; the rest is good.
+_REVIEW_CZ = {(i, i + 1): (0.50 if i < 2 else 0.995) for i in range(5)}
+_REVIEW_READOUT = {i: (0.6 if i < 3 else 0.985) for i in range(6)}
+
+
+@pytest.mark.parametrize("nest", [None, "properties", "calibration"])
+def test_automatic_layout_follows_calibration(nest) -> None:
+    """Regression: the automatic layout was [0, 1] whatever the calibration."""
+    backend, raw = _chip_backend(
+        _line_edges(6), cz=_REVIEW_CZ, readout=_REVIEW_READOUT, nest=nest
+    )
+    backend.submit(_bell(), shots=100)
+    _, options = raw.calls[0]
+    assert sorted(options["initial_layout"]) == [3, 4]
+
+
+def test_calibration_ids_may_be_strings() -> None:
+    backend, raw = _chip_backend(_line_edges(6))
+    raw.config["qubit_metrics"] = [
+        {"id": str(q), "measure_f0": f, "measure_f1": f}
+        for q, f in _REVIEW_READOUT.items()
+    ]
+    raw.config["coupler_metrics"] = [
+        {"qubits": [str(a), str(b)], "cz_fidelity": f}
+        for (a, b), f in _REVIEW_CZ.items()
+    ]
+    _, layout = backend._transpile(_bell())
+    assert sorted(layout) == [3, 4]
+
+
+def test_single_qubit_circuit_goes_to_the_best_read_qubit() -> None:
+    readout = {0: 0.90, 1: 0.92, 2: 0.99, 3: 0.95}
+    backend, raw = _chip_backend(_line_edges(4), readout=readout)
+    backend.submit(_measured(1), shots=100)
+    _, options = raw.calls[0]
+    assert options["initial_layout"] == [2]
+
+
+def test_chip_without_calibration_keeps_its_layout(monkeypatch) -> None:
+    from quspect.backends._compile import compile_for_device
+    from quspect.transpiler._target import CompilationTarget
+
+    _forbid_calibration_placement(monkeypatch)
+    backend, raw = _chip_backend(_grid_edges(4, 4))
+    # Entries that are not calibration do not make a chip "calibrated".
+    raw.config["qubit_metrics"] = [
+        {"id": 0, "t1": 60.0},
+        {"id": 1, "measure_f0": None, "measure_f1": 0.9},
+        {"id": True, "measure_f0": 0.9, "measure_f1": 0.9},
+        {"id": 99, "measure_f0": 0.9, "measure_f1": 0.9},  # not a qubit of the chip
+        {"id": 2, "measure_f0": 1.5, "measure_f1": 0.9},
+        "junk",
+    ]
+    raw.config["coupler_metrics"] = [
+        {"qubits": [0, 1]},
+        {"qubits": [0, 5], "cz_fidelity": 0.99},  # not a coupler of the chip
+        {"qubits": [0], "cz_fidelity": 0.99},
+        {"qubits": [1, 2], "cz_fidelity": True},
+        None,
+    ]
+    target = CompilationTarget.from_backend(backend)
+    for circuit in [_bell(), _measured(1), *_random_circuits(6, seed=2)]:
+        routed, layout = backend._transpile(circuit)
+        expected, expected_layout = compile_for_device(target, circuit)
+        assert routed.to_json() == expected.to_json()
+        assert layout == expected_layout
+
+
+def test_explicit_layouts_skip_calibration_placement(monkeypatch) -> None:
+    from quspect.backends._compile import compile_for_device
+    from quspect.transpiler._target import CompilationTarget
+
+    _forbid_calibration_placement(monkeypatch)
+    backend, raw = _chip_backend(_line_edges(6), cz=_REVIEW_CZ, readout=_REVIEW_READOUT)
+    target = CompilationTarget.from_backend(backend)
+    circuit = _bell()
+    for explicit in (
+        {"physical_qubits": [0, 1, 2]},
+        {"initial_layout": [1, 0]},
+        {"initial_layout": [2, 1], "physical_qubits": [0, 1, 2]},
+    ):
+        routed, layout = backend._transpile(circuit, **explicit)
+        expected, expected_layout = compile_for_device(target, circuit, **explicit)
+        assert routed.to_json() == expected.to_json()
+        assert layout == expected_layout
+        assert set(layout) <= {0, 1, 2}  # the poor qubits, as asked
+
+    backend.submit(circuit, shots=100, transpile=False, initial_layout=[0, 1])
+    assert raw.calls[-1][1]["initial_layout"] == [0, 1]
+    with pytest.raises(AssertionError, match="must not be consulted"):
+        backend._transpile(circuit)
+
+
+def test_uncalibrated_coupler_counts_as_the_worst_published() -> None:
+    """A coupler the calibration skips must not look better than measured ones."""
+    cz = {(2, 3): 0.97, (3, 4): 0.99, (4, 5): 0.99}  # 0-1 and 1-2 are missing
+    backend, _ = _chip_backend(_line_edges(6), cz=cz)
+    _, layout = backend._transpile(_bell())
+    assert sorted(layout) == [3, 4]
+
+    readout = {3: 0.95, 4: 0.99, 5: 0.99}  # qubits 0-2 are missing
+    backend, _ = _chip_backend(_line_edges(6), readout=readout)
+    _, layout = backend._transpile(_bell())
+    assert sorted(layout) == [4, 5]
+
+
+def test_flat_calibration_never_costs_more_two_qubit_gates() -> None:
+    """A region of exactly the circuit's size has no routing room; on a chip
+    whose calibration is flat it must not replace the whole-chip placement."""
+    from quspect.backends._compile import compile_for_device
+    from quspect.transpiler._target import CompilationTarget
+
+    edges = _grid_edges(4, 4)
+    backend, _ = _chip_backend(
+        edges, cz=dict.fromkeys(edges, 0.98), readout=dict.fromkeys(range(16), 0.97)
+    )
+    target = CompilationTarget.from_backend(backend)
+    for circuit in _random_circuits(25, seed=3):
+        placed, _ = backend._transpile(circuit)
+        baseline, _ = compile_for_device(target, circuit)
+        assert _two_qubit_cost(placed) <= _two_qubit_cost(baseline), circuit.name
+
+
+def test_placement_is_never_estimated_below_the_whole_chip() -> None:
+    import random
+
+    from quspect.backends._compile import compile_for_device, estimated_log_fidelity
+    from quspect.transpiler._target import CompilationTarget
+
+    rng = random.Random(3)
+    edges = _grid_edges(5, 5)
+    cz = {edge: rng.uniform(0.9, 0.995) for edge in edges}
+    readout = {qubit: rng.uniform(0.9, 0.99) for qubit in range(25)}
+    backend, _ = _chip_backend(edges, cz=cz, readout=readout)
+    target = CompilationTarget.from_backend(backend)
+
+    def estimate(routed: QuantumCircuit, layout: list[int]) -> float:
+        return estimated_log_fidelity(
+            routed, edge_fidelity=cz, readout_fidelity=readout, layout=layout
+        )
+
+    better = 0
+    for circuit in _random_circuits(25, seed=4):
+        placed = backend._transpile(circuit)
+        baseline = compile_for_device(target, circuit)
+        assert estimate(*placed) >= estimate(*baseline) - 1e-9
+        better += estimate(*placed) > estimate(*baseline) + 1e-9
+    assert better >= 20
+
+
+def test_calibration_placed_circuits_keep_their_result() -> None:
+    """X/CX circuits have one outcome; it must survive placement and routing."""
+    import random
+
+    from quspect import Simulator
+
+    edges = _grid_edges(4, 4)
+    backend, _ = _chip_backend(
+        edges,
+        cz={edge: (0.60 if max(edge) < 8 else 0.99) for edge in edges},
+        readout={qubit: (0.70 if qubit < 8 else 0.98) for qubit in range(16)},
+    )
+    rng = random.Random(9)
+    for index in range(12):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"basis{index}")
+        circuit.x(0)
+        for qubit in range(1, n):
+            if rng.random() < 0.5:
+                circuit.x(qubit)
+        for _ in range(rng.randint(4, 12)):
+            circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        routed, layout = backend._transpile(circuit)
+        assert min(layout) >= 8, circuit.name
+        expected = Simulator(seed=1).run(circuit, shots=16).counts
+        assert set(Simulator(seed=1).run(routed, shots=16).counts) == set(expected)

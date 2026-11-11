@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from quspect.backends._base import CloudBackend, CloudJob, CompositeJob
+from quspect.backends._compile import (
+    compile_for_device,
+    estimated_log_fidelity,
+    fill_missing_fidelities,
+    keep_best,
+    placement_regions,
+)
 from quspect.backends._exceptions import (
     BackendError,
     PartialSubmissionError,
@@ -24,6 +31,7 @@ from quspect.ir.qsal import dumps
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
     from quspect.simulation.result import SimulationResult
+    from quspect.transpiler._target import CompilationTarget
 
 # lqcloud 0.6 accepts min(2000, (52_000 - shots) // 25) circuits per batch
 # (80 at the 50_000-shot maximum) as long as the estimated result fits the
@@ -57,6 +65,14 @@ class _PreparedExperiment:
     layout: tuple[int, ...] | None
 
 
+@dataclass(frozen=True)
+class _Calibration:
+    """What a chip publishes about its couplers and readout, per physical qubit."""
+
+    cz_fidelity: dict[tuple[int, int], float]
+    readout_fidelity: dict[int, float]
+
+
 class LogicalQubitBackend(CloudBackend):
     """A LogicalQubit QPU exposed as a batch-capable sampling backend."""
 
@@ -65,6 +81,7 @@ class LogicalQubitBackend(CloudBackend):
         self._provider = provider
         self._translator = LQCircuitTranslator()
         self._config_cache: dict[str, Any] | None = None
+        self._region_cache: dict[int, list[list[int]]] = {}
 
     def run(
         self,
@@ -125,6 +142,9 @@ class LogicalQubitBackend(CloudBackend):
             circuit: Bound circuit containing terminal measurements.
             shots: Number of samples.
             transpile: Whether QuSpect should decompose, optimize, and route.
+                Without ``initial_layout`` and ``physical_qubits`` the
+                circuit is placed by the chip's calibration when it
+                publishes one (see :meth:`_transpile`).
             initial_layout: Optional starting mapping where
                 ``initial_layout[logical] = physical``. With transpilation
                 disabled it is passed directly to the provider.
@@ -462,16 +482,111 @@ class LogicalQubitBackend(CloudBackend):
 
         ``physical_qubits`` restricts routing to an induced device subgraph.
         ``initial_layout`` fixes the starting logical-to-physical mapping.
-        See :func:`~quspect.backends._compile.compile_for_device`.
+        Each compilation is one
+        :func:`~quspect.backends._compile.compile_for_device` call.
+
+        With neither, the placement is automatic.  Routing on the whole chip
+        knows its topology only and tends to settle on the lowest indices,
+        so when the chip publishes CZ or readout fidelities the circuit is
+        also compiled on the best-calibrated connected regions (of its size,
+        and two qubits more; see
+        :func:`~quspect.backends._compile.placement_regions`).  The program
+        with the highest product of the fidelities of the two-qubit gates
+        and readouts it uses is kept; the whole-chip program wins ties, and
+        is the only one compiled for a chip without calibration.
         """
-        from quspect.backends._compile import compile_for_device
         from quspect.transpiler._target import CompilationTarget
 
+        target = CompilationTarget.from_backend(self)
+        if initial_layout is None and physical_qubits is None:
+            calibration = self._calibration(target)
+            if calibration is not None:
+                return keep_best(
+                    self._automatic_placements(target, circuit, calibration),
+                    lambda placed: estimated_log_fidelity(
+                        placed[0],
+                        edge_fidelity=calibration.cz_fidelity,
+                        readout_fidelity=calibration.readout_fidelity,
+                        layout=placed[1],
+                    ),
+                )
         return compile_for_device(
-            CompilationTarget.from_backend(self),
+            target,
             circuit,
             initial_layout=initial_layout,
             physical_qubits=physical_qubits,
+        )
+
+    def _automatic_placements(
+        self,
+        target: CompilationTarget,
+        circuit: QuantumCircuit,
+        calibration: _Calibration,
+    ) -> Iterator[tuple[QuantumCircuit, list[int] | None]]:
+        """The whole-chip program first, then one per calibration region."""
+        yield compile_for_device(target, circuit)
+        size = circuit.num_qubits
+        if size not in self._region_cache:
+            self._region_cache[size] = placement_regions(
+                size,
+                range(target.num_qubits),
+                sorted(target.coupling_graph),
+                calibration.readout_fidelity,
+                calibration.cz_fidelity,
+            )
+        for region in self._region_cache[size]:
+            routed, layout = compile_for_device(target, circuit, physical_qubits=region)
+            if layout is None and len(region) == routed.num_qubits:
+                # A pool without couplers is not routed: its qubits, in order.
+                layout = list(region)
+            if layout is not None:
+                yield routed, layout
+
+    def _calibration(self, target: CompilationTarget) -> _Calibration | None:
+        """CZ and readout fidelities from the chip's config, if it has any.
+
+        LQCloud publishes ``coupler_metrics`` (``qubits``, ``cz_fidelity``)
+        and ``qubit_metrics`` (``id``, ``measure_f0``, ``measure_f1``) at
+        the top level of ``backend.config``, or under ``properties`` or
+        ``calibration``.  Only couplers and qubits of this chip's topology
+        count.  One that lacks a value others have counts as the worst one
+        published, so a partial calibration never attracts a circuit to
+        what it did not measure.  ``None`` when the chip gives neither kind
+        (or has no couplers): placement then stays on topology alone.
+        """
+        if not target.coupling_graph:
+            return None
+        cfg = self._get_config()
+        cz: dict[tuple[int, int], float] = {}
+        for entry in _metrics(cfg, "coupler_metrics"):
+            if not isinstance(entry, dict):
+                continue
+            pair = entry.get("qubits")
+            fidelity = _fidelity(entry.get("cz_fidelity"))
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                continue
+            a, b = _qubit_id(pair[0]), _qubit_id(pair[1])
+            if a is None or b is None or fidelity is None:
+                continue
+            edge = (min(a, b), max(a, b))
+            if edge in target.coupling_graph:
+                cz.setdefault(edge, fidelity)
+        readout: dict[int, float] = {}
+        for entry in _metrics(cfg, "qubit_metrics"):
+            if not isinstance(entry, dict):
+                continue
+            qubit = _qubit_id(entry.get("id"))
+            ground = _fidelity(entry.get("measure_f0"))
+            excited = _fidelity(entry.get("measure_f1"))
+            if qubit is None or ground is None or excited is None:
+                continue
+            if qubit < target.num_qubits:
+                readout.setdefault(qubit, (ground + excited) / 2.0)
+        if not cz and not readout:
+            return None
+        return _Calibration(
+            cz_fidelity=fill_missing_fidelities(cz, sorted(target.coupling_graph)),
+            readout_fidelity=fill_missing_fidelities(readout, range(target.num_qubits)),
         )
 
     @property
@@ -551,3 +666,27 @@ class LogicalQubitBackend(CloudBackend):
 
     def __repr__(self) -> str:
         return f"LogicalQubitBackend(name={self.name!r}, qubits={self.num_qubits})"
+
+
+def _metrics(config: dict[str, Any], name: str) -> list[Any]:
+    """A calibration list from the places LQCloud's config may keep it."""
+    for section in (config, config.get("properties"), config.get("calibration")):
+        if isinstance(section, dict) and isinstance(section.get(name), list):
+            return list(section[name])
+    return []
+
+
+def _fidelity(value: Any) -> float | None:
+    """A published fidelity: a real number in ``(0, 1]``, else ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if 0.0 < value <= 1.0 else None
+
+
+def _qubit_id(value: Any) -> int | None:
+    """A physical qubit index written as an int or a decimal string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return value if isinstance(value, int) and value >= 0 else None
