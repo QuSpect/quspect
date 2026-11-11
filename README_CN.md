@@ -602,6 +602,12 @@ print(result.counts)
 3. 使用 SABRE 选择逻辑到物理比特的 mapping，并插入满足 coupling topology
    的 SWAP。
 
+未指定 `physical_qubits` 和 `initial_layout` 时，如果芯片公布了标定数据（后端
+config 中的 `coupler_metrics[].cz_fidelity`、`qubit_metrics[].measure_f0/measure_f1`），
+布局会按标定选位：QuSpect 分别在整块芯片和标定最好的连通区域（与线路同样大小、
+以及多两个比特）上编译，提交所用两比特门与读出保真度乘积最高的那份程序。
+估计值相同时保留整块芯片上的结果；没有标定数据的芯片仍只按拓扑布局，与此前一致。
+
 如果标定结果表明部分物理比特质量更好，可用 `physical_qubits` 将 mapping 和
 所有路由 SWAP 限制在这些比特形成的诱导子图内：
 
