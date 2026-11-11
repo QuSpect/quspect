@@ -264,7 +264,10 @@ class OptimizePass:
     one ``u3``. With ``basis_gates`` the fusion is basis-aware: a run is
     resynthesized directly into the basis (e.g. ``rz·h·rz·h·rz`` for an
     ``{h, rz, cz, …}`` basis) and replaced only when that is strictly
-    cheaper, so the output stays in the basis and never grows.
+    cheaper, so the output stays in the basis and never grows. Gates
+    outside the basis are not lowered by this pass (a run containing them
+    is resynthesized only when the result has no more gates than the run):
+    run :class:`DecomposePass` first for an output entirely in the basis.
 
     Args:
         max_iterations: Maximum number of pipeline iterations passed to

@@ -856,6 +856,13 @@ How it works:
   smallest connected subset from Quafu's fidelity-ranked `priority_qubits`,
   then submitted with the server compiler disabled, so the chip runs exactly
   the submitted physical circuit.
+- **Past Quafu's suggestions, placement follows the calibration.** When no
+  `priority_qubits` subset holds the circuit, QuSpect compiles it on the
+  whole usable chip and on the best-calibrated connected regions (of the
+  circuit's size, and two qubits larger), and sends the program with the
+  highest product of CZ, single-qubit and readout fidelities. The whole-chip
+  program wins ties, so flat calibration does not move a circuit unless a
+  region saves gates.
 - `physical_qubits=[...]` / `initial_layout=[...]` constrain the placement;
   `transpile=False` submits a circuit whose indices are already physical
   (couplings are validated locally).
@@ -872,6 +879,12 @@ How it works:
 - Each circuit is one Quafu task; `submit_request()` returns a recoverable
   `CompositeJob` for batches, and `provider.retrieve_job(job.reference)` or
   `provider.retrieve_job(task_id, backend_name="Haituo")` reattaches later.
+- Reading a job: `job.result(timeout=...)` raises `JobTimeoutError`
+  (`exc.result_pending` is `True`) while the result is not available yet, and
+  a plain `JobError` (`result_pending` is `False`) for a failed or cancelled
+  task, a task Quafu does not know (`error_type == "not_found"`) or a result
+  that cannot be decoded. `job.cancel()` returns whether Quafu acknowledged
+  the request; `job.provider_status()` gives Quafu's own status text.
 
 ### Origin Quantum (本源量子)
 
@@ -912,8 +925,11 @@ result = backend.run(qc, shots=2000)
   Origin Quantum (`provider_mapping=True`). `readout_correction` maps to the
   provider's "amend" flag (on by default).
 - **Results** — Origin Quantum returns probabilities, so
-  `result.probabilities` is the provider distribution and `result.counts` is
-  `round(p * shots)` (`result.metadata["counts_source"] == "probabilities"`).
+  `result.probabilities` is the provider distribution and `result.counts`
+  allocates the shots to it by the largest-remainder rule, so the counts sum
+  to `shots` (`result.metadata["counts_source"] == "probabilities"`). Negative
+  readout-corrected values are clipped and the rest renormalized; the
+  provider's unmodified values are then in `metadata["quasi_probabilities"]`.
 - The `full_amplitude` simulator takes no options and no native batches;
   requests become one job per circuit. Jobs cannot be cancelled. QPU shots are
   limited by the chip's `MaxShots` (49 600 on `WK_C180_2`).

@@ -719,3 +719,150 @@ def test_depth_weight_selection(monkeypatch: pytest.MonkeyPatch) -> None:
         assert st.two_qubit_gates + w * st.two_qubit_depth <= best
     with pytest.raises(ValueError, match="depth_weight"):
         transpile(circ, target, optimization_level=3, depth_weight=-1.0)
+
+
+# ---------------------------------------------------------------------------
+# Logical width when the highest qubits end up without gates
+# ---------------------------------------------------------------------------
+#
+# A QuantumCircuit infers its width from the highest qubit in use, so a circuit
+# whose top qubits lose their gates before routing (an ``id``, gates that
+# cancel) gets narrower inside the compiler.  The compiled result must still
+# place every logical qubit of the input.
+
+
+def _line(n: int) -> CompilationTarget:
+    return CompilationTarget.from_coupling_map(
+        n, [(i, i + 1) for i in range(n - 1)], native_gates=set(BASIS)
+    )
+
+
+def _ring(n: int) -> CompilationTarget:
+    return CompilationTarget.from_coupling_map(
+        n, [(i, (i + 1) % n) for i in range(n)], native_gates=set(BASIS)
+    )
+
+
+_IDLE_TOP = {
+    "id": lambda: QuantumCircuit().h(0).id(1),
+    "x-x": lambda: QuantumCircuit().h(0).x(1).x(1),
+    "cx-cx": lambda: QuantumCircuit().h(0).cx(0, 1).cx(0, 1),
+    "swap-swap": lambda: QuantumCircuit().h(0).swap(0, 1).swap(0, 1),
+    "rz-zero": lambda: QuantumCircuit().h(0).rz(0.0, 1),
+    "two-idle": lambda: QuantumCircuit().h(0).cx(0, 1).id(2).x(3).x(3),
+    "all-idle": lambda: QuantumCircuit().x(0).x(0),
+}
+
+
+def _assert_places_every_qubit(
+    circ: QuantumCircuit, result: TranspileResult, target: CompilationTarget
+) -> None:
+    n = circ.num_qubits
+    for layout in (result.initial_layout, result.final_layout):
+        assert len(layout) == len(set(layout)) == n
+        assert all(0 <= p < target.num_qubits for p in layout)
+    _assert_equivalent(circ, result, target)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+@pytest.mark.parametrize("name", sorted(_IDLE_TOP))
+def test_initial_layout_with_idle_top_qubit(name: str, level: int) -> None:
+    circ = _IDLE_TOP[name]()
+    target = _line(5)
+    layout = [3, 1, 4, 0][: circ.num_qubits]
+    result = transpile(
+        circ, target, optimization_level=level, seed=0, initial_layout=layout
+    )
+    assert result.initial_layout == layout
+    _assert_places_every_qubit(circ, result, target)
+    # without a layout the same circuit compiles as before
+    free = transpile(circ, target, optimization_level=level, seed=0)
+    _assert_places_every_qubit(circ, free, target)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+def test_idle_top_qubit_moves_with_the_routing_swaps(level: int) -> None:
+    # On the line 0-1-2-3 the requested layout puts the idle logical qubit 3
+    # (its two X cancel) on physical 1, between the interacting qubits 0 and 1:
+    # routing has to swap through it, and its state travels with the SWAP.
+    circ = QuantumCircuit().h(0).cx(0, 1).t(1).cx(0, 1).cx(1, 2).x(3).x(3)
+    target = _line(4)
+    layout = [0, 2, 3, 1]
+    result = transpile(
+        circ, target, optimization_level=level, seed=0, initial_layout=layout
+    )
+    assert result.initial_layout == layout
+    assert result.stats.num_swaps > 0
+    _assert_places_every_qubit(circ, result, target)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+@pytest.mark.parametrize("seed", [0, 5])
+def test_idle_top_qubit_without_layout_when_routing_borrows_every_qubit(
+    level: int, seed: int
+) -> None:
+    # Four logical qubits on a four-qubit ring: logical 3 is idle after the
+    # optimization and routing borrows the last physical qubit as workspace.
+    # The layouts used to come back with three entries.
+    circ = QuantumCircuit().cx(1, 2).cx(1, 0).ry(1.097, 0).cx(0, 1).cx(2, 0)
+    circ.h(2).h(1).x(3).x(3)
+    target = _ring(4)
+    result = transpile(circ, target, optimization_level=level, seed=seed)
+    _assert_places_every_qubit(circ, result, target)
+
+
+def test_initial_layout_is_checked_against_the_input_width() -> None:
+    target = _line(4)
+    idle_top = QuantumCircuit().h(0).cx(0, 1).id(2)
+    for level in (0, 1, 2, 3):
+        # one entry per logical qubit of the input, whatever the optimization removes
+        kwargs = {"optimization_level": level, "seed": 0}
+        for bad in ([1, 0], [1, 0, 2, 3]):
+            with pytest.raises(ValueError, match="initial_mapping length"):
+                transpile(idle_top, target, initial_layout=bad, **kwargs)
+        with pytest.raises(ValueError, match="duplicates"):
+            transpile(idle_top, target, initial_layout=[1, 0, 0], **kwargs)
+        with pytest.raises(ValueError, match="outside the target range"):
+            transpile(idle_top, target, initial_layout=[1, 0, 4], **kwargs)
+        # a circuit wider than the device is rejected even if its top qubit is idle
+        for wide in (QuantumCircuit().h(0).id(5), QuantumCircuit().h(0).x(5).x(5)):
+            with pytest.raises(ValueError, match="6 logical qubits"):
+                transpile(wide, target, **kwargs)
+
+
+def test_random_circuits_with_idle_qubits_and_layouts() -> None:
+    """Property check: random circuits whose qubits go idle in different ways,
+    with and without a requested layout, on small devices at every level."""
+    rng = random.Random(20261109)
+    targets = [_line(4), _line(6), _ring(5), _grid(2, 3)]
+    for case in range(48):
+        target = targets[case % len(targets)]
+        n = rng.randint(2, min(5, target.num_qubits))
+        busy = rng.randint(1, n - 1)  # qubits busy .. n-1 end up without gates
+        circ = QuantumCircuit()
+        for q in range(busy):
+            circ.h(q)
+        for _ in range(rng.randint(0, 8) if busy > 1 else 0):
+            a, b = rng.sample(range(busy), 2)
+            circ.cx(a, b) if rng.random() < 0.5 else circ.cp(rng.uniform(0, 3), a, b)
+            circ.rz(rng.uniform(0, 3), b)
+        for q in range(busy, n):
+            kind = rng.randrange(4)
+            other = rng.randrange(busy)
+            if kind == 0:
+                circ.id(q)
+            elif kind == 1:
+                circ.x(q).x(q)
+            elif kind == 2:
+                circ.cx(other, q).cx(other, q)
+            else:
+                circ.swap(other, q).swap(other, q)
+        assert circ.num_qubits == n
+        level = case % 4
+        layout = rng.sample(range(target.num_qubits), n) if case % 3 else None
+        result = transpile(
+            circ, target, optimization_level=level, seed=case, initial_layout=layout
+        )
+        if layout is not None:
+            assert result.initial_layout == layout
+        _assert_places_every_qubit(circ, result, target)

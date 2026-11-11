@@ -117,6 +117,37 @@ def _cp(qc: Any, qubits: list[int], params: list[float]) -> None:
 _GATE_MAP = _build_gate_map()
 
 
+def _measurement_run(
+    instructions: list[dict[str, Any]], start: int
+) -> tuple[list[int], int]:
+    """Return the qubits of the consecutive measurements starting at ``start``.
+
+    lqcloud wants a barrier between a qubit's last operation and its
+    measurement, and LQCloud reads the measured qubits out together.  A run
+    of consecutive ``MEASURE`` instructions therefore shares one barrier over
+    all its qubits; a ``barrier(q); measure(q)`` pair per instruction would
+    stagger the readout.  The run stops before an instruction that measures
+    one of its qubits again, because a repeated measurement needs a barrier
+    of its own.
+
+    Returns:
+        ``(qubits, end)``: the distinct measured qubits in order and the
+        index one past the last instruction of the run.
+    """
+    qubits: dict[int, None] = {}
+    end = start
+    while end < len(instructions):
+        instruction = instructions[end]
+        if instruction.get("type", "") != "MEASURE":
+            break
+        measured = [int(q) for q in instruction.get("qubits", [])]
+        if end > start and not qubits.keys().isdisjoint(measured):
+            break
+        qubits.update(dict.fromkeys(measured))
+        end += 1
+    return list(qubits), end
+
+
 class LQCircuitTranslator:
     """Translate QSAL JSON to an lqcloud QuantumCircuit."""
 
@@ -160,6 +191,9 @@ class LQCircuitTranslator:
         # its first measurement).  Track coverage per qubit: a single global
         # boolean is incorrect for partial barriers and repeated measurements.
         barriered_qubits: set[int] = set()
+        # Consecutive measurements share one barrier (see _measurement_run):
+        # instructions before this index already had theirs emitted.
+        run_end = 0
 
         for i, instr in enumerate(instructions):
             itype = instr.get("type", "")
@@ -213,10 +247,12 @@ class LQCircuitTranslator:
                         f"but {len(clbits)} classical bits"
                     )
 
-                missing = [q for q in qubits if q not in barriered_qubits]
-                if missing:
-                    qc.barrier(*missing)
-                    barriered_qubits.update(missing)
+                if i >= run_end:
+                    run_qubits, run_end = _measurement_run(instructions, i)
+                    missing = [q for q in run_qubits if q not in barriered_qubits]
+                    if missing:
+                        qc.barrier(*missing)
+                        barriered_qubits.update(missing)
 
                 for q_idx, c_idx in zip(qubits, clbits, strict=True):
                     qc.measure(q_idx, c_idx)

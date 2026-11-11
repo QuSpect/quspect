@@ -1447,8 +1447,12 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         py::arg("return_samples") = false, "Decode QSAL JSON, validate, and run in one call. Returns ExecutionResult.");
 
     // ---- DensityMatrix (header-only, explicitly instantiated) ----
+    // The constructor throws std::invalid_argument (ValueError) above max_qubits and std::bad_alloc
+    // (MemoryError) when the matrix does not fit in memory.
     py::class_<runtime::DensityMatrix<double>>(m, "DensityMatrix64", py::module_local())
         .def(py::init<uint32_t>(), py::arg("num_qubits"))
+        .def_property_readonly_static("max_qubits",
+                                      [](const py::object&) { return runtime::DensityMatrix<double>::MaxQubits(); })
         .def_property_readonly("num_qubits", &runtime::DensityMatrix<double>::num_qubits)
         .def_property_readonly("dim", &runtime::DensityMatrix<double>::dim)
         .def("trace", &runtime::DensityMatrix<double>::Trace)
@@ -1461,6 +1465,8 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
 
     py::class_<runtime::DensityMatrix<float>>(m, "DensityMatrix32", py::module_local())
         .def(py::init<uint32_t>(), py::arg("num_qubits"))
+        .def_property_readonly_static("max_qubits",
+                                      [](const py::object&) { return runtime::DensityMatrix<float>::MaxQubits(); })
         .def_property_readonly("num_qubits", &runtime::DensityMatrix<float>::num_qubits)
         .def_property_readonly("dim", &runtime::DensityMatrix<float>::dim)
         .def("trace", &runtime::DensityMatrix<float>::Trace)

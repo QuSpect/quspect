@@ -233,6 +233,41 @@ def test_state_error_and_bound_converge() -> None:
     assert commutator_bound(4, terms, 1.0, 4, 1) > 0.0
 
 
+@pytest.mark.parametrize("order", [1, 2])
+def test_commutator_bound_depends_on_the_magnitude_of_time(order: int) -> None:
+    """The bound is a norm: backward evolution is bounded as forward evolution."""
+    terms = heisenberg(4)
+    for steps in (1, 3):
+        forward = commutator_bound(4, terms, 1.0, steps, order)
+        backward = commutator_bound(4, terms, -1.0, steps, order)
+        assert backward == forward > 0.0
+    assert commutator_bound(4, terms, 0.0, 1, order) == 0.0
+    assert commutator_bound(4, terms, -0.0, 1, order) == 0.0
+
+
+def test_commutator_bound_holds_for_random_hamiltonians_and_signed_times() -> None:
+    """Property check: the bound is non-negative, even in ``t`` and at least the
+    true operator-norm error of the formula (dense reference)."""
+    rng = np.random.default_rng(20261109)
+    n = 3
+    for _ in range(30):
+        terms = []
+        for _ in range(int(rng.integers(2, 7))):
+            k = int(rng.integers(1, n + 1))
+            qubits = tuple(int(q) for q in rng.choice(n, size=k, replace=False))
+            letters = "".join(rng.choice(list("XYZ"), size=k))
+            terms.append((letters, qubits, float(rng.normal())))
+        t = float(rng.uniform(0.05, 1.5)) * (-1.0 if rng.random() < 0.7 else 1.0)
+        steps = int(rng.integers(1, 5))
+        exact = hamiltonian_unitary(terms, t, n)
+        for order in (1, 2):
+            bound = commutator_bound(n, terms, t, steps, order)
+            assert bound >= 0.0
+            assert bound == commutator_bound(n, terms, -t, steps, order)
+            u = rotations_unitary(product_formula(terms, t, steps, order), n)
+            assert bound >= np.linalg.norm(u - exact, 2) - 1e-9
+
+
 # ---------------------------------------------------------------- native synthesis
 
 
@@ -377,6 +412,77 @@ def test_compile_evolution_line_target(term_order: str) -> None:
         )
 
 
+def _assert_evolution_on_device(res, n: int, target: CompilationTarget) -> None:
+    """The compiled circuit is the rotation sequence, on couplings of ``target``."""
+    for layout in (res.initial_layout, res.final_layout):
+        assert len(layout) == len(set(layout)) == n
+    for ins in res.circuit.instructions:
+        assert ins.gate.name in target.native_gates
+        if len(ins.qubits) == 2:
+            assert tuple(sorted(ins.qubits)) in target.coupling_graph
+    want = rotations_unitary(res.rotations, n)
+    big = target.num_qubits
+    assert (
+        layout_error(res.circuit, big, want, res.initial_layout, res.final_layout)
+        < 1e-8
+    )
+
+
+@native_only
+@pytest.mark.parametrize(
+    "terms",
+    [
+        [("ZZ", (1, 2), 1.0), ("X", (2,), 1.0)],  # qubit 0 idle
+        [("ZZ", (0, 3), 1.0), ("X", (0,), 0.5), ("X", (3,), 0.5)],  # 1, 2 idle
+        [("XX", (0, 2), 0.4), ("ZZ", (2, 4), 0.7), ("Y", (4,), 0.3)],  # 1, 3 idle
+    ],
+)
+@pytest.mark.parametrize("shape", ["grid", "line"])
+def test_compile_evolution_on_device_with_idle_qubit_index(terms, shape: str) -> None:
+    """A Hamiltonian may skip a qubit index (the network candidate used to fail
+    with "initial_mapping length ... must equal the circuit qubit count")."""
+    edges = GRID_2X3 if shape == "grid" else line(5)
+    size = 6 if shape == "grid" else 5
+    target = CompilationTarget.from_coupling_map(size, edges, native_gates=GATES)
+    n = 1 + max(max(q) for _, q, _ in terms)
+    for methods in (("network", "ladder"), ("network",), ("ladder",)):
+        res = compile_evolution(terms, 1.0, target, steps=2, order=2, methods=methods)
+        assert set(res.candidates) == set(methods)
+        _assert_evolution_on_device(res, n, target)
+
+
+@native_only
+def test_compile_evolution_random_hamiltonians_with_idle_indices() -> None:
+    """Property check: random Hamiltonians that leave qubit indices unused."""
+    rng = np.random.default_rng(20261109)
+    targets = [
+        CompilationTarget.from_coupling_map(6, GRID_2X3, native_gates=GATES),
+        CompilationTarget.from_coupling_map(6, line(6), native_gates=GATES),
+        CompilationTarget.from_coupling_map(
+            5, [(0, 1), (0, 2), (0, 3), (0, 4)], native_gates=GATES
+        ),
+    ]
+    for case in range(18):
+        target = targets[case % len(targets)]
+        n = int(rng.integers(3, target.num_qubits + 1))
+        active = sorted(
+            int(q)
+            for q in rng.choice(n - 1, size=int(rng.integers(1, n - 1)), replace=False)
+        ) + [n - 1]
+        terms = []
+        for _ in range(int(rng.integers(2, 6))):
+            k = int(rng.integers(1, min(3, len(active)) + 1))
+            qubits = tuple(int(q) for q in rng.choice(active, size=k, replace=False))
+            letters = "".join(rng.choice(list("XYZ"), size=k))
+            terms.append((letters, qubits, float(rng.uniform(0.2, 1.0))))
+        terms.append(("Z", (n - 1,), 0.5))  # the Hamiltonian has n qubits
+        assert len({q for _, qs, _ in terms for q in qs}) < n
+        res = compile_evolution(
+            terms, 0.7, target, steps=int(rng.integers(1, 3)), order=2, **FAST
+        )
+        _assert_evolution_on_device(res, n, target)
+
+
 @native_only
 @pytest.mark.parametrize("on_line", [False, True])
 def test_compile_evolution_network_beats_ladder_on_jw_strings(on_line: bool) -> None:
@@ -418,6 +524,53 @@ def test_compile_evolution_eps_meets_target() -> None:
         terms, 1.0, eps=1e-2, order=2, error_metric="bound", methods=("ladder",)
     )
     assert bres.error_metric == "bound" and bres.steps >= 1
+
+
+@pytest.mark.parametrize(
+    ("order", "metric"),
+    [(1, "bound"), (2, "bound"), (1, "state"), (2, "state"), (4, "state")],
+)
+def test_compile_evolution_eps_meets_target_for_negative_time(
+    order: int, metric: str
+) -> None:
+    """``eps`` is met for ``t < 0`` as for ``t > 0`` (the order-2 bound used to be
+    negative there, so one step "met" every ``eps``)."""
+    terms = heisenberg(4)
+    eps = 2e-2
+    kwargs = {"eps": eps, "order": order, "error_metric": metric}
+    fast = {"methods": ("ladder",), "optimization_level": 1}
+    back = compile_evolution(terms, -1.0, **kwargs, **fast)
+    assert back.error_metric == metric
+    assert back.error_estimate is not None and 0.0 <= back.error_estimate <= eps
+    if metric == "bound":
+        fwd = compile_evolution(terms, 1.0, **kwargs, **fast)
+        assert (back.steps, back.error_estimate) == (fwd.steps, fwd.error_estimate)
+    # the formula really is that close to exp(-i H t), and so is the circuit
+    exact = hamiltonian_unitary(terms, -1.0, 4)
+    u = rotations_unitary(back.rotations, 4)
+    ov = np.trace(exact.conj().T @ u)
+    assert np.linalg.norm(u - ov / abs(ov) * exact, 2) <= (
+        eps if metric == "bound" else 3 * eps
+    )
+    big = max(4, 1 + max(max(i.qubits) for i in back.circuit.instructions))
+    assert (
+        layout_error(back.circuit, big, exact, back.initial_layout, back.final_layout)
+        <= 1.5 * eps
+    )
+
+
+def test_select_term_order_bound_metric_with_negative_time() -> None:
+    terms = heisenberg(4, periodic=True) + [
+        ("Z", (q,), 0.3 * (q + 1)) for q in range(4)
+    ]
+    kwargs = {"error_metric": "bound", "compile_options": FAST}
+    back = select_term_order(terms, -0.5, 5e-2, 2, **kwargs)
+    fwd = select_term_order(terms, 0.5, 5e-2, 2, **kwargs)
+    assert {k: v[:2] for k, v in back.table.items()} == {
+        k: v[:2] for k, v in fwd.table.items()
+    }
+    assert all(0.0 < e <= 5e-2 for _, e, _ in back.table.values())
+    assert back.steps > 1
 
 
 @native_only

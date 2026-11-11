@@ -12,7 +12,7 @@ import re
 import pytest
 
 from quspect import QuantumCircuit
-from quspect.backends import JobReference, JobStatus
+from quspect.backends import ExecutionRequest, JobReference, JobStatus
 from quspect.backends._exceptions import (
     AuthenticationError,
     BackendError,
@@ -25,11 +25,19 @@ from quspect.backends.originq import _provider as provider_module
 from quspect.backends.originq._backend import OriginQBackend
 from quspect.backends.originq._job import parse_task_result
 from quspect.backends.originq._translator import decode_distribution, translate
+from tests.backends._measurement_cases import (
+    FULL_SPELLINGS,
+    measurements_are_last,
+    random_measured_circuits,
+    used_after_measurement,
+)
 from tests.backends._originq_fakes import (
     KEY,
     WK_C180_2_AVAILABLE,
     FakeCloud,
+    assert_same_distribution,
     chip_info_payload,
+    quspect_exact_distribution,
 )
 
 URL = "http://cloud.invalid"
@@ -282,6 +290,108 @@ def test_timeout_and_failure() -> None:
         job.result(poll_interval=1e-3)
 
 
+@pytest.mark.parametrize(
+    "task_result",
+    [
+        ["{not json"],
+        ['{"key":["0x0"],"value":["abc"]}'],
+        ['{"key":["0x0"],"value":[null]}'],
+        [{"key": ["0x0"], "value": [[1.0]]}],
+    ],
+    ids=["bad-json", "text-value", "null-value", "list-value"],
+)
+def test_malformed_completed_result_raises_job_error(task_result) -> None:
+    """A finished task whose result cannot be decoded is a JobError.
+
+    Bare ValueError/TypeError could not be told from a programming error,
+    and callers that catch JobError kept polling a task that had finished.
+    """
+    detail = {"taskState": "3", "taskResult": task_result}
+    with pytest.raises(JobError, match="taskResult") as caught:
+        parse_task_result(detail)
+    assert isinstance(caught.value.__cause__, (ValueError, TypeError))
+
+    job = OriginQJob(_StubClient([detail]), "T", reference=_reference("T"))
+    with pytest.raises(JobError) as caught:
+        job.result(poll_interval=1e-3)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert caught.value.job_id == "T"
+    assert isinstance(caught.value.__cause__, (ValueError, TypeError))
+
+
+def _two_clbit_result(values: dict[str, float], shots: int | None):
+    entry = json.dumps({"key": list(values), "value": list(values.values())})
+    reference = JobReference(
+        platform="originq",
+        backend_name="full_amplitude",
+        job_id="T",
+        shots=shots,
+        experiment_shapes=((2, 2),),
+        measurement_maps=(((0,), (1,)),),
+    )
+    client = _StubClient([{"taskState": "3", "taskResult": [entry]}])
+    return OriginQJob(client, "T", reference=reference).result(poll_interval=1e-3)
+
+
+def test_counts_from_quasi_probabilities_sum_to_shots() -> None:
+    """Regression: [0.6, 0.5, -0.1] gave 1100 counts for 1000 shots."""
+    result = _two_clbit_result({"0x0": 0.6, "0x1": 0.5, "0x2": -0.1}, 1000)
+
+    assert result.counts == {"00": 545, "10": 455}
+    assert sum(result.counts.values()) == result.num_shots == 1000
+    # Negative quasi-probabilities are clipped, the rest renormalized ...
+    assert result.probabilities == pytest.approx(
+        {"00": 0.6 / 1.1, "01": 0.0, "10": 0.5 / 1.1}
+    )
+    assert sum(result.probabilities.values()) == pytest.approx(1.0)
+    # ... and the provider's own values stay available.
+    assert result.metadata["quasi_probabilities"] == {"00": 0.6, "01": -0.1, "10": 0.5}
+    assert result.metadata["counts_source"] == "probabilities"
+
+
+@pytest.mark.parametrize(
+    ("values", "shots", "expected"),
+    [
+        # round() gave 333 + 333 + 333 = 999.
+        (
+            {"0x0": 1 / 3, "0x1": 1 / 3, "0x2": 1 / 3},
+            1000,
+            {"00": 334, "01": 333, "10": 333},
+        ),
+        # round() gave 123 + 234 + 346 + 296 = 999.
+        (
+            {"0x0": 0.1234, "0x1": 0.2345, "0x2": 0.3456, "0x3": 0.2965},
+            1000,
+            {"00": 123, "10": 235, "01": 346, "11": 296},
+        ),
+        # round() gave 2 + 2 + 2 + 2 = 8 counts for 6 shots.
+        ({"0x0": 0.25, "0x1": 0.25, "0x2": 0.25, "0x3": 0.25}, 6, None),
+        ({"0x0": 0.3, "0x3": 0.7}, 1000, {"00": 300, "11": 700}),
+        ({"0x0": 0.999, "0x3": 0.001}, 100, {"00": 100}),
+        # Unnormalized provider values (counts) are normalized first.
+        ({"0x0": 25.0, "0x3": 75.0}, 8, {"00": 2, "11": 6}),
+    ],
+    ids=["thirds", "four", "quarters", "exact", "tiny", "unnormalized"],
+)
+def test_counts_are_a_largest_remainder_allocation(values, shots, expected) -> None:
+    result = _two_clbit_result(values, shots)
+
+    assert sum(result.counts.values()) == shots
+    assert all(count > 0 for count in result.counts.values())
+    for key, count in result.counts.items():
+        assert abs(count - result.probabilities[key] * shots) < 1.0
+    if expected is not None:
+        assert result.counts == expected
+    assert "quasi_probabilities" not in result.metadata
+
+
+def test_counts_without_shots_or_weight_are_empty() -> None:
+    assert _two_clbit_result({"0x0": 0.5, "0x3": 0.5}, None).counts == {}
+    empty = _two_clbit_result({"0x0": -0.2, "0x3": 0.0}, 100)
+    assert empty.counts == {} and empty.probabilities == {}
+    assert empty.metadata["quasi_probabilities"] == {"00": -0.2, "11": 0.0}
+
+
 def test_api_key_url_extraction_never_returns_the_secret() -> None:
     url = "http://example.invalid"
     key = f"{len(url):04x}" + url.encode().hex() + "deadbeef" * 4
@@ -388,3 +498,72 @@ def test_placement_without_calibration_falls_back_to_largest_component() -> None
     backend = _backend(FakeCloud(chips=chips), "X")
     assert backend.placement_qubits(2) == [0, 1]
     assert backend.placement_qubits(4) == [0, 1, 2]  # nothing fits: whole component
+
+
+# ------------------------------------------------- terminal measurements
+
+
+def _prepare_one(backend: OriginQBackend, circuit: QuantumCircuit):
+    request = ExecutionRequest.single(circuit, label="c", shots=100)
+    prepared, _ = backend._prepare(request)
+    return prepared[0].program
+
+
+def _routed(backend: OriginQBackend, circuit: QuantumCircuit) -> QuantumCircuit:
+    routed, _ = backend._compile(
+        circuit,
+        "c",
+        initial_layout=None,
+        physical_qubits=backend.placement_qubits(circuit.num_qubits),
+    )
+    return routed
+
+
+def test_per_qubit_measurements_are_not_refused_after_routing() -> None:
+    """Regression: "qubit(s) [...] are used after being measured".
+
+    One measure instruction per qubit let the router swap through a wire the
+    optimizer had already measured, and the translator refused the result.
+    """
+    chips = {"LINE5": chip_info_payload(5, range(5), [(i, i + 1) for i in range(4)])}
+    backend = _backend(FakeCloud(chips=chips), "LINE5")
+    circuit = QuantumCircuit()
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [qubit])
+
+    program = _prepare_one(backend, circuit)
+
+    lines = program.text.splitlines()
+    assert [line.split()[0] for line in lines[-3:]] == ["MEASURE"] * 3
+    assert not any(line.startswith("MEASURE") for line in lines[:-3])
+    routed = _routed(backend, circuit)
+    assert any(i.is_gate and i.gate.name == "cz" for i in routed.instructions)
+    assert used_after_measurement(routed) == []
+    assert_same_distribution(
+        quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+    )
+
+
+@pytest.mark.parametrize("spelling", FULL_SPELLINGS)
+def test_random_circuits_keep_terminal_measurements_on_wk_c180(spelling: str) -> None:
+    backend = _wk_c180_backend()
+    for circuit in random_measured_circuits(spelling, count=25):
+        program = _prepare_one(backend, circuit)  # refused before the fix
+        assert program.measurement.num_clbits == circuit.num_clbits
+        routed = _routed(backend, circuit)
+        assert used_after_measurement(routed) == []
+        assert measurements_are_last(routed)
+        assert_same_distribution(
+            quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+        )
+
+
+def test_mid_circuit_measurement_in_the_input_is_still_refused() -> None:
+    chips = {"LINE5": chip_info_payload(5, range(5), [(i, i + 1) for i in range(4)])}
+    backend = _backend(FakeCloud(chips=chips), "LINE5")
+    circuit = QuantumCircuit()
+    circuit.x(0).measure([0], [0]).x(0).cx(0, 1).measure([0, 1], [1, 2])
+    with pytest.raises(TranslationError, match="used after being measured"):
+        _prepare_one(backend, circuit)

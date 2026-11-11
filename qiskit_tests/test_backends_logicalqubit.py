@@ -334,19 +334,21 @@ def test_translator_barrier_tracking_partial_and_repeated() -> None:
     circ.barrier()  # covers all three qubits
     circ.measure([0], [0])  # covered: no extra barrier
     circ.x(1)  # invalidates qubit 1
-    circ.measure([1, 2], [1, 2])  # needs barrier on 1 only
-    circ.measure([0], [0])  # 0 consumed by first measure: barrier again
+    circ.measure([1, 2], [1, 2])  # 1 needs a barrier, 2 is still covered
+    circ.measure([0], [0])  # 0 consumed by first measure: needs one again
     circ.barrier(2)
     ops = _translate(circ).ops
     tail = ops[3:]
+    # The two consecutive measure instructions are one run: the qubits of the
+    # run that need a barrier (1 and 0) share a single one in front of it, so
+    # the provider reads the run out together.
     assert tail == [
         ("barrier", (0, 1, 2)),
         ("measure", (0, 0)),
         ("x", (1,)),
-        ("barrier", (1,)),
+        ("barrier", (1, 0)),
         ("measure", (1, 1)),
         ("measure", (2, 2)),
-        ("barrier", (0,)),
         ("measure", (0, 0)),
         ("barrier", (2,)),
     ]

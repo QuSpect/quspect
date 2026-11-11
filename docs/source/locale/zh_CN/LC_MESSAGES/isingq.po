@@ -91,11 +91,28 @@ msgstr ""
 "``not_created``。轮询失败使用 ``not_applicable``：请使用已保存的任务 ID "
 "重试读取，切勿把读取失败当作提交失败的证据。"
 
-#: ../../source/isingq.rst:61
+#: ../../source/isingq.rst:60
+msgid ""
+"A create request that the provider answers with an HTTP client error (for "
+"example 400, 401, 403 or 404) is a definite refusal and uses ``rejected``: "
+"no task exists, and ``status_code`` and ``provider_message`` on the error "
+"say why. Timeouts, conflicts and throttling (408, 409, 425, 429), server "
+"errors and an answer without a task ID stay ``unknown``. "
+"``provider_message`` is the provider's own text with credentials and URLs "
+"removed; show it to the user, do not parse it. A failed ``poll`` snapshot "
+"carries the same field when the provider explained the failure."
+msgstr ""
+"若服务商以 HTTP 客户端错误（例如 400、401、403 或 404）回应创建请求，这是明确的拒绝，使用 "
+"``rejected``：任务不存在，错误对象上的 ``status_code`` 与 ``provider_message`` "
+"说明原因。超时、冲突与限流（408、409、425、429）、服务端错误以及不含任务 ID 的应答仍为 "
+"``unknown``。``provider_message`` 是服务商自己的说明文字，已去除凭据和 "
+"URL；请把它展示给用户，不要解析它。服务商说明了失败原因时，失败的 ``poll`` 快照也带有同名字段。"
+
+#: ../../source/isingq.rst:70
 msgid "Cloud limitations"
 msgstr "云端限制"
 
-#: ../../source/isingq.rst:63
+#: ../../source/isingq.rst:72
 msgid ""
 "The adapter follows the published ``plectrum-core`` 0.1.2 and ``isingq-"
 "toolkit`` 0.5.0 protocol. It uses bounded HTTPS requests and sends only "
@@ -114,14 +131,27 @@ msgstr ""
 "是服务商的路由值，不能证明任务由哪台物理机器执行。``gear`` "
 "未对外暴露，因为已发布的云端实现并不发送该参数。系数量化及其允许范围仍由服务商定义；本适配器不会静默舍入系数，也不声称与硬件能量严格等价。"
 
-#: ../../source/isingq.rst:73
+#: ../../source/isingq.rst:82
+msgid ""
+"Since November 2026 the upload signature names a directory (``dir``), and "
+"the provider's storage policy only admits object keys under it. The client "
+"uploads to ``<dir><random>/quspect-qubo.csv``; the random segment keeps two "
+"submissions apart even when the provider signs the same directory twice. A "
+"signature without ``dir`` keeps the earlier ``<random>/quspect-qubo.csv`` "
+"key."
+msgstr ""
+"自 2026 年 11 月起，上传签名会指定一个目录（``dir``），服务商的存储策略只接受该目录下的对象键。客户端上传到 "
+"``<dir><random>/quspect-qubo.csv``；即使服务商两次签发同一个目录，随机段也能把两次提交区分开。不含 "
+"``dir`` 的签名沿用原来的 ``<random>/quspect-qubo.csv`` 键。"
+
+#: ../../source/isingq.rst:88
 msgid ""
 "The conversion and transport are covered by exhaustive small-model "
 "identities and mocked protocol tests. Live account acceptance is a "
 "separate deployment check."
 msgstr "转换与传输由小规模模型的穷举恒等式测试和模拟协议测试覆盖。真实账户验收是单独的部署检查。"
 
-#: ../../source/isingq.rst:76
+#: ../../source/isingq.rst:91
 msgid ""
 "References: `iSing SDK documentation <https://help-"
 "center.isingq.com/8744708m0>`_, `Plectrum source <https://github.com"

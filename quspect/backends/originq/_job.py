@@ -42,9 +42,16 @@ class OriginQJob(CloudJob):
 
     Origin Quantum returns probabilities rather than shot counts (also on
     real QPUs, where readout correction is applied server-side by default).
-    ``probabilities`` therefore holds the provider distribution and
-    ``counts`` is derived as ``round(probability * shots)``; the result
-    metadata records ``counts_source="probabilities"``.
+    ``probabilities`` therefore holds the provider distribution, with
+    negative (readout-corrected) values clipped to zero and the rest
+    renormalized.  ``counts`` allocates the requested shots to it by the
+    largest-remainder rule, so the counts sum to the shots; the result
+    metadata records ``counts_source="probabilities"`` and, when the
+    provider reported a negative value, its unmodified values as
+    ``quasi_probabilities``.
+
+    A completed task whose result cannot be decoded raises
+    :class:`~quspect.backends.JobError` chained to the decoding error.
     """
 
     def __init__(
@@ -123,28 +130,55 @@ class OriginQJob(CloudJob):
         return self._reference
 
 
-def parse_task_result(detail: Mapping[str, Any]) -> list[dict[str, float]]:
-    """Return one ``{hex key: value}`` distribution per submitted program."""
+def parse_task_result(
+    detail: Mapping[str, Any], *, job_id: str | None = None
+) -> list[dict[str, float]]:
+    """Return one ``{hex key: value}`` distribution per submitted program.
+
+    Raises:
+        JobError: If ``taskResult`` is missing or malformed.  A decoding
+            failure (invalid JSON, a value that is not a number) is chained
+            as the error's ``__cause__``.
+    """
     raw = detail.get("taskResult")
     if not isinstance(raw, list):
-        raise JobError("Origin Quantum task has no taskResult list.")
+        raise JobError("Origin Quantum task has no taskResult list.", job_id=job_id)
     distributions: list[dict[str, float]] = []
     for item in raw:
-        entry = json.loads(item) if isinstance(item, str) else item
+        try:
+            entry = json.loads(item) if isinstance(item, str) else item
+        except ValueError as exc:
+            raise JobError(
+                f"Origin Quantum taskResult entry is not valid JSON: {exc}",
+                job_id=job_id,
+            ) from exc
         if not isinstance(entry, Mapping):
-            raise JobError("Origin Quantum taskResult entry is not an object.")
+            raise JobError(
+                "Origin Quantum taskResult entry is not an object.", job_id=job_id
+            )
         keys, values = entry.get("key"), entry.get("value")
         if (
             not isinstance(keys, list)
             or not isinstance(values, list)
             or len(keys) != len(values)
         ):
-            raise JobError("Origin Quantum taskResult entry has mismatched keys.")
+            raise JobError(
+                "Origin Quantum taskResult entry has mismatched keys.", job_id=job_id
+            )
         distribution: dict[str, float] = {}
         for key, value in zip(keys, values, strict=True):
-            numeric = float(value)
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise JobError(
+                    f"Origin Quantum taskResult value for {key!r} is not a "
+                    f"number: {value!r}.",
+                    job_id=job_id,
+                ) from exc
             if not math.isfinite(numeric):
-                raise JobError(f"Non-finite Origin Quantum value for {key!r}.")
+                raise JobError(
+                    f"Non-finite Origin Quantum value for {key!r}.", job_id=job_id
+                )
             distribution[str(key)] = distribution.get(str(key), 0.0) + numeric
         distributions.append(distribution)
     return distributions
@@ -158,7 +192,7 @@ def convert_result(
 ) -> ExecutionBatch:
     """Convert a finished ``taskDetail`` into an ordered :class:`ExecutionBatch`."""
     maps = reference.measurement_maps
-    distributions = parse_task_result(detail)
+    distributions = parse_task_result(detail, job_id=job_id)
     if len(distributions) != len(maps):
         raise JobError(
             "Origin Quantum result count does not match the submitted "
@@ -219,17 +253,16 @@ def _convert_one(
         "counts_source": "probabilities",
     }
     if any(value < 0 for value in values.values()):
+        # Readout correction can return slightly negative quasi-probabilities.
+        # Keep the provider's values; clip and renormalize the distribution.
         metadata["quasi_probabilities"] = dict(sorted(values.items()))
-    total = sum(values.values())
+    clipped = {key: max(0.0, value) for key, value in values.items()}
+    total = sum(clipped.values())
     probabilities = (
-        {key: value / total for key, value in values.items()} if total > 0 else {}
+        {key: value / total for key, value in clipped.items()} if total > 0 else {}
     )
     num_shots = shots or 0
-    counts: dict[str, int] = {}
-    for key, value in probabilities.items():
-        count = int(round(value * num_shots))
-        if count > 0:
-            counts[key] = count
+    counts = _allocate_shots(probabilities, num_shots)
     return SimulationResult(
         counts=dict(sorted(counts.items())),
         probabilities=dict(sorted(probabilities.items())),
@@ -238,3 +271,22 @@ def _convert_one(
         num_clbits=num_clbits,
         metadata=metadata,
     )
+
+
+def _allocate_shots(probabilities: Mapping[str, float], shots: int) -> dict[str, int]:
+    """Turn a distribution into counts by the largest-remainder rule.
+
+    Every outcome first gets ``floor(probability * shots)``; the shots that
+    are left go one each to the outcomes with the largest fractional parts
+    (ties: bitstring order).  Unlike rounding each outcome on its own, the
+    counts sum to ``shots`` for any normalized distribution.
+    """
+    if shots <= 0 or not probabilities:
+        return {}
+    quotas = {key: value * shots for key, value in probabilities.items()}
+    counts = {key: math.floor(quota) for key, quota in quotas.items()}
+    remaining = shots - sum(counts.values())
+    by_remainder = sorted(quotas, key=lambda key: (counts[key] - quotas[key], key))
+    for key in by_remainder[: max(0, remaining)]:
+        counts[key] += 1
+    return {key: count for key, count in counts.items() if count > 0}

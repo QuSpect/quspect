@@ -14,7 +14,7 @@ from quspect.backends._exceptions import (
 from quspect.backends._execution import JobReference
 from quspect.backends.quafu._backend import QuafuBackend
 from quspect.backends.quafu._client import QuafuClient, Transport
-from quspect.backends.quafu._job import QuafuJob
+from quspect.backends.quafu._job import QuafuJob, is_task_id
 
 
 class QuafuProvider:
@@ -132,8 +132,10 @@ class QuafuProvider:
         if isinstance(reference, bool) or not isinstance(reference, (str, int)):
             raise TypeError("reference must be a JobReference or a Quafu task id.")
         tid = str(reference).strip()
-        if not tid.isdigit():
-            raise ValueError(f"Quafu task ids are integers, got {reference!r}.")
+        if not is_task_id(tid):
+            raise ValueError(
+                f"Quafu task ids are positive integers, got {reference!r}."
+            )
         descriptor = JobReference(
             platform="quafu",
             backend_name=backend_name or "unknown",

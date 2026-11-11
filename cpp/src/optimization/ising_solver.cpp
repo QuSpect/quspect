@@ -96,8 +96,12 @@ std::uint64_t SplitMix64(std::uint64_t value) {
     return value ^ (value >> 31U);
 }
 
+// The base seed is scrambled before the read index is added.  Adding the index to the raw seed
+// would make read k of seed s the same stream as read 0 of seed s + k, so nearby seeds would repeat
+// each other's reads.  SplitMix64 is a bijection: the reads of one run always get distinct seeds, and
+// two base seeds share a read only if their scrambled values differ by less than num_reads.
 std::uint64_t SeedForRead(std::uint64_t base_seed, std::size_t read_index) {
-    return SplitMix64(base_seed + static_cast<std::uint64_t>(read_index));
+    return SplitMix64(SplitMix64(base_seed) + static_cast<std::uint64_t>(read_index));
 }
 
 double BetaAtSweep(const IsingSolverOptions& options, std::size_t sweep) {

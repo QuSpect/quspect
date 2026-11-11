@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import math
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,18 @@ from quspect import Parameter, QuantumCircuit
 from quspect.backends import CompositeJob, ExecutionBatch, ExecutionRequest
 from quspect.backends._exceptions import PartialSubmissionError, TranslationError
 from quspect.backends.logicalqubit._backend import LogicalQubitBackend
+from quspect.backends.logicalqubit._translator import LQCircuitTranslator
+from quspect.ir.qsal import dumps, loads
+from tests.backends._measurement_cases import (
+    FULL_SPELLINGS,
+    measurements_are_last,
+    random_measured_circuits,
+    used_after_measurement,
+)
+from tests.backends._originq_fakes import (
+    assert_same_distribution,
+    quspect_exact_distribution,
+)
 
 
 class _RawResult:
@@ -606,6 +619,129 @@ def test_invalid_workload_id_is_rejected_before_any_sdk_submission(
     with pytest.raises(ValueError, match="workload_id"):
         backend.submit_request(request)
     assert backend._lq_backend.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Terminal measurements
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLQCircuit:
+    """Stands in for lqcloud's ``QuantumCircuit``: records the calls made."""
+
+    def __init__(self, *sizes: int) -> None:
+        self.sizes = sizes
+        self.ops: list[tuple[str, tuple]] = []
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def record(*args) -> None:
+            self.ops.append((name, args))
+
+        return record
+
+
+@pytest.fixture
+def recording_lqcloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the real translator run without the lqcloud SDK installed."""
+    module = ModuleType("lqcloud.circuit.circuit")
+    module.QuantumCircuit = _RecordingLQCircuit
+    monkeypatch.setitem(sys.modules, "lqcloud", ModuleType("lqcloud"))
+    monkeypatch.setitem(sys.modules, "lqcloud.circuit", ModuleType("lqcloud.circuit"))
+    monkeypatch.setitem(sys.modules, "lqcloud.circuit.circuit", module)
+
+
+def _line_backend(num_qubits: int) -> tuple[_FakeSDKBackend, LogicalQubitBackend]:
+    raw = _FakeSDKBackend()
+    raw.config["qubits"] = num_qubits
+    raw.config["topology"] = {
+        "coupling_map": [[index, index + 1] for index in range(num_qubits - 1)]
+    }
+    return raw, LogicalQubitBackend(raw)
+
+
+def _measured_per_qubit() -> QuantumCircuit:
+    """Three qubits that all interact, measured one instruction per qubit."""
+    circuit = QuantumCircuit(name="per_qubit")
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [qubit])
+    return circuit
+
+
+def test_per_qubit_measurements_stay_terminal_after_routing() -> None:
+    """Regression: a SWAP was routed through an already measured wire."""
+    raw, backend = _line_backend(5)
+    backend._translator = _IdentityTranslator()
+    circuit = _measured_per_qubit()
+
+    backend.submit(circuit, shots=8)
+
+    document, _ = raw.calls[0]
+    routed = loads(document).circuit
+    assert routed is not None
+    assert any(i.is_gate and i.gate.name == "swap" for i in routed.instructions)
+    assert used_after_measurement(routed) == []
+    assert measurements_are_last(routed)
+    assert_same_distribution(
+        quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+    )
+
+
+@pytest.mark.parametrize("spelling", FULL_SPELLINGS)
+def test_random_circuits_keep_terminal_measurements(spelling: str) -> None:
+    raw, backend = _line_backend(7)
+    backend._translator = _IdentityTranslator()
+
+    for circuit in random_measured_circuits(spelling, count=25):
+        backend.submit(circuit, shots=8)
+        document, _ = raw.calls[-1]
+        routed = loads(document).circuit
+        assert routed is not None
+        assert used_after_measurement(routed) == []
+        assert measurements_are_last(routed)
+        assert_same_distribution(
+            quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+        )
+
+
+def test_consecutive_measurements_share_one_lqcloud_barrier(
+    recording_lqcloud: None,
+) -> None:
+    """LQCloud reads out together: no ``barrier(q); measure(q)`` pairs."""
+    raw, backend = _line_backend(5)
+
+    backend.submit(_measured_per_qubit(), shots=8)
+
+    program, _ = raw.calls[0]
+    names = [name for name, _ in program.ops]
+    first = names.index("measure")
+    assert names[first:] == ["measure"] * 3
+    assert names.count("barrier") == 1 and names[first - 1] == "barrier"
+    measured = [args[0] for _, args in program.ops[first:]]
+    assert len(set(measured)) == 3
+    assert sorted(program.ops[first - 1][1]) == sorted(measured)
+
+
+def test_translator_gives_a_repeated_measurement_its_own_barrier(
+    recording_lqcloud: None,
+) -> None:
+    circuit = QuantumCircuit().x(0)
+    circuit.measure([0], [0]).measure([1], [1]).measure([0], [2])
+
+    program = LQCircuitTranslator().translate(dumps(circuit))
+
+    assert program.ops == [
+        ("x", (0,)),
+        ("barrier", (0, 1)),
+        ("measure", (0, 0)),
+        ("measure", (1, 1)),
+        ("barrier", (0,)),
+        ("measure", (0, 2)),
+    ]
 
 
 # ---------------------------------------------------------------------------

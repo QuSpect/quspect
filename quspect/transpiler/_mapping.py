@@ -1624,32 +1624,9 @@ class SABRE:
         num_logical: int,
     ) -> list[int]:
         """Validate and copy a logical-to-physical starting mapping."""
-        if not isinstance(initial_mapping, (list, tuple)):
-            raise TypeError("initial_mapping must be a list or tuple of integers.")
-        mapping = list(initial_mapping)
-        if len(mapping) != num_logical:
-            raise ValueError(
-                f"initial_mapping length ({len(mapping)}) must equal the circuit "
-                f"qubit count ({num_logical})."
-            )
-        if not all(
-            isinstance(physical, int) and not isinstance(physical, bool)
-            for physical in mapping
-        ):
-            raise TypeError("initial_mapping must contain only integer qubits.")
-        if len(set(mapping)) != len(mapping):
-            raise ValueError("initial_mapping must not contain duplicates.")
-        invalid = [
-            physical
-            for physical in mapping
-            if physical < 0 or physical >= self._num_physical
-        ]
-        if invalid:
-            raise ValueError(
-                "initial_mapping contains indices outside the target range "
-                f"[0, {self._num_physical - 1}]: {invalid}."
-            )
-        return mapping
+        return validate_initial_mapping(
+            initial_mapping, num_logical, self._num_physical
+        )
 
     def _check_mapping_connectivity(
         self, pi: list[int], logical_groups: list[list[int]]
@@ -1740,6 +1717,55 @@ class SABRE:
 _GATE_CZ_COST = dict.fromkeys(
     ("cp", "cu1", "crz", "crx", "cry", "rzz", "rxx", "ryy", "rzx"), 2
 )
+
+
+def validate_initial_mapping(
+    initial_mapping: Sequence[int], num_logical: int, num_physical: int
+) -> list[int]:
+    """Validate and copy a logical-to-physical starting mapping.
+
+    Args:
+        initial_mapping: ``initial_mapping[logical] = physical``.
+        num_logical: Number of logical qubits the mapping must place.  A
+            :class:`QuantumCircuit` infers its width from the highest qubit
+            in use, so a caller that optimizes a circuit before routing it
+            passes the width of its *input* here (the top qubits may have
+            lost their gates since) and routes the remaining wires from the
+            leading entries of the returned list.
+        num_physical: Number of physical qubits of the target.
+
+    Returns:
+        The mapping as a new list.
+
+    Raises:
+        TypeError: If the mapping is not a list or tuple of integers.
+        ValueError: If its length differs from ``num_logical``, or it has
+            duplicates or indices outside ``[0, num_physical)``.
+    """
+    if not isinstance(initial_mapping, (list, tuple)):
+        raise TypeError("initial_mapping must be a list or tuple of integers.")
+    mapping = list(initial_mapping)
+    if len(mapping) != num_logical:
+        raise ValueError(
+            f"initial_mapping length ({len(mapping)}) must equal the circuit "
+            f"qubit count ({num_logical})."
+        )
+    if not all(
+        isinstance(physical, int) and not isinstance(physical, bool)
+        for physical in mapping
+    ):
+        raise TypeError("initial_mapping must contain only integer qubits.")
+    if len(set(mapping)) != len(mapping):
+        raise ValueError("initial_mapping must not contain duplicates.")
+    invalid = [
+        physical for physical in mapping if physical < 0 or physical >= num_physical
+    ]
+    if invalid:
+        raise ValueError(
+            "initial_mapping contains indices outside the target range "
+            f"[0, {num_physical - 1}]: {invalid}."
+        )
+    return mapping
 
 
 def _block_cost(total: int, swaps: int) -> int:

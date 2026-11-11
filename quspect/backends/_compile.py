@@ -54,6 +54,61 @@ def decompose_for_pairwise_routing(circuit: QuantumCircuit) -> QuantumCircuit:
     return decompose_circuit(circuit, supported_gates=gate_names - selected)
 
 
+def defer_terminal_measurements(circuit: QuantumCircuit) -> QuantumCircuit:
+    """Move every terminal measurement behind all other instructions.
+
+    A measurement is *terminal* when no later instruction acts on its qubits
+    or writes its classical bits, other than a barrier or another terminal
+    measurement.  It commutes with everything that follows it, so issuing it
+    last leaves the circuit's results unchanged.  Terminal measurements keep
+    their relative order; a mid-circuit measurement (one that is followed by
+    a gate on its qubit, or whose classical bit is written again by a
+    mid-circuit measurement) stays where it is.
+
+    Device compilation needs this before routing.  The optimizer may emit a
+    qubit's measurement as soon as that qubit's gates are done, ahead of
+    gates on other qubits; a SWAP inserted for one of those gates could then
+    cross the measured wire and turn a terminal measurement into a
+    mid-circuit one.  With the measurements issued last, the router (which
+    treats a measurement as a scheduling fence) places every SWAP before
+    them and each classical bit reads the physical qubit that holds its
+    logical qubit after the final SWAP.
+
+    Returns:
+        ``circuit`` itself when its terminal measurements are already last,
+        otherwise a reordered copy.
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+
+    instructions = circuit.instructions
+    blocked_qubits: set[int] = set()
+    blocked_clbits: set[int] = set()
+    terminal: set[int] = set()
+    for index in range(len(instructions) - 1, -1, -1):
+        instruction = instructions[index]
+        if instruction.is_barrier:
+            continue
+        if (
+            instruction.is_measure
+            and blocked_qubits.isdisjoint(instruction.qubits)
+            and blocked_clbits.isdisjoint(instruction.clbits)
+        ):
+            terminal.add(index)
+            continue
+        blocked_qubits.update(instruction.qubits)
+        blocked_clbits.update(instruction.clbits)
+
+    first = min(terminal, default=len(instructions))
+    if all(
+        index in terminal or instructions[index].is_barrier
+        for index in range(first, len(instructions))
+    ):
+        return circuit
+    body = [ins for index, ins in enumerate(instructions) if index not in terminal]
+    tail = [instructions[index] for index in sorted(terminal)]
+    return QuantumCircuit._from_instruction_snapshot(body + tail, name=circuit.name)
+
+
 def compile_for_device(
     device_target: CompilationTarget,
     circuit: QuantumCircuit,
@@ -79,12 +134,25 @@ def compile_for_device(
         between wires).  Measurements keep their original classical bits, so
         results are already in logical clbit order and need no qubit-level
         un-permutation.  ``layout`` is ``None`` when no routing happened.
+
+        Terminal measurements stay terminal: they come after every gate of
+        the returned circuit, each on the wire that holds its logical qubit
+        after the final SWAP.  A gate follows a measurement only when the
+        input circuit itself used a qubit after measuring it (see
+        :func:`defer_terminal_measurements`).
     """
+    from quspect.transpiler._mapping import validate_initial_mapping
     from quspect.transpiler._passes import (
         DecomposePass,
         LayoutRoutingPass,
         OptimizePass,
     )
+
+    # A QuantumCircuit infers its width from the highest qubit in use, so the
+    # optimized circuit below is narrower than the input when the top qubits
+    # lose their gates (gates that cancel).  ``initial_layout`` has one entry
+    # per logical qubit of the input.
+    num_logical = circuit.num_qubits
 
     # SABRE supports only one- and two-qubit operations.  This fallback is
     # required even when native gate metadata is absent or includes CCX:
@@ -103,6 +171,12 @@ def compile_for_device(
     # With a known basis, single-qubit runs are resynthesized directly
     # into native gates instead of being fused into ``u3``.
     circuit = OptimizePass.from_target(device_target).run(circuit)
+
+    # The optimizer orders instructions per wire, so it may emit a qubit's
+    # measurement ahead of gates on other qubits.  Issue terminal
+    # measurements last: no routing SWAP may cross a measured wire, and
+    # providers read out all measured qubits together.
+    circuit = defer_terminal_measurements(circuit)
 
     target = device_target
     dense_to_physical = list(range(device_target.num_qubits))
@@ -162,6 +236,13 @@ def compile_for_device(
 
     layout: list[int] | None = None
     if target.coupling_graph:
+        if dense_initial_layout is not None:
+            # Route the wires that still carry instructions from their
+            # requested qubits.  A logical qubit without any instruction left
+            # needs no wire: its physical qubit is free for routing.
+            dense_initial_layout = validate_initial_mapping(
+                dense_initial_layout, num_logical, target.num_qubits
+            )[: circuit.num_qubits]
         routed, candidate_layout, _ = LayoutRoutingPass(
             target,
             iter_num=3,
@@ -178,12 +259,12 @@ def compile_for_device(
                 for dense in candidate_layout[: routed.num_qubits]
             ]
     elif initial_layout is not None:
-        if len(initial_layout) != circuit.num_qubits:
+        if len(initial_layout) != num_logical:
             raise ValueError(
                 f"initial_layout length ({len(initial_layout)}) must equal "
-                f"the circuit qubit count ({circuit.num_qubits})."
+                f"the circuit qubit count ({num_logical})."
             )
-        layout = list(initial_layout)
+        layout = list(initial_layout)[: circuit.num_qubits]
 
     return circuit, layout
 

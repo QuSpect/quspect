@@ -90,6 +90,62 @@ def test_solver_is_reproducible_and_results_are_read_only() -> None:
     assert not first.objective_values.flags.writeable
 
 
+def _flat_reads(seed: int, num_reads: int) -> list[tuple[int, ...]]:
+    """Reads on a flat landscape, in read order.
+
+    Every proposed flip is accepted when all couplings are zero, so a read is
+    a pure function of its random stream.  All energies tie, and ties keep
+    their read order.
+    """
+    program = HardwareIsingProgram(
+        matrix=np.zeros((40, 40)),
+        variable_order=tuple(f"s{index}" for index in range(40)),
+        logical_variable_count=40,
+    )
+    result = NativeIsingSolver(seed=seed, num_reads=num_reads, sweeps=3).solve(program)
+    return [tuple(int(spin) for spin in row) for row in result.hardware_samples]
+
+
+@pytest.mark.parametrize("base_seed", [0, 7, 20260731, 2**64 - 100])
+def test_adjacent_seeds_share_no_more_reads_than_distant_seeds(base_seed: int) -> None:
+    """Read k of seed s must not be read 0 of seed s + k.
+
+    Two unrelated 40-spin reads agree with probability 2**-40, so neither
+    adjacent nor distant seeds may share a read.
+    """
+    num_reads = 64
+    base = set(_flat_reads(base_seed, num_reads))
+    assert len(base) == num_reads
+    distant = [2**32 + 5, 12345678901234567]
+    shared_with_distant = [
+        len(base & set(_flat_reads((base_seed + offset) % 2**64, num_reads)))
+        for offset in distant
+    ]
+    shared_with_adjacent = [
+        len(base & set(_flat_reads(base_seed + offset, num_reads)))
+        for offset in (1, 2, 3, num_reads - 1, num_reads, num_reads + 1)
+    ]
+    assert shared_with_distant == [0] * len(distant)
+    assert max(shared_with_adjacent) <= max(shared_with_distant)
+
+
+def test_single_reads_of_consecutive_seeds_differ_from_one_multi_read_run() -> None:
+    """``num_reads=1`` at seeds s, s+1, ... must not replay one run of seed s."""
+    multi = _flat_reads(0, 6)
+    single = [_flat_reads(seed, 1)[0] for seed in range(6)]
+    assert single[0] == multi[0]  # a read depends only on (seed, read index)
+    assert not set(single[1:]) & set(multi)
+
+
+def test_reads_of_adjacent_seeds_are_uncorrelated() -> None:
+    """Same-index reads of neighbouring seeds agree on about half the spins."""
+    first = np.array(_flat_reads(1000, 64))
+    second = np.array(_flat_reads(1001, 64))
+    agreement = float(np.mean(first == second))
+    # 2560 fair comparisons: one standard deviation is 0.01.
+    assert 0.44 < agreement < 0.56
+
+
 def test_exact_binding_matches_python_enumeration() -> None:
     """The Gray-code C++ oracle matches independent Python enumeration."""
     matrix = np.array(

@@ -4,8 +4,12 @@
 
 #include <algorithm>
 #include <complex>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace quspect::native::runtime {
@@ -20,7 +24,22 @@ class DensityMatrix {
     using Complex = std::complex<FP>;
     using Rng = std::mt19937_64;
 
-    explicit DensityMatrix(uint32_t num_qubits) : num_qubits_(num_qubits), dim_(uint64_t{1} << num_qubits) {
+    /// Largest qubit count whose 4^n entries fit in one allocation (PTRDIFF_MAX bytes): 29 for
+    /// both precisions on 64-bit platforms.  Whether that much memory exists is the allocator's
+    /// answer (std::bad_alloc).
+    static constexpr uint32_t MaxQubits() {
+        const uint64_t max_entries = static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max())
+                                     / sizeof(Complex);
+        uint32_t num_qubits = 0;
+        while (num_qubits < 31 && (uint64_t{1} << (2 * (num_qubits + 1))) <= max_entries) {
+            ++num_qubits;
+        }
+        return num_qubits;
+    }
+
+    /// Throws std::invalid_argument when num_qubits exceeds MaxQubits(): dim * dim would overflow
+    /// (an empty buffer for 32..63 qubits, an undefined shift from 64).
+    explicit DensityMatrix(uint32_t num_qubits) : num_qubits_(num_qubits), dim_(CheckedDim(num_qubits)) {
         amplitudes_.resize(dim_ * dim_, Complex{0, 0});
         amplitudes_[0] = Complex{1, 0};
     }
@@ -79,6 +98,11 @@ class DensityMatrix {
 
     // ---------------------------------------------------------------
     // ApplyUnitary: ρ → U ρ U†
+    //
+    // Neither the operator nor the data is cut by magnitude: U ρ U†
+    // must keep entries of any size, and a threshold on them loses
+    // trace over a long circuit.  Step 1 skips only exact zeros of the
+    // operator, which cannot change the sum.
     // ---------------------------------------------------------------
     void ApplyUnitary(const Complex* umat, const uint32_t* target_qubits, uint32_t num_targets) {
         const uint64_t k = num_targets;
@@ -131,7 +155,7 @@ class DensityMatrix {
                     Complex acc{0, 0};
                     for (uint64_t x = 0; x < kdim; ++x) {
                         Complex u_yx = umat[y * kdim + x];
-                        if (std::norm(u_yx) < FP{1e-15})
+                        if (u_yx == Complex{0, 0})
                             continue;
                         uint64_t src_row = basis0 | mask_list[x];
                         acc += u_yx * amplitudes_[src_row * dim_ + col];
@@ -151,10 +175,7 @@ class DensityMatrix {
                     Complex acc{0, 0};
                     for (uint64_t y = 0; y < kdim; ++y) {
                         uint64_t src_col = basis0 | mask_list[y];
-                        Complex val = temp[row * dim_ + src_col];
-                        if (std::norm(val) < FP{1e-15})
-                            continue;
-                        acc += val * std::conj(umat[x * kdim + y]);
+                        acc += temp[row * dim_ + src_col] * std::conj(umat[x * kdim + y]);
                     }
                     amplitudes_[row * dim_ + col] = acc;
                 }
@@ -262,6 +283,15 @@ class DensityMatrix {
     }
 
  private:
+    static uint64_t CheckedDim(uint32_t num_qubits) {
+        if (num_qubits > MaxQubits()) {
+            throw std::invalid_argument("DensityMatrix supports at most " + std::to_string(MaxQubits())
+                                        + " qubits (4^n complex entries must fit in memory), got "
+                                        + std::to_string(num_qubits));
+        }
+        return uint64_t{1} << num_qubits;
+    }
+
     uint32_t num_qubits_;
     uint64_t dim_;
     std::vector<Complex> amplitudes_;

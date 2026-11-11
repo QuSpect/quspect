@@ -11,7 +11,7 @@ SDK (MIT licensed) and was verified against the live service:
   ``{"circuit", "compile", "options"}`` -> integer task id
 * ``GET  /task/status/{tid}``        -> status string (``"Finished"``, ...)
 * ``GET  /task/result/{tid}``        -> ``{}`` until done, then a result dict
-* ``GET  /task/cancel/{tid}``
+* ``GET  /task/cancel/{tid}``        -> empty (``null``) body when accepted
 * ``GET  /task/backendtest/{chip}1`` -> chip topology and calibration
   (public, no token; the trailing ``1`` is part of the route)
 """
@@ -164,9 +164,15 @@ class QuafuClient:
             payload = json.loads(text) if text else None
         except ValueError:
             payload = text
-        if status in (401, 403):
+        if status == 401 or (status == 403 and _about_credentials(payload)):
             raise AuthenticationError(
                 f"Quafu rejected the API token ({status}): {_detail(payload)}"
+            )
+        if status == 403:
+            # Forbidden for a reason the body states (and that is not the
+            # token): report that reason instead of blaming the credentials.
+            raise BackendError(
+                f"Quafu refused {method} {path} (HTTP 403): {_detail(payload)}"
             )
         if status >= 400:
             raise BackendError(
@@ -182,6 +188,32 @@ class QuafuClient:
 
     def __repr__(self) -> str:
         return f"QuafuClient(url={self._url!r})"
+
+
+# Words by which a 403 body talks about the caller's credentials or rights.
+_CREDENTIAL_WORDS = (
+    "token",
+    "authenti",
+    "authoriz",
+    "credential",
+    "forbidden",
+    "permission",
+    "login",
+    "expired",
+)
+
+
+def _about_credentials(payload: Any) -> bool:
+    """Whether a 403 answer is (or may be) about the API token.
+
+    An empty body states no other reason, so it still reads as a rejected
+    token; a body that does state a reason counts only if it speaks of
+    credentials or access rights.
+    """
+    if not payload:
+        return True
+    text = _detail(payload).lower()
+    return any(word in text for word in _CREDENTIAL_WORDS)
 
 
 def _detail(payload: Any) -> str:
