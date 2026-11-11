@@ -9,12 +9,14 @@ check the full compile -> submit -> decode round trip.
 from __future__ import annotations
 
 import json
+import random
 import urllib.parse
 
 import pytest
 
 from quspect import QuantumCircuit
 from quspect.backends import CompositeJob, ExecutionBatch, ExecutionRequest, JobStatus
+from quspect.backends._compile import estimated_log_fidelity
 from quspect.backends._exceptions import (
     AuthenticationError,
     BackendNotFoundError,
@@ -24,7 +26,7 @@ from quspect.backends._exceptions import (
 )
 from quspect.backends._execution import CircuitExperiment, JobReference
 from quspect.backends.quafu import QuafuProvider
-from quspect.backends.quafu._backend import round_shots
+from quspect.backends.quafu._backend import QuafuBackend, round_shots
 from quspect.backends.quafu._client import resolve_token
 from quspect.backends.quafu._job import (
     convert_result,
@@ -335,6 +337,245 @@ def test_default_pool_prefers_connected_priority_subsets(backend) -> None:
     assert backend.default_physical_qubits(6) == [0, 1, 2, 3, 4, 5]
     with pytest.raises(TranslationError):
         backend.default_physical_qubits(7)
+
+
+# ---------------------------------------------------------------------------
+# Placement by calibration when no suggested group fits
+# ---------------------------------------------------------------------------
+
+
+def _chip(
+    couplers: dict[tuple[int, int], float],
+    *,
+    priority: list[list[int]] | None = None,
+    readout: dict[int, float] | None = None,
+) -> dict:
+    """A chip with the given CZ fidelities and (optionally) readout fidelities."""
+    count = max(max(pair) for pair in couplers) + 1
+    qubits = {}
+    for i in range(count):
+        qubits[f"Q{i}"] = {"label": f"Q{i}", "index": i, "fidelity": 0.999}
+        if readout is not None:
+            qubits[f"Q{i}"]["readout g_fidelity"] = readout.get(i, 0.0)
+            qubits[f"Q{i}"]["readout e_fidelity"] = readout.get(i, 0.0)
+    return {
+        **CHIP,
+        "size": [count, 1],
+        "priority_qubits": priority or [],
+        "qubits_info": qubits,
+        "couplers_info": {
+            f"C{i}": {
+                "label": f"C{i}",
+                "index": i,
+                "qubits_index": list(pair),
+                "fidelity": fidelity,
+            }
+            for i, (pair, fidelity) in enumerate(couplers.items())
+        },
+    }
+
+
+def _line(fidelities: list[float]) -> dict[tuple[int, int], float]:
+    return {(i, i + 1): fidelity for i, fidelity in enumerate(fidelities)}
+
+
+def _grid(rows: int, cols: int, fidelity) -> dict[tuple[int, int], float]:
+    couplers = {}
+    for row in range(rows):
+        for col in range(cols):
+            index = row * cols + col
+            if col + 1 < cols:
+                couplers[(index, index + 1)] = fidelity(index, index + 1)
+            if row + 1 < rows:
+                couplers[(index, index + cols)] = fidelity(index, index + cols)
+    return couplers
+
+
+def _random_circuits(count: int, seed: int) -> list[QuantumCircuit]:
+    rng = random.Random(seed)
+    circuits = []
+    for index in range(count):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"random{index}")
+        for qubit in range(n):
+            circuit.h(qubit)
+        for _ in range(rng.randint(4, 20)):
+            if rng.random() < 0.4:
+                circuit.ry(round(rng.uniform(-3, 3), 3), rng.randrange(n))
+            else:
+                circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        circuits.append(circuit)
+    return circuits
+
+
+def _used_qubits(circuit: QuantumCircuit) -> set[int]:
+    return {q for instruction in circuit.instructions for q in instruction.qubits}
+
+
+def _cz_count(circuit: QuantumCircuit) -> int:
+    return sum(1 for i in circuit.instructions if i.is_gate and i.gate.name == "cz")
+
+
+def _estimate(backend, circuit: QuantumCircuit) -> float:
+    cfg = backend.config
+    return estimated_log_fidelity(
+        circuit,
+        edge_fidelity=cfg["coupler_fidelity"],
+        readout_fidelity=cfg["readout_fidelity"],
+        gate_fidelity=cfg["qubit_fidelity"],
+    )
+
+
+def test_placement_past_the_suggested_groups_follows_calibration(provider, fake):
+    """Regression: with no fitting group, circuits landed on the lowest indices.
+
+    Qubits 0-3 are joined by poor (but calibrated) couplers, 4-7 by good
+    ones; Quafu only suggests a two-qubit group.
+    """
+    chip = _chip(
+        _line([0.60, 0.05, 0.60, 0.90, 0.995, 0.995, 0.995]), priority=[[5, 6]]
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+
+    # The pool methods keep their meaning: Quafu's group, else every usable qubit.
+    assert backend.default_physical_qubits(2) == [5, 6]
+    assert backend.default_physical_qubits(3) == list(range(8))
+    with pytest.raises(TranslationError, match="no connected group"):
+        backend.default_physical_qubits(9)
+
+    backend.submit(_ghz(2))
+    backend.submit(_ghz(3))
+    backend.submit(_ghz(4))
+    sent = [qasm2_loads(task["body"]["circuit"]) for task in fake.tasks.values()]
+    assert _used_qubits(sent[0]) == {5, 6}  # Quafu's suggestion
+    assert _used_qubits(sent[1]) == {4, 5, 6}
+    assert _used_qubits(sent[2]) == {4, 5, 6, 7}
+
+
+def test_placement_follows_readout_fidelity(provider):
+    """Couplers alike, qubits 0-2 read poorly: the circuit moves off them."""
+    readout = {i: (0.60 if i < 3 else 0.97) for i in range(8)}
+    chip = _chip(_line([0.98] * 7), readout=readout)
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    assert backend.config["readout_fidelity"] == readout
+
+    physical, layout = backend._transpile(
+        _ghz(3), initial_layout=None, physical_qubits=None
+    )
+    assert _used_qubits(physical) == set(layout) == {3, 4, 5}
+
+
+def test_unmeasured_readout_counts_as_the_worst_published(provider):
+    """Quafu writes 0 for a readout it did not measure; that is not "perfect"."""
+    readout = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.90, 4: 0.99, 5: 0.99, 6: 0.99}
+    chip = _chip(_line([0.98] * 6), readout=readout)
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    assert backend.config["readout_fidelity"] == {3: 0.90, 4: 0.99, 5: 0.99, 6: 0.99}
+    assert set(backend.config["usable_qubits"]) == set(range(7))
+
+    physical, _ = backend._transpile(_ghz(3), initial_layout=None, physical_qubits=None)
+    assert _used_qubits(physical) == {4, 5, 6}
+
+
+def test_flat_calibration_never_costs_more_two_qubit_gates(provider):
+    """A region of exactly the circuit's size has no routing room; on a chip
+    whose calibration is flat it must not replace the whole-chip placement."""
+    chip = _chip(_grid(4, 4, lambda a, b: 0.98))
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    whole = list(range(16))
+    for circuit in _random_circuits(25, seed=3):
+        placed, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=None
+        )
+        baseline, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=whole
+        )
+        assert _cz_count(placed) <= _cz_count(baseline), circuit.name
+
+
+def test_placement_is_never_estimated_below_the_whole_chip(provider):
+    rng = random.Random(3)
+    values: dict[tuple[int, int], float] = {}
+    chip = _chip(
+        _grid(5, 5, lambda a, b: values.setdefault((a, b), rng.uniform(0.9, 0.995))),
+        readout={i: rng.uniform(0.9, 0.99) for i in range(25)},
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    whole = list(range(25))
+    better = 0
+    for circuit in _random_circuits(25, seed=4):
+        placed, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=None
+        )
+        baseline, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=whole
+        )
+        assert _estimate(backend, placed) >= _estimate(backend, baseline) - 1e-9
+        better += _estimate(backend, placed) > _estimate(backend, baseline) + 1e-9
+    assert better >= 20
+
+
+def test_suggested_groups_and_explicit_pools_skip_calibration_placement(
+    provider, monkeypatch
+):
+    """Only the no-group fallback compiles on calibration-chosen regions."""
+    import quspect.backends.quafu._backend as module
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("placement_regions must not be consulted here")
+
+    monkeypatch.setattr(module, "placement_regions", unexpected)
+    chip = _chip(
+        _line([0.60, 0.60, 0.60, 0.90, 0.995, 0.995, 0.995]), priority=[[0, 1, 2]]
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    circuit = _ghz(3)
+
+    suggested, layout = backend._transpile(
+        circuit, initial_layout=None, physical_qubits=None
+    )
+    assert set(layout) == {0, 1, 2}  # Quafu's group, poor as its couplers are
+    explicit, _ = backend._transpile(
+        circuit, initial_layout=None, physical_qubits=[0, 1, 2]
+    )
+    assert suggested.to_json() == explicit.to_json()
+
+    _, layout = backend._transpile(
+        circuit, initial_layout=[2, 1, 0], physical_qubits=None
+    )
+    assert layout == [2, 1, 0]
+    _, layout = backend._transpile(
+        _ghz(4), initial_layout=None, physical_qubits=[0, 1, 2, 3]
+    )
+    assert set(layout) == {0, 1, 2, 3}
+    with pytest.raises(AssertionError, match="must not be consulted"):
+        backend._transpile(_ghz(4), initial_layout=None, physical_qubits=None)
+
+
+def test_calibration_placed_circuits_keep_their_result(provider, fake):
+    """X/CX circuits have one outcome; it must survive placement and routing."""
+    chip = _chip(
+        _grid(4, 4, lambda a, b: 0.60 if max(a, b) < 8 else 0.99),
+        readout={i: (0.70 if i < 8 else 0.98) for i in range(16)},
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    rng = random.Random(9)
+    for index in range(12):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"basis{index}")
+        for qubit in range(n):
+            if rng.random() < 0.5:
+                circuit.x(qubit)
+        circuit.x(0)
+        for _ in range(rng.randint(4, 12)):
+            circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        expected = Simulator(seed=1).run(circuit, shots=16)
+        result = backend.run(circuit, shots=1024, poll_interval=0.001)
+        assert set(result.counts) == set(expected.counts), circuit.name
+        sent = qasm2_loads(fake.tasks[max(fake.tasks)]["body"]["circuit"])
+        assert min(_used_qubits(sent)) >= 8, circuit.name
 
 
 def test_transpiled_qasm_is_native_and_on_usable_couplers(backend, fake) -> None:

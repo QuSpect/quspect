@@ -8,8 +8,8 @@ to the device basis, optimize, then route it on the device coupling graph.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from quspect.circuit.circuit import QuantumCircuit
@@ -20,6 +20,17 @@ if TYPE_CHECKING:
 # or omits a native gate set altogether.  Keep this list deliberately narrow:
 # a provider translator can still accept CCX when transpilation is disabled.
 PAIRWISE_ROUTING_DECOMPOSITION_GATES = frozenset({"ccx"})
+
+# Native two-qubit gates a two-qubit instruction costs on a CZ/CX chip, for
+# :func:`estimated_log_fidelity`: a SWAP is three, a controlled rotation two.
+_TWO_QUBIT_GATE_COST = {"cx": 1, "cz": 1, "swap": 3}
+_OTHER_TWO_QUBIT_GATE_COST = 2
+
+# Estimates closer than this (in log-fidelity) count as equal.
+_ESTIMATE_TOLERANCE = 1e-9
+
+_K = TypeVar("_K", bound=Hashable)
+_T = TypeVar("_T")
 
 
 def decompose_for_pairwise_routing(circuit: QuantumCircuit) -> QuantumCircuit:
@@ -264,6 +275,8 @@ def select_region(
     coupling_map: Sequence[Sequence[int]],
     qubit_fidelity: Mapping[int, float],
     edge_fidelity: Mapping[tuple[int, int], float],
+    *,
+    compact_ties: bool = False,
 ) -> list[int] | None:
     """Pick a connected set of ``size`` qubits with the best calibration.
 
@@ -273,6 +286,12 @@ def select_region(
     lowest qubit indices).  Qubits without calibration data count as
     perfect; qubits whose calibration is ``0`` are never used.  Returns
     ``None`` when no connected region of that size exists.
+
+    With ``compact_ties`` equally good neighbours are told apart by shape
+    before index: the one with the most couplers into the region, then the
+    one nearest the seed.  Where calibration is flat the lowest-index rule
+    grows a line, which leaves routing no shortcut; this grows a block.
+    Calibration still decides whenever it differs.
     """
     usable = {q for q in available if qubit_fidelity.get(q, 1.0) > 0.0}
     adjacency: dict[int, set[int]] = {q: set() for q in usable}
@@ -292,6 +311,7 @@ def select_region(
     for start in sorted(usable):
         region = [start]
         members = {start}
+        distance = {start: 0}
         score = log(qubit_fidelity.get(start, 1.0))
         while len(region) < size:
             candidates = [
@@ -308,6 +328,20 @@ def select_region(
             if not candidates:
                 break
             gain, _, chosen = max(candidates)
+            if compact_ties:
+                tied = {v for other, _, v in candidates if other >= gain - 1e-12}
+                chosen = min(
+                    tied,
+                    key=lambda v: (
+                        -len(adjacency[v] & members),
+                        min(distance[u] for u in adjacency[v] & members),
+                        v,
+                    ),
+                )
+                gain = max(other for other, _, v in candidates if v == chosen)
+                distance[chosen] = 1 + min(
+                    distance[u] for u in adjacency[chosen] & members
+                )
             region.append(chosen)
             members.add(chosen)
             score += gain
@@ -317,3 +351,117 @@ def select_region(
         if best is None or score > best[0] + 1e-12:
             best = (score, ordered)
     return None if best is None else best[1]
+
+
+def placement_regions(
+    num_qubits: int,
+    available: Sequence[int],
+    coupling_map: Sequence[Sequence[int]],
+    qubit_fidelity: Mapping[int, float],
+    edge_fidelity: Mapping[tuple[int, int], float],
+    *,
+    workspace: int = 2,
+) -> list[list[int]]:
+    """Calibration-chosen pools worth compiling a ``num_qubits`` circuit on.
+
+    The best-calibrated connected region of exactly ``num_qubits`` qubits,
+    and the best one with ``workspace`` more: the first uses nothing but the
+    best qubits, the second leaves routing room to move.  Which serves a
+    circuit better depends on the circuit, so callers compile on each and
+    keep the best program (:func:`keep_best`).  Sizes the chip cannot hold
+    are left out; the list is empty when not even ``num_qubits`` fit.
+    """
+    regions: list[list[int]] = []
+    for size in (num_qubits, num_qubits + workspace):
+        region = select_region(
+            max(1, size),
+            available,
+            coupling_map,
+            qubit_fidelity,
+            edge_fidelity,
+            compact_ties=True,
+        )
+        if region is not None and region not in regions:
+            regions.append(region)
+    return regions
+
+
+def fill_missing_fidelities(
+    known: Mapping[_K, float], keys: Iterable[_K]
+) -> dict[_K, float]:
+    """Give every key a fidelity: its own, else the worst published one.
+
+    A qubit or coupler the calibration skips must not look better than the
+    ones it measured, so it counts as the lowest positive value given for
+    its kind.  When nothing is published the result is empty and lookups
+    fall back to "perfect", which keeps an uncalibrated kind neutral.
+    """
+    if not known:
+        return {}
+    worst = min((value for value in known.values() if value > 0.0), default=1.0)
+    filled = dict(known)
+    for key in keys:
+        filled.setdefault(key, worst)
+    return filled
+
+
+def estimated_log_fidelity(
+    circuit: QuantumCircuit,
+    *,
+    edge_fidelity: Mapping[tuple[int, int], float],
+    readout_fidelity: Mapping[int, float],
+    gate_fidelity: Mapping[int, float] | None = None,
+    layout: Sequence[int] | None = None,
+) -> float:
+    """Log of the product of the calibrated fidelities a program uses.
+
+    One factor per two-qubit gate (the coupler's fidelity; a SWAP counts as
+    three gates, a two-qubit gate other than CX/CZ as two), per measured
+    qubit (its readout fidelity) and, with ``gate_fidelity``, per
+    single-qubit gate.  Anything without a calibration value counts as
+    perfect.  ``layout[wire]`` names the physical qubit of each circuit
+    wire; without it the circuit's indices are physical.
+
+    This ranks placements of one circuit against each other; it is not a
+    prediction of the measured success probability.
+    """
+
+    def physical(wire: int) -> int:
+        return wire if layout is None else layout[wire]
+
+    def log(value: float) -> float:
+        return math.log(max(value, 1e-12))
+
+    total = 0.0
+    for instruction in circuit.instructions:
+        qubits = [physical(wire) for wire in instruction.qubits]
+        if instruction.is_measure:
+            total += sum(log(readout_fidelity.get(q, 1.0)) for q in qubits)
+        elif not instruction.is_gate or instruction.gate is None:
+            continue
+        elif len(qubits) == 2:
+            a, b = sorted(qubits)
+            cost = _TWO_QUBIT_GATE_COST.get(
+                instruction.gate.name, _OTHER_TWO_QUBIT_GATE_COST
+            )
+            total += cost * log(edge_fidelity.get((a, b), 1.0))
+        elif len(qubits) == 1 and gate_fidelity is not None:
+            total += log(gate_fidelity.get(qubits[0], 1.0))
+    return total
+
+
+def keep_best(candidates: Iterable[_T], score: Callable[[_T], float]) -> _T:
+    """Return the candidate with the highest ``score``; the first wins ties.
+
+    Callers list today's placement first, so a calibration-chosen region
+    replaces it only when its program is estimated to be strictly better.
+    ``candidates`` may be a generator that compiles one program per item.
+    """
+    best: tuple[float, _T] | None = None
+    for candidate in candidates:
+        value = score(candidate)
+        if best is None or value > best[0] + _ESTIMATE_TOLERANCE:
+            best = (value, candidate)
+    if best is None:
+        raise ValueError("keep_best needs at least one candidate.")
+    return best[1]
