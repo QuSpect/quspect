@@ -762,7 +762,9 @@ result = backend.run(qc, shots=2000)
   结果是错的；`transpile=False` 时由本源云端做映射
   （`provider_mapping=True`）。`readout_correction` 对应云端的 amend 选项（默认开）。
 - **结果**：本源返回概率，`result.probabilities` 为云端分布，`result.counts`
-  为 `round(p * shots)`（`metadata["counts_source"] == "probabilities"`）。
+  按最大余数法把 shots 分配到各结果，计数之和等于 shots
+  （`metadata["counts_source"] == "probabilities"`）。读出纠错产生的负值会被截断
+  并重新归一化，云端的原始值保留在 `metadata["quasi_probabilities"]`。
 - `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务；
   任务不可取消。真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
