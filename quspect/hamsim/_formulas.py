@@ -269,19 +269,21 @@ def commutator_bound(
     """Operator-norm Trotter error bound (commutator scaling) for order 1 or 2.
 
     Order 1: ``t²/(2r) Σ_{i<j} ‖[H_i, H_j]‖``.  Order 2 (Childs et al.,
-    PRX 11, 011020, 2021): ``t³/(12 r²) Σ_i ‖[[H_i, H_{>i}], H_{>i}]‖ +
-    t³/(24 r²) Σ_i ‖[[H_i, H_{>i}], H_i]‖`` with each nested commutator
-    bounded by the triangle inequality over Pauli products.
+    PRX 11, 011020, 2021): ``|t|³/(12 r²) Σ_i ‖[[H_i, H_{>i}], H_{>i}]‖ +
+    |t|³/(24 r²) Σ_i ‖[[H_i, H_{>i}], H_i]‖`` with each nested commutator
+    bounded by the triangle inequality over Pauli products.  The bound
+    depends on ``|t|`` only: a negative ``time`` (backward evolution) gives
+    the bound of ``|time|``.
 
     Args:
         num_qubits: Number of qubits.
         terms: Hamiltonian terms (in formula order).
-        time: Evolution time.
+        time: Evolution time (either sign).
         steps: Number of steps.
         order: 1 or 2.
 
     Returns:
-        The bound.
+        The bound (non-negative).
     """
     return commutator_prefactor(num_qubits, terms, time, order) / float(steps**order)
 
@@ -319,4 +321,4 @@ def commutator_prefactor(
             t1 += w[r] * 2.0 * float(c[later][ak].sum())
             if _anti(x[i : i + 1], z[i : i + 1], rx[r], rz[r])[0]:
                 t2 += w[r] * 2.0 * c[i]
-    return time**3 * (t1 / 12.0 + t2 / 24.0)
+    return abs(time) ** 3 * (t1 / 12.0 + t2 / 24.0)

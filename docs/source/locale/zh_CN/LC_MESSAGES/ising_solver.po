@@ -169,11 +169,28 @@ msgstr ""
 "写入固定的结果槽位。因此，线程调度不会改变结果。所有求解结果（包括重复"
 "结果）都会被保留，并按能量升序进行稳定排序。"
 
-#: ../../source/ising_solver.rst:77
+#: ../../source/ising_solver.rst:76
+msgid ""
+"The read seed is a hash of the pair: the base seed is scrambled with "
+"SplitMix64, the read index is added, and the sum is scrambled again.  "
+"Different base seeds, adjacent ones included, therefore give unrelated "
+"reads, and ``num_reads=1`` at seeds ``s, s+1, ...`` is a set of independent "
+"runs. Releases up to 0.6.2 hashed ``base_seed + read_index``, which made "
+"read ``k`` of seed ``s`` identical to read ``0`` of seed ``s + k``; a given "
+"seed returns different samples since that was corrected."
+msgstr ""
+"读取种子是这一对数值的哈希：先用 SplitMix64 打散基础种子，加上求解序号，"
+"再打散一次。因此不同的基础种子（包括相邻的种子）给出互不相关的求解，在种"
+"子 ``s, s+1, ...`` 上分别取 ``num_reads=1`` 得到的是一组相互独立的运行。"
+"0.6.2 及更早的版本对 ``base_seed + read_index`` 求哈希，使种子 ``s`` 的第 "
+"``k`` 次求解与种子 ``s + k`` 的第 ``0`` 次求解完全相同；修正之后，同一个种"
+"子返回的样本与这些版本不同。"
+
+#: ../../source/ising_solver.rst:85
 msgid "Exact oracle"
 msgstr "精确预言机"
 
-#: ../../source/ising_solver.rst:79
+#: ../../source/ising_solver.rst:87
 msgid ""
 "The native test oracle enumerates small models in binary-reflected Gray-code "
 "order.  Consecutive configurations differ by one spin, so it reuses the same "
@@ -186,11 +203,11 @@ msgstr ""
 "复杂度为 :math:`O(N2^N)`，空间复杂度为 :math:`O(N^2)`；``max_spins`` "
 "默认为 24，以防止意外执行指数级计算。"
 
-#: ../../source/ising_solver.rst:86
+#: ../../source/ising_solver.rst:94
 msgid "Python API"
 msgstr "Python API"
 
-#: ../../source/ising_solver.rst:105
+#: ../../source/ising_solver.rst:113
 msgid ""
 "``result.hardware_samples`` preserves the exact matrix-column order. "
 "``result.logical_samples`` applies gauge normalization and removes auxiliary "

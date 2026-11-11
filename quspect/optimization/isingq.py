@@ -1,6 +1,8 @@
 """iSing cloud QUBO compilation, recoverable submission and result decoding.
 
-The wire contract follows plectrum-core 0.1.2 and isingq-toolkit 0.5.0.
+The wire contract follows plectrum-core 0.1.2 and isingq-toolkit 0.5.0, plus
+the ``dir`` field that the upload signature carries since November 2026: the
+provider's storage policy only admits object keys under that directory.
 Device discovery, quotas and approval policy belong to the calling application.
 This module does not use the circuit Backend interface or the native extension.
 """
@@ -14,10 +16,11 @@ import logging
 import math
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, overload
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import numpy as np
 
@@ -41,6 +44,14 @@ __all__ = ["IsingQClient", "IsingQError", "IsingQProgram", "compile_isingq"]
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 16 * 1024
+_MAX_PROVIDER_MESSAGE_CHARS = 512
+_OBJECT_NAME = "quspect-qubo.csv"
+# Object-key limit of the provider's storage service, in UTF-8 bytes.
+_MAX_OBJECT_KEY_BYTES = 1023
+# HTTP statuses of a create request that leave the outcome open: the request
+# may have been processed (timeouts, conflicts, throttling, server errors).
+_AMBIGUOUS_CREATE_STATUSES = frozenset({408, 409, 425, 429})
 
 
 @dataclass(frozen=True)
@@ -212,20 +223,34 @@ class IsingQError(RuntimeError):
 
     ``unknown`` means creation may have reached the vendor. Never retry it
     automatically. ``not_created`` means failure preceded task creation.
-    ``not_applicable`` is used for polling failures, which say nothing about
-    whether the task exists. Messages never contain credentials or response
-    bodies.
+    ``rejected`` means the provider answered the create request with a
+    definite refusal (an HTTP client error such as 400, 401, 403 or 404): no
+    task exists. ``not_applicable`` is used for polling failures, which say
+    nothing about whether the task exists.
+
+    The exception text holds the phase, the outcome and the HTTP status. It
+    never contains credentials or response bodies. The provider's own
+    explanation, when it sent one, is kept separately in
+    :attr:`provider_message`.
 
     Args:
         phase: Request phase that failed, such as ``"upload_signature"``,
             ``"upload"``, ``"create_task"`` or ``"poll"``.
         outcome: Submission outcome. Defaults to ``"not_applicable"`` for
             ``"poll"`` and ``"not_created"`` otherwise.
+        status_code: HTTP status of the provider's answer, if one arrived.
+        provider_message: Sanitized provider message, if one was returned.
 
     Attributes:
         phase: The failed request phase.
-        submission_outcome: One of ``"not_created"``, ``"unknown"`` or
-            ``"not_applicable"``.
+        submission_outcome: One of ``"not_created"``, ``"rejected"``,
+            ``"unknown"`` or ``"not_applicable"``.
+        status_code: HTTP status of the answer, or ``None`` when no answer
+            arrived (timeout, connection failure) or the failure was local.
+        provider_message: The ``message`` field of the provider's JSON
+            answer with credentials, URLs and control characters removed and
+            at most 512 characters, or ``None``. It is provider-supplied
+            text: display it, do not interpret it.
 
     Example:
         >>> error = IsingQError("upload")
@@ -233,14 +258,29 @@ class IsingQError(RuntimeError):
         'not_created'
         >>> IsingQError("poll").submission_outcome
         'not_applicable'
+        >>> refused = IsingQError("create_task", "rejected", status_code=400)
+        >>> str(refused)
+        'iSing request failed during create_task; submission rejected (HTTP 400)'
     """
 
-    def __init__(self, phase: str, outcome: str | None = None) -> None:
+    def __init__(
+        self,
+        phase: str,
+        outcome: str | None = None,
+        *,
+        status_code: int | None = None,
+        provider_message: str | None = None,
+    ) -> None:
         if outcome is None:
             outcome = "not_applicable" if phase == "poll" else "not_created"
-        super().__init__(f"iSing request failed during {phase}; submission {outcome}")
+        text = f"iSing request failed during {phase}; submission {outcome}"
+        if status_code is not None:
+            text += f" (HTTP {status_code})"
+        super().__init__(text)
         self.phase = phase
         self.submission_outcome = outcome
+        self.status_code = status_code
+        self.provider_message = provider_message
 
 
 def _https_url(value: str) -> str:
@@ -268,6 +308,106 @@ def _task_id(value: object) -> str:
     ):
         raise ValueError("Invalid iSing task identifier")
     return value
+
+
+def _upload_prefix(value: object) -> str:
+    """Return the object-key prefix the upload signature requires.
+
+    The result ends with ``/``; it is empty when the signature names no
+    directory. Only what is dangerous is refused (an absolute path, a ``.`` or
+    ``..`` segment, a control character, an oversized key), not a set of
+    allowed characters: the provider chooses the directory.
+    """
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("Invalid upload directory")
+    prefix = value if value.endswith("/") else value + "/"
+    key_bytes = len(prefix.encode("utf-8")) + 32 + 1 + len(_OBJECT_NAME)
+    if (
+        prefix.startswith(("/", "\\"))
+        or key_bytes > _MAX_OBJECT_KEY_BYTES
+        or any(segment in (".", "..") for segment in re.split(r"[/\\]", prefix))
+        or any(ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in prefix)
+    ):
+        raise ValueError("Invalid upload directory")
+    return prefix
+
+
+_MARKUP = re.compile(r"<!doctype|</?[a-z][^>]*>", re.IGNORECASE)
+# A Python traceback, an exception class name before a colon, or a Java frame.
+_STACK_TRACE = re.compile(
+    r"Traceback \(most recent call last\)|[\w.]*\w(?:Error|Exception):"
+    r"|^\s*at\s+[\w.$<>]+\(",
+    re.MULTILINE,
+)
+_CREDENTIAL_PAIR = re.compile(
+    r"\b(authorization|cookie|set-cookie|password|secret|signature|policy|token"
+    r"|(?:api|access|private|secret)[ _-]?key"
+    r"|(?:access|security|refresh)[ _-]?token"
+    r"|x[_-]oss[_-](?:credential|security[_-]token))\b"
+    r"[\"']?\s*[=:\uff1a]\s*(?:bearer\s+)?(?:\"[^\"]*\"?|'[^']*'?|[^\s;,]+)",
+    re.IGNORECASE,
+)
+_BEARER = re.compile(r"\bBearer\s+[^\s;,]+", re.IGNORECASE)
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def _provider_message(value: object, secrets: Sequence[str] = ()) -> str | None:
+    """Reduce a provider-supplied message to bounded, credential-free text.
+
+    Markup and stack traces are dropped whole: they are proxy or server
+    internals, not the provider's explanation.
+    """
+    if (
+        not isinstance(value, str)
+        or _MARKUP.search(value)
+        or _STACK_TRACE.search(value)
+    ):
+        return None
+    text = value
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        for form in {secret, quote(secret, safe="")}:
+            text = text.replace(form, "[REDACTED]")
+    text = _CREDENTIAL_PAIR.sub(lambda match: match.group(1) + "=[REDACTED]", text)
+    text = _BEARER.sub("Bearer [REDACTED]", text)
+    text = _URL.sub("[REDACTED_URL]", text)
+    text = " ".join(_UNSAFE_TEXT.sub(" ", text).split())
+    return text[:_MAX_PROVIDER_MESSAGE_CHARS] or None
+
+
+def _provider_status(value: object) -> int:
+    """Read a task status sent as an integer, an integral float or digits."""
+    if isinstance(value, bool):
+        raise ValueError("Invalid iSing task status")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]{1,9}", value.strip()):
+        return int(value.strip())
+    raise ValueError("Invalid iSing task status")
+
+
+def _provider_energy(value: object) -> int | float | None:
+    """Read the diagnostic energy; a number sent as text is accepted.
+
+    Anything else unusable (other text, a non-finite number, another type) is
+    dropped instead of failing a finished task: the solution vector is the
+    result, and the objective is recomputed locally from it.
+    """
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
 
 
 class IsingQClient:
@@ -364,6 +504,7 @@ class IsingQClient:
         *,
         phase: str,
         json_response: Literal[True] = ...,
+        secrets: Sequence[str] = ...,
         **kwargs: Any,
     ) -> dict[str, Any]: ...
 
@@ -375,6 +516,7 @@ class IsingQClient:
         *,
         phase: str,
         json_response: Literal[False],
+        secrets: Sequence[str] = ...,
         **kwargs: Any,
     ) -> None: ...
 
@@ -385,28 +527,97 @@ class IsingQClient:
         *,
         phase: str,
         json_response: bool = True,
+        secrets: Sequence[str] = (),
         **kwargs: Any,
     ) -> dict[str, Any] | None:
+        _, body = self._exchange(
+            method,
+            url,
+            phase=phase,
+            json_response=json_response,
+            secrets=secrets,
+            **kwargs,
+        )
+        return body if json_response else None
+
+    def _exchange(
+        self,
+        method: str,
+        url: str,
+        *,
+        phase: str,
+        json_response: bool = True,
+        secrets: Sequence[str] = (),
+        **kwargs: Any,
+    ) -> tuple[int, dict[str, Any]]:
+        """Send one request; return the HTTP status and the JSON object.
+
+        The object is empty when ``json_response`` is false. ``secrets`` are
+        redacted from a provider message, in addition to the account key.
+        """
+        status: int | None = None
+        message: str | None = None
         try:
             with self._http.stream(method, url, **kwargs) as response:
-                response.raise_for_status()
+                status = response.status_code
+                if not response.is_success:
+                    message = self._failure_message(response, secrets)
+                    raise ValueError("Unsuccessful response")
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content.extend(chunk)
                     if len(content) > _MAX_RESPONSE_BYTES:
                         raise ValueError("Response exceeds limit")
                 if not json_response:
-                    return None
+                    return status, {}
                 body = json.loads(content)
                 if not isinstance(body, dict):
                     raise ValueError("Invalid response")
-                return body
+                return status, body
         except Exception as error:
             # Log only the exception type: messages may echo secrets or bodies.
             logger.debug("iSing %s request failed: %s", phase, type(error).__name__)
+            outcome = None
+            if phase == "create_task":
+                # Only a client error that is not about timing or state says
+                # that the provider refused the task. No answer, a redirect, a
+                # server error or an unreadable 2xx body may hide a created task.
+                refused = (
+                    status is not None
+                    and 400 <= status < 500
+                    and status not in _AMBIGUOUS_CREATE_STATUSES
+                )
+                outcome = "rejected" if refused else "unknown"
             raise IsingQError(
-                phase, "unknown" if phase == "create_task" else None
+                phase, outcome, status_code=status, provider_message=message
             ) from None
+
+    def _failure_message(
+        self, response: httpx.Response, secrets: Sequence[str]
+    ) -> str | None:
+        """Read the provider's ``message`` from a bounded error body, if any.
+
+        Reading or parsing a failed response must never replace its HTTP
+        outcome, so every problem here means "no message".
+        """
+        try:
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                content.extend(chunk)
+                if len(content) > _MAX_ERROR_RESPONSE_BYTES:
+                    return None
+            body = json.loads(content)
+            if not isinstance(body, dict):
+                return None
+            return self._message(body, secrets)
+        except Exception:
+            return None
+
+    def _message(self, body: dict[str, Any], secrets: Sequence[str]) -> str | None:
+        """Sanitize a body's ``message``; the account key is always redacted."""
+        return _provider_message(
+            body.get("message"), (self._headers["Authorization"], *secrets)
+        )
 
     def submit(
         self,
@@ -420,7 +631,9 @@ class IsingQClient:
         """Upload and create exactly once; persist the returned ID before polling.
 
         The CSV is uploaded to the provider's OSS host with temporary form
-        credentials, then one task is created. Nothing is retried.
+        credentials, then one task is created. Nothing is retried. The object
+        key is ``<dir><random>/quspect-qubo.csv``, where ``dir`` is the
+        directory named by the upload signature (empty if it names none).
         ``calculate_count`` is a vendor iteration count, not circuit shots.
         ``gear`` is intentionally absent: the published cloud wire does not send it.
 
@@ -437,8 +650,12 @@ class IsingQClient:
         Raises:
             ValueError: If an option has the wrong type or value.
             IsingQError: If a request fails. ``submission_outcome`` is
-                ``"not_created"`` before task creation and ``"unknown"`` once
-                the create request may have reached the provider.
+                ``"not_created"`` before task creation, ``"rejected"`` when
+                the provider refused the create request with an HTTP client
+                error, and ``"unknown"`` once the create request may have
+                been processed (no answer, a server error, or an answer
+                without a task ID). ``status_code`` and ``provider_message``
+                carry the provider's answer when there was one.
 
         Example:
             .. code-block:: python
@@ -474,9 +691,16 @@ class IsingQClient:
             ):
                 raise ValueError("Invalid signature")
             host = _https_url(signature["host"])
+            prefix = _upload_prefix(signature.get("dir"))
         except Exception:
             raise IsingQError("upload_signature") from None
-        key = f"{uuid.uuid4().hex}/quspect-qubo.csv"
+        # The directory may be the same for two signatures, so the key keeps a
+        # segment of its own: a later upload must never replace this file.
+        key = f"{prefix}{uuid.uuid4().hex}/{_OBJECT_NAME}"
+        secrets = tuple(
+            signature[k]
+            for k in ("policy", "signature", "x_oss_credential", "security_token")
+        )
         form = {
             "success_action_status": "200",
             "policy": signature["policy"],
@@ -494,12 +718,14 @@ class IsingQClient:
             data=form,
             files={"file": ("qubo.csv", program.csv, "text/csv")},
             json_response=False,
+            secrets=secrets,
         )
-        body = self._request(
+        status, body = self._exchange(
             "POST",
             self._base_url + "/tasks/create-general",
             phase="create_task",
             headers=self._headers,
+            secrets=secrets,
             json={
                 "name": "quspect-" + program.sha256[:12],
                 "computerTypeId": computer_type_id,
@@ -519,8 +745,14 @@ class IsingQClient:
                         return _task_id(candidate.get(field))
                     except ValueError:
                         continue
+        # A 2xx answer without a usable ID does not say that no task exists.
         logger.debug("iSing create_task response did not contain a valid task ID")
-        raise IsingQError("create_task", "unknown")
+        raise IsingQError(
+            "create_task",
+            "unknown",
+            status_code=status,
+            provider_message=self._message(body, secrets),
+        )
 
     def poll(self, task_id: str, program: IsingQProgram) -> dict[str, Any]:
         """Read one status snapshot. Cancellation and device discovery are unavailable.
@@ -537,10 +769,13 @@ class IsingQClient:
 
         Returns:
             A dict with ``"status"`` (``"running"``, ``"succeeded"`` or
-            ``"failed"``) and the raw integer ``"provider_status"``. Succeeded
-            snapshots include ``"result"`` as returned by
-            :meth:`IsingQProgram.decode`; malformed terminal results include
-            ``"error"``.
+            ``"failed"``) and the integer ``"provider_status"`` (a status
+            sent as text such as ``"2"`` is accepted). Succeeded snapshots
+            include ``"result"`` as returned by :meth:`IsingQProgram.decode`;
+            its ``"provider_energy"`` is ``None`` when the provider sent no
+            usable number. Malformed terminal results include ``"error"``,
+            and failed snapshots include ``"provider_message"`` when the
+            provider explained the failure.
 
         Raises:
             ValueError: If ``task_id`` is not a valid task identifier.
@@ -555,21 +790,33 @@ class IsingQClient:
                if snapshot["status"] == "succeeded":
                    print(snapshot["result"]["objective_value"])
         """
-        body = self._request(
+        http_status, body = self._exchange(
             "GET",
             self._base_url + "/tasks/" + _task_id(task_id),
             phase="poll",
             headers=self._headers,
         )
         payload = body.get("data", body)
-        if not isinstance(payload, dict) or type(payload.get("status")) is not int:
-            raise IsingQError("poll")
-        status = payload["status"]
+        try:
+            if not isinstance(payload, dict):
+                raise ValueError("Invalid task payload")
+            status = _provider_status(payload.get("status"))
+        except ValueError:
+            raise IsingQError(
+                "poll",
+                status_code=http_status,
+                provider_message=self._message(body, ()),
+            ) from None
         if status not in (1, 2, 3):
             return {"status": "running", "provider_status": status}
+        failed: dict[str, Any] = {"status": "failed", "provider_status": status}
+        # Keep the provider's own explanation of a task that ended without a result.
+        message = self._message(payload, ()) or self._message(body, ())
+        if message is not None:
+            failed["provider_message"] = message
         raw = payload.get("result")
         if not isinstance(raw, dict):
-            return {"status": "failed", "provider_status": status}
+            return failed
         try:
             bits = raw.get("bits")
             if bits is None:
@@ -578,18 +825,11 @@ class IsingQClient:
                 raise ValueError("Invalid solution vector")
             if bits and all(v in (-1, 1) for v in bits):
                 bits = [(v + 1) // 2 for v in bits]
-            energy = raw.get("energy")
-            if energy is not None and (
-                type(energy) not in (int, float) or not math.isfinite(energy)
-            ):
-                raise ValueError("Invalid energy")
-            decoded = program.decode(bits, provider_energy=energy)
+            decoded = program.decode(
+                bits, provider_energy=_provider_energy(raw.get("energy"))
+            )
         except (TypeError, ValueError, OverflowError):
             # Terminal malformed results must not produce an endless polling loop.
             logger.debug("iSing task returned a malformed terminal result")
-            return {
-                "status": "failed",
-                "provider_status": status,
-                "error": "Invalid iSing solution",
-            }
+            return {**failed, "error": "Invalid iSing solution"}
         return {"status": "succeeded", "provider_status": status, "result": decoded}

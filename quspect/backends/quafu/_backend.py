@@ -15,6 +15,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from quspect.backends._base import CloudBackend, CloudJob, CompositeJob
+from quspect.backends._compile import (
+    estimated_log_fidelity,
+    fill_missing_fidelities,
+    keep_best,
+    placement_regions,
+)
 from quspect.backends._exceptions import (
     BackendError,
     PartialSubmissionError,
@@ -105,6 +111,7 @@ class QuafuBackend(CloudBackend):
         self._min_coupler_fidelity = float(min_coupler_fidelity)
         self._chip_info: dict[str, Any] | None = dict(chip_info) if chip_info else None
         self._config_cache: dict[str, Any] | None = None
+        self._region_cache: dict[int, list[list[int]]] = {}
 
     # ------------------------------------------------------------------
     # Device description
@@ -135,6 +142,7 @@ class QuafuBackend(CloudBackend):
         """Drop cached calibration so the next access refetches it."""
         self._chip_info = None
         self._config_cache = None
+        self._region_cache = {}
 
     @property
     def calibration_time(self) -> str | None:
@@ -185,6 +193,11 @@ class QuafuBackend(CloudBackend):
             "qubit_fidelity": {
                 index: _as_float(entry.get("fidelity"))
                 for index, entry in qubits.items()
+            },
+            "readout_fidelity": {
+                index: readout
+                for index, entry in qubits.items()
+                if (readout := _readout_fidelity(entry)) is not None
             },
             "priority_qubits": [
                 [int(q) for q in subset]
@@ -288,7 +301,9 @@ class QuafuBackend(CloudBackend):
                 routing when transpiling; applied directly otherwise.
             physical_qubits: Physical qubit pool for layout and routing.
                 Defaults to the smallest connected subset in the chip's
-                ``priority_qubits`` (Quafu's fidelity-ranked suggestions).
+                ``priority_qubits`` (Quafu's fidelity-ranked suggestions)
+                that holds the circuit; when none does, the circuit is
+                placed by the chip's calibration.
             readout_correction: Ask Quafu for readout-error-mitigated
                 quasi-probabilities.
             dynamic_decoupling: ``"XY4"`` or ``"CPMG"``.
@@ -370,6 +385,12 @@ class QuafuBackend(CloudBackend):
                 if isinstance(tid, bool) or not isinstance(tid, int):
                     raise BackendError(
                         f"Quafu rejected experiment {item.label!r}: {str(tid)[:300]}"
+                    )
+                if tid <= 0:
+                    # Task ids are positive; /task/status/0 is the chip list.
+                    raise BackendError(
+                        f"Quafu answered experiment {item.label!r} with an "
+                        f"invalid task id: {tid}."
                     )
                 reference = JobReference(
                     platform="quafu",
@@ -550,7 +571,24 @@ class QuafuBackend(CloudBackend):
         Prefers the smallest of Quafu's fidelity-ranked ``priority_qubits``
         subsets that is large enough and connected on the usable coupling
         graph; falls back to the largest connected usable component.
+        Automatic placement does not stop at that fallback: see
+        :meth:`placement_pools`.
         """
+        suggested = self._suggested_pool(num_qubits)
+        if suggested is not None:
+            return suggested
+        usable = set(self.config["usable_qubits"])
+        adjacency = _adjacency(self.coupling_map)
+        component = max(_components(usable, adjacency), key=len, default=[])
+        if len(component) < num_qubits:
+            raise TranslationError(
+                f"{self._name} has no connected group of {num_qubits} usable "
+                f"qubits (largest: {len(component)})."
+            )
+        return sorted(component)
+
+    def _suggested_pool(self, num_qubits: int) -> list[int] | None:
+        """Smallest usable, connected ``priority_qubits`` group that fits."""
         cfg = self.config
         usable = set(cfg["usable_qubits"])
         adjacency = _adjacency(self.coupling_map)
@@ -561,13 +599,58 @@ class QuafuBackend(CloudBackend):
         for subset in candidates:
             if set(subset) <= usable and _connected(subset, adjacency):
                 return list(subset)
-        component = max(_components(usable, adjacency), key=len, default=[])
-        if len(component) < num_qubits:
-            raise TranslationError(
-                f"{self._name} has no connected group of {num_qubits} usable "
-                f"qubits (largest: {len(component)})."
+        return None
+
+    def placement_pools(self, num_qubits: int) -> list[list[int]]:
+        """Physical pools automatic placement compiles a circuit on.
+
+        A fitting ``priority_qubits`` group is the only pool.  When Quafu
+        suggests none, routing on :meth:`default_physical_qubits` alone
+        would settle on the chip's lowest indices whatever their fidelity,
+        so the best-calibrated connected regions of the circuit's size and
+        of two qubits more follow it (see
+        :func:`~quspect.backends._compile.placement_regions`).  The circuit
+        is compiled on each pool and the program with the highest product
+        of calibrated gate and readout fidelities is sent; the first pool
+        wins ties, so a chip with flat calibration keeps its placement
+        unless a region saves gates.
+        """
+        suggested = self._suggested_pool(num_qubits)
+        if suggested is not None:
+            return [suggested]
+        pools = [self.default_physical_qubits(num_qubits)]
+        if num_qubits not in self._region_cache:
+            cfg = self.config
+            usable = cfg["usable_qubits"]
+            readout = fill_missing_fidelities(cfg["readout_fidelity"], usable)
+            self._region_cache[num_qubits] = placement_regions(
+                num_qubits,
+                usable,
+                self.coupling_map,
+                {
+                    q: cfg["qubit_fidelity"].get(q, 1.0) * readout.get(q, 1.0)
+                    for q in usable
+                },
+                cfg["coupler_fidelity"],
             )
-        return sorted(component)
+        pools += [
+            list(region)
+            for region in self._region_cache[num_qubits]
+            if region != pools[0]
+        ]
+        return pools
+
+    def _estimated_log_fidelity(self, physical: QuantumCircuit) -> float:
+        """Calibration estimate of a physically indexed program."""
+        cfg = self.config
+        return estimated_log_fidelity(
+            physical,
+            edge_fidelity=cfg["coupler_fidelity"],
+            readout_fidelity=fill_missing_fidelities(
+                cfg["readout_fidelity"], cfg["usable_qubits"]
+            ),
+            gate_fidelity=cfg["qubit_fidelity"],
+        )
 
     def _transpile(
         self,
@@ -580,22 +663,41 @@ class QuafuBackend(CloudBackend):
 
         The compilation itself is the backends' shared
         :func:`~quspect.backends._compile.compile_for_device`; this method
-        picks the qubit pool and reports what Quafu would refuse.
+        picks the qubit pools (see :meth:`placement_pools`) and keeps the
+        program with the best calibration estimate.
         """
-        from quspect.backends._compile import compile_for_device
-        from quspect.transpiler._passes import DecomposePass
-
         device = self.compilation_target()
         if not device.native_gates:
             raise TranslationError(f"{self._name} reports no basis gates.")
 
-        width = circuit.num_qubits
         if physical_qubits is not None:
-            pool = list(physical_qubits)
+            pools = [list(physical_qubits)]
         elif initial_layout is not None:
-            pool = self._component_containing(initial_layout)
+            pools = [self._component_containing(initial_layout)]
         else:
-            pool = self.default_physical_qubits(width)
+            pools = self.placement_pools(circuit.num_qubits)
+        if len(pools) == 1:
+            return self._route(device, circuit, pools[0], initial_layout)
+        return keep_best(
+            (self._route(device, circuit, pool, None) for pool in pools),
+            lambda placed: self._estimated_log_fidelity(placed[0]),
+        )
+
+    def _route(
+        self,
+        device: CompilationTarget,
+        circuit: QuantumCircuit,
+        pool: list[int],
+        initial_layout: Sequence[int] | None,
+    ) -> tuple[QuantumCircuit, list[int]]:
+        """Compile *circuit* on *pool*; index it physically.
+
+        Reports what Quafu would refuse before compiling.
+        """
+        from quspect.backends._compile import compile_for_device
+        from quspect.transpiler._passes import DecomposePass
+
+        width = circuit.num_qubits
         if width > len(pool):
             raise TranslationError(
                 f"Circuit uses {width} qubits but only {len(pool)} "
@@ -755,3 +857,15 @@ def _as_float(value: Any) -> float:
 
 def _positive(value: Any) -> bool:
     return _as_float(value) > 0.0
+
+
+def _readout_fidelity(entry: Mapping[str, Any]) -> float | None:
+    """Mean of a qubit's two readout fidelities, when Quafu measured both.
+
+    Quafu writes ``0`` for a readout it did not measure.
+    """
+    ground = _as_float(entry.get("readout g_fidelity"))
+    excited = _as_float(entry.get("readout e_fidelity"))
+    if 0.0 < ground <= 1.0 and 0.0 < excited <= 1.0:
+        return (ground + excited) / 2.0
+    return None

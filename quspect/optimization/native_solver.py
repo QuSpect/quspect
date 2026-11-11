@@ -142,6 +142,12 @@ class NativeIsingSolver:
     linear schedule.  The native implementation parallelizes reads with
     OpenMP when available.
 
+    The random stream of a read is derived from a hash of ``seed`` and the
+    read index, so different seeds, adjacent ones included, give unrelated
+    reads.  Releases up to 0.6.2 added the read index to the seed: read ``k``
+    of seed ``s`` was read ``0`` of seed ``s + k``.  A given seed therefore
+    returns different samples than it did in those releases.
+
     Args:
         seed: Unsigned 64-bit base seed.  A fixed value reproduces all reads.
         num_reads: Number of independent annealing runs to retain.

@@ -9,12 +9,14 @@ check the full compile -> submit -> decode round trip.
 from __future__ import annotations
 
 import json
+import random
 import urllib.parse
 
 import pytest
 
 from quspect import QuantumCircuit
 from quspect.backends import CompositeJob, ExecutionBatch, ExecutionRequest, JobStatus
+from quspect.backends._compile import estimated_log_fidelity
 from quspect.backends._exceptions import (
     AuthenticationError,
     BackendNotFoundError,
@@ -24,7 +26,7 @@ from quspect.backends._exceptions import (
 )
 from quspect.backends._execution import CircuitExperiment, JobReference
 from quspect.backends.quafu import QuafuProvider
-from quspect.backends.quafu._backend import round_shots
+from quspect.backends.quafu._backend import QuafuBackend, round_shots
 from quspect.backends.quafu._client import resolve_token
 from quspect.backends.quafu._job import (
     convert_result,
@@ -337,6 +339,245 @@ def test_default_pool_prefers_connected_priority_subsets(backend) -> None:
         backend.default_physical_qubits(7)
 
 
+# ---------------------------------------------------------------------------
+# Placement by calibration when no suggested group fits
+# ---------------------------------------------------------------------------
+
+
+def _chip(
+    couplers: dict[tuple[int, int], float],
+    *,
+    priority: list[list[int]] | None = None,
+    readout: dict[int, float] | None = None,
+) -> dict:
+    """A chip with the given CZ fidelities and (optionally) readout fidelities."""
+    count = max(max(pair) for pair in couplers) + 1
+    qubits = {}
+    for i in range(count):
+        qubits[f"Q{i}"] = {"label": f"Q{i}", "index": i, "fidelity": 0.999}
+        if readout is not None:
+            qubits[f"Q{i}"]["readout g_fidelity"] = readout.get(i, 0.0)
+            qubits[f"Q{i}"]["readout e_fidelity"] = readout.get(i, 0.0)
+    return {
+        **CHIP,
+        "size": [count, 1],
+        "priority_qubits": priority or [],
+        "qubits_info": qubits,
+        "couplers_info": {
+            f"C{i}": {
+                "label": f"C{i}",
+                "index": i,
+                "qubits_index": list(pair),
+                "fidelity": fidelity,
+            }
+            for i, (pair, fidelity) in enumerate(couplers.items())
+        },
+    }
+
+
+def _line(fidelities: list[float]) -> dict[tuple[int, int], float]:
+    return {(i, i + 1): fidelity for i, fidelity in enumerate(fidelities)}
+
+
+def _grid(rows: int, cols: int, fidelity) -> dict[tuple[int, int], float]:
+    couplers = {}
+    for row in range(rows):
+        for col in range(cols):
+            index = row * cols + col
+            if col + 1 < cols:
+                couplers[(index, index + 1)] = fidelity(index, index + 1)
+            if row + 1 < rows:
+                couplers[(index, index + cols)] = fidelity(index, index + cols)
+    return couplers
+
+
+def _random_circuits(count: int, seed: int) -> list[QuantumCircuit]:
+    rng = random.Random(seed)
+    circuits = []
+    for index in range(count):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"random{index}")
+        for qubit in range(n):
+            circuit.h(qubit)
+        for _ in range(rng.randint(4, 20)):
+            if rng.random() < 0.4:
+                circuit.ry(round(rng.uniform(-3, 3), 3), rng.randrange(n))
+            else:
+                circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        circuits.append(circuit)
+    return circuits
+
+
+def _used_qubits(circuit: QuantumCircuit) -> set[int]:
+    return {q for instruction in circuit.instructions for q in instruction.qubits}
+
+
+def _cz_count(circuit: QuantumCircuit) -> int:
+    return sum(1 for i in circuit.instructions if i.is_gate and i.gate.name == "cz")
+
+
+def _estimate(backend, circuit: QuantumCircuit) -> float:
+    cfg = backend.config
+    return estimated_log_fidelity(
+        circuit,
+        edge_fidelity=cfg["coupler_fidelity"],
+        readout_fidelity=cfg["readout_fidelity"],
+        gate_fidelity=cfg["qubit_fidelity"],
+    )
+
+
+def test_placement_past_the_suggested_groups_follows_calibration(provider, fake):
+    """Regression: with no fitting group, circuits landed on the lowest indices.
+
+    Qubits 0-3 are joined by poor (but calibrated) couplers, 4-7 by good
+    ones; Quafu only suggests a two-qubit group.
+    """
+    chip = _chip(
+        _line([0.60, 0.05, 0.60, 0.90, 0.995, 0.995, 0.995]), priority=[[5, 6]]
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+
+    # The pool methods keep their meaning: Quafu's group, else every usable qubit.
+    assert backend.default_physical_qubits(2) == [5, 6]
+    assert backend.default_physical_qubits(3) == list(range(8))
+    with pytest.raises(TranslationError, match="no connected group"):
+        backend.default_physical_qubits(9)
+
+    backend.submit(_ghz(2))
+    backend.submit(_ghz(3))
+    backend.submit(_ghz(4))
+    sent = [qasm2_loads(task["body"]["circuit"]) for task in fake.tasks.values()]
+    assert _used_qubits(sent[0]) == {5, 6}  # Quafu's suggestion
+    assert _used_qubits(sent[1]) == {4, 5, 6}
+    assert _used_qubits(sent[2]) == {4, 5, 6, 7}
+
+
+def test_placement_follows_readout_fidelity(provider):
+    """Couplers alike, qubits 0-2 read poorly: the circuit moves off them."""
+    readout = {i: (0.60 if i < 3 else 0.97) for i in range(8)}
+    chip = _chip(_line([0.98] * 7), readout=readout)
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    assert backend.config["readout_fidelity"] == readout
+
+    physical, layout = backend._transpile(
+        _ghz(3), initial_layout=None, physical_qubits=None
+    )
+    assert _used_qubits(physical) == set(layout) == {3, 4, 5}
+
+
+def test_unmeasured_readout_counts_as_the_worst_published(provider):
+    """Quafu writes 0 for a readout it did not measure; that is not "perfect"."""
+    readout = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.90, 4: 0.99, 5: 0.99, 6: 0.99}
+    chip = _chip(_line([0.98] * 6), readout=readout)
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    assert backend.config["readout_fidelity"] == {3: 0.90, 4: 0.99, 5: 0.99, 6: 0.99}
+    assert set(backend.config["usable_qubits"]) == set(range(7))
+
+    physical, _ = backend._transpile(_ghz(3), initial_layout=None, physical_qubits=None)
+    assert _used_qubits(physical) == {4, 5, 6}
+
+
+def test_flat_calibration_never_costs_more_two_qubit_gates(provider):
+    """A region of exactly the circuit's size has no routing room; on a chip
+    whose calibration is flat it must not replace the whole-chip placement."""
+    chip = _chip(_grid(4, 4, lambda a, b: 0.98))
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    whole = list(range(16))
+    for circuit in _random_circuits(25, seed=3):
+        placed, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=None
+        )
+        baseline, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=whole
+        )
+        assert _cz_count(placed) <= _cz_count(baseline), circuit.name
+
+
+def test_placement_is_never_estimated_below_the_whole_chip(provider):
+    rng = random.Random(3)
+    values: dict[tuple[int, int], float] = {}
+    chip = _chip(
+        _grid(5, 5, lambda a, b: values.setdefault((a, b), rng.uniform(0.9, 0.995))),
+        readout={i: rng.uniform(0.9, 0.99) for i in range(25)},
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    whole = list(range(25))
+    better = 0
+    for circuit in _random_circuits(25, seed=4):
+        placed, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=None
+        )
+        baseline, _ = backend._transpile(
+            circuit, initial_layout=None, physical_qubits=whole
+        )
+        assert _estimate(backend, placed) >= _estimate(backend, baseline) - 1e-9
+        better += _estimate(backend, placed) > _estimate(backend, baseline) + 1e-9
+    assert better >= 20
+
+
+def test_suggested_groups_and_explicit_pools_skip_calibration_placement(
+    provider, monkeypatch
+):
+    """Only the no-group fallback compiles on calibration-chosen regions."""
+    import quspect.backends.quafu._backend as module
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("placement_regions must not be consulted here")
+
+    monkeypatch.setattr(module, "placement_regions", unexpected)
+    chip = _chip(
+        _line([0.60, 0.60, 0.60, 0.90, 0.995, 0.995, 0.995]), priority=[[0, 1, 2]]
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    circuit = _ghz(3)
+
+    suggested, layout = backend._transpile(
+        circuit, initial_layout=None, physical_qubits=None
+    )
+    assert set(layout) == {0, 1, 2}  # Quafu's group, poor as its couplers are
+    explicit, _ = backend._transpile(
+        circuit, initial_layout=None, physical_qubits=[0, 1, 2]
+    )
+    assert suggested.to_json() == explicit.to_json()
+
+    _, layout = backend._transpile(
+        circuit, initial_layout=[2, 1, 0], physical_qubits=None
+    )
+    assert layout == [2, 1, 0]
+    _, layout = backend._transpile(
+        _ghz(4), initial_layout=None, physical_qubits=[0, 1, 2, 3]
+    )
+    assert set(layout) == {0, 1, 2, 3}
+    with pytest.raises(AssertionError, match="must not be consulted"):
+        backend._transpile(_ghz(4), initial_layout=None, physical_qubits=None)
+
+
+def test_calibration_placed_circuits_keep_their_result(provider, fake):
+    """X/CX circuits have one outcome; it must survive placement and routing."""
+    chip = _chip(
+        _grid(4, 4, lambda a, b: 0.60 if max(a, b) < 8 else 0.99),
+        readout={i: (0.70 if i < 8 else 0.98) for i in range(16)},
+    )
+    backend = QuafuBackend("Fake", provider.client, chip_info=chip)
+    rng = random.Random(9)
+    for index in range(12):
+        n = rng.randint(3, 6)
+        circuit = QuantumCircuit(name=f"basis{index}")
+        for qubit in range(n):
+            if rng.random() < 0.5:
+                circuit.x(qubit)
+        circuit.x(0)
+        for _ in range(rng.randint(4, 12)):
+            circuit.cx(*rng.sample(range(n), 2))
+        circuit.measure(list(range(n)), list(range(n)))
+        expected = Simulator(seed=1).run(circuit, shots=16)
+        result = backend.run(circuit, shots=1024, poll_interval=0.001)
+        assert set(result.counts) == set(expected.counts), circuit.name
+        sent = qasm2_loads(fake.tasks[max(fake.tasks)]["body"]["circuit"])
+        assert min(_used_qubits(sent)) >= 8, circuit.name
+
+
 def test_transpiled_qasm_is_native_and_on_usable_couplers(backend, fake) -> None:
     circuit = _ghz(5)
     circuit.ccx(0, 2, 4)
@@ -635,3 +876,233 @@ def test_network_error_is_not_reported_as_translation_error(fake) -> None:
     with pytest.raises(BackendError) as info:
         backend.submit(_ghz(2))
     assert not isinstance(info.value, TranslationError)
+
+
+# ---------------------------------------------------------------------------
+# Reading a job: not ready, unknown to Quafu, undecodable
+# ---------------------------------------------------------------------------
+
+_TWO_BIT_QASM = "creg c[2];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n"
+
+
+class _Scripted:
+    """Answer selected routes with canned bodies; the fake serves the rest."""
+
+    def __init__(self, fake: FakeQuafu, routes: dict[str, tuple[int, bytes]]) -> None:
+        self.fake = fake
+        self.routes = dict(routes)
+        self.calls: list[str] = []
+
+    def __call__(self, method, url, headers, body, timeout):
+        path = urllib.parse.urlsplit(url).path
+        for prefix, answer in self.routes.items():
+            if path.startswith(prefix):
+                self.calls.append(path)
+                return answer
+        return self.fake(method, url, headers, body, timeout)
+
+
+def _scripted_job(fake: FakeQuafu, routes: dict[str, tuple[int, bytes]]):
+    transport = _Scripted(fake, routes)
+    provider = QuafuProvider(TOKEN, URL, transport=transport)
+    return provider.retrieve_job(4000, backend_name="Fake"), transport
+
+
+def _result_body(**fields) -> tuple[int, bytes]:
+    payload = {"tid": 4000, "error": "", "circuit": _TWO_BIT_QASM, **fields}
+    return 200, json.dumps(payload).encode()
+
+
+def test_job_errors_say_whether_the_result_is_still_pending() -> None:
+    assert JobError("failed").result_pending is False
+    assert JobTimeoutError("not ready").result_pending is True
+    assert issubclass(JobTimeoutError, JobError)  # existing handlers keep working
+
+
+def test_result_not_ready_is_a_pending_timeout(fake) -> None:
+    """Quafu says Finished but has not published the result yet."""
+    job, _ = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Finished"'), "/task/result/4000": (200, b"{}")},
+    )
+    with pytest.raises(JobTimeoutError, match="Finished") as caught:
+        job.result(timeout=0.01, poll_interval=0.001)
+    assert caught.value.result_pending is True
+    assert caught.value.job_id == "4000"
+
+
+def test_undecodable_result_is_a_job_error_that_is_not_pending(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {"/task/result/4000": _result_body(status="Finished", count={"000": 1024})},
+    )
+    with pytest.raises(JobError, match="Unable to decode") as caught:
+        job.result(timeout=5, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert caught.value.result_pending is False
+
+
+def test_task_unknown_to_quafu_is_reported_instead_of_polled(provider, fake) -> None:
+    job = provider.retrieve_job(4242)
+    with pytest.raises(JobError, match="not found") as caught:
+        job.status()
+    assert caught.value.error_type == "not_found"
+    assert caught.value.job_id == "4242"
+    with pytest.raises(JobError, match="not found") as caught:
+        job.result(timeout=0.05, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert caught.value.result_pending is False
+    with pytest.raises(JobError, match="not found"):
+        job.cancel()
+    assert ("GET", "/task/cancel/4242") not in fake.calls
+
+
+@pytest.mark.parametrize("status", ["Timeout", "Error", "Archived"])
+def test_unmapped_status_in_a_result_ends_the_wait_as_failed(fake, status) -> None:
+    """A result with a status QuSpect has no mapping for is not "running"."""
+    job, _ = _scripted_job(
+        fake,
+        {
+            "/task/status/4000": (200, json.dumps(status).encode()),
+            "/task/result/4000": _result_body(status=status, count=None),
+        },
+    )
+    with pytest.raises(JobError, match=f"status '{status}'") as caught:
+        job.result(timeout=0.05, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert job.status() == JobStatus.UNKNOWN
+    assert job.provider_status() == status
+
+
+def test_unmapped_task_status_is_unknown_and_named_by_the_timeout(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Archived"'), "/task/result/4000": (200, b"{}")},
+    )
+    assert job.status() == JobStatus.UNKNOWN
+    assert job.provider_status() == "Archived"
+    assert not job.done()
+    with pytest.raises(JobTimeoutError, match="Archived"):
+        job.result(timeout=0.01, poll_interval=0.001)
+
+
+def test_in_progress_status_in_a_result_keeps_waiting(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {
+            "/task/status/4000": (200, b'"Running"'),
+            "/task/result/4000": _result_body(status="Running"),
+        },
+    )
+    with pytest.raises(JobTimeoutError, match="Running"):
+        job.result(timeout=0.01, poll_interval=0.001)
+
+
+# ---------------------------------------------------------------------------
+# Cancel, 403 answers, task ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "accepted"),
+    [
+        (b"null", True),
+        (b"", True),
+        (b'"Canceled"', True),
+        (b'{"detail": "task is running, cannot cancel"}', False),
+        (b'"Failed"', False),
+        (b'"task 4000 not found!"', False),
+        (b"false", False),
+    ],
+)
+def test_cancel_reports_whether_quafu_accepted_it(fake, answer, accepted) -> None:
+    job, transport = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Running"'), "/task/cancel/4000": (200, answer)},
+    )
+    assert job.cancel() is accepted
+    assert transport.calls.count("/task/cancel/4000") == 1
+
+
+def test_partial_submission_lists_tasks_whose_cancel_was_refused(fake) -> None:
+    from quspect.backends import PartialSubmissionError
+
+    fake.fail_run_after = 1
+    fake.pending_polls = 10**6
+    refusing = _Scripted(fake, {"/task/cancel/": (200, b'{"detail": "cannot cancel"}')})
+    backend = QuafuProvider(TOKEN, URL, transport=refusing).get_backend("Fake")
+    request = ExecutionRequest(
+        experiments=(
+            CircuitExperiment(_ghz(2), label="x"),
+            CircuitExperiment(_ghz(2), label="y"),
+        ),
+        shots=1024,
+    )
+    with pytest.raises(PartialSubmissionError) as info:
+        backend.submit_request(request)
+    assert info.value.cancellation_failures == ("1000",)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "token_rejected"),
+    [
+        (401, b'{"detail": "invalid token"}', True),
+        (401, b'{"detail": "program not in the run"}', True),
+        (403, b'{"detail": "Token expired"}', True),
+        (403, b'{"detail": "Not authenticated"}', True),
+        (403, b'"Forbidden"', True),
+        (403, b"", True),
+        (403, b"{}", True),
+        (403, b'{"detail": "program not in the run"}', False),
+        (403, b'"chip Baihua is under maintenance"', False),
+    ],
+)
+def test_only_credential_answers_read_as_a_rejected_token(
+    status, body, token_rejected
+) -> None:
+    """A 403 whose body gives another reason is not a rejected token."""
+    from quspect.backends._exceptions import BackendError
+    from quspect.backends.quafu._client import QuafuClient
+
+    client = QuafuClient(TOKEN, URL, transport=lambda *args: (status, body))
+    with pytest.raises(BackendError) as caught:
+        client.get("/task/status/7")
+    message = str(caught.value)
+    assert isinstance(caught.value, AuthenticationError) is token_rejected
+    assert ("rejected the API token" in message) is token_rejected
+    if not token_rejected:
+        reason = json.loads(body)
+        reason = reason["detail"] if isinstance(reason, dict) else reason
+        assert message == f"Quafu refused GET /task/status/7 (HTTP 403): {reason}"
+    assert TOKEN not in message
+
+
+@pytest.mark.parametrize("answer", [b"0", b"-1"])
+def test_submit_rejects_a_non_positive_task_id(fake, answer) -> None:
+    from quspect.backends._exceptions import BackendError
+
+    transport = _Scripted(fake, {"/task/run/": (200, answer)})
+    backend = QuafuProvider(TOKEN, URL, transport=transport).get_backend("Fake")
+    with pytest.raises(BackendError, match="task id"):
+        backend.submit(_ghz(2))
+
+
+@pytest.mark.parametrize("task_id", [0, "0", "00", -1, "-1"])
+def test_retrieve_rejects_non_positive_task_ids(provider, fake, task_id) -> None:
+    """``/task/status/0`` is the chip listing, not a task."""
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(task_id)
+    reference = JobReference(platform="quafu", backend_name="Fake", job_id=str(task_id))
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(reference)
+    composite = JobReference(
+        platform="quafu",
+        backend_name="Fake",
+        job_id="composite",
+        child_job_ids=("1000", str(task_id)),
+        batch_size=2,
+        child_batch_sizes=(1, 1),
+    )
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(composite)
+    assert not any("/task/status/0" in path for _, path in fake.calls[2:])

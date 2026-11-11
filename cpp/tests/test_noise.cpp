@@ -1,7 +1,11 @@
 #include <cmath>
 
 #include <complex>
+#include <cstdint>
+#include <limits>
 #include <random>
+#include <stdexcept>
+#include <vector>
 
 #include "gtest/gtest.h"
 #include "quspect_native/kernels/noise_kernels.hpp"
@@ -87,6 +91,119 @@ TEST(DensityMatrixTest, ApplyKrausChannelDepolarizing) {
     EXPECT_NEAR(dm.Trace(), 1.0, 1e-12);
     EXPECT_NEAR(std::real(dm.data()[0]), 0.625, 1e-2);             // first diagonal
     EXPECT_NEAR(std::real(dm.data()[dm.dim() + 1]), 0.375, 1e-2);  // second
+}
+
+// A unitary must preserve the matrix: entries of any size survive, and only exact zeros of the
+// operator may be skipped.  Entries below sqrt(1e-15) ~ 3.16e-8 used to be zeroed at every gate.
+
+TEST(DensityMatrixTest, IdentityKeepsSmallEntries) {
+    runtime::DensityMatrix<double> dm(1);
+    dm.data()[0] = Complex{1.0 - 1e-9, 0};
+    dm.data()[1] = Complex{2e-10, -3e-10};
+    dm.data()[2] = Complex{2e-10, 3e-10};
+    dm.data()[3] = Complex{1e-9, 0};
+    const std::vector<Complex> before(dm.data(), dm.data() + dm.size());
+
+    uint32_t qubits[] = {0};
+    Complex identity[4] = {{1, 0}, {0, 0}, {0, 0}, {1, 0}};
+    dm.ApplyUnitary(identity, qubits, 1);
+
+    for (uint64_t i = 0; i < dm.size(); ++i) {
+        EXPECT_EQ(dm.data()[i], before[i]) << "entry " << i;
+    }
+}
+
+TEST(DensityMatrixTest, UnitaryKeepsSmallPopulationAndTinyRotation) {
+    // X swaps the populations exactly, whatever their size.
+    runtime::DensityMatrix<double> swapped(1);
+    swapped.data()[0] = Complex{1.0 - 1e-12, 0};
+    swapped.data()[3] = Complex{1e-12, 0};
+    uint32_t qubits[] = {0};
+    Complex xmat[4] = {{0, 0}, {1, 0}, {1, 0}, {0, 0}};
+    swapped.ApplyUnitary(xmat, qubits, 1);
+    EXPECT_EQ(swapped.data()[0], (Complex{1e-12, 0}));
+    EXPECT_EQ(swapped.data()[3], (Complex{1.0 - 1e-12, 0}));
+
+    // RX(2e-9): off-diagonal entries of the gate are -i * 1e-9, below the old cut.
+    const double half = 1e-9;
+    Complex rx[4] = {{std::cos(half), 0}, {0, -std::sin(half)}, {0, -std::sin(half)}, {std::cos(half), 0}};
+    runtime::DensityMatrix<double> rotated(1);
+    rotated.ApplyUnitary(rx, qubits, 1);
+    // |0><0| -> [[cos^2, i sin cos], [-i sin cos, sin^2]]
+    EXPECT_NEAR(std::imag(rotated.data()[1]), std::sin(half) * std::cos(half), 1e-24);
+    EXPECT_NEAR(std::imag(rotated.data()[2]), -std::sin(half) * std::cos(half), 1e-24);
+    EXPECT_NEAR(std::real(rotated.data()[3]), std::sin(half) * std::sin(half), 1e-33);
+    EXPECT_NEAR(rotated.Trace(), 1.0, 1e-15);
+}
+
+TEST(DensityMatrixTest, LongSmallAngleCircuitPreservesTrace) {
+    // 2000 Trotter-like steps of small rotations on three qubits: populations of the excited
+    // states stay far below 3.16e-8 for most of the circuit.
+    const uint32_t num_qubits = 3;
+    const double half = 1e-5;
+    Complex rx[4] = {{std::cos(half), 0}, {0, -std::sin(half)}, {0, -std::sin(half)}, {std::cos(half), 0}};
+    Complex cx[16] = {};
+    cx[0 * 4 + 0] = cx[1 * 4 + 3] = cx[2 * 4 + 2] = cx[3 * 4 + 1] = Complex{1, 0};
+
+    runtime::DensityMatrix<double> dm(num_qubits);
+    std::vector<Complex> state(uint64_t{1} << num_qubits, Complex{0, 0});
+    state[0] = Complex{1, 0};
+    for (int step = 0; step < 2000; ++step) {
+        for (uint32_t q = 0; q + 1 < num_qubits; ++q) {
+            uint32_t pair[] = {q, q + 1};
+            dm.ApplyUnitary(cx, pair, 2);
+            kernels::apply_dense_unitary<double>(state.data(), state.size(), pair, 2, cx);
+        }
+        for (uint32_t q = 0; q < num_qubits; ++q) {
+            uint32_t one[] = {q};
+            dm.ApplyUnitary(rx, one, 1);
+            kernels::apply_dense_unitary<double>(state.data(), state.size(), one, 1, rx);
+        }
+    }
+
+    EXPECT_NEAR(dm.Trace(), 1.0, 1e-12);
+    for (uint64_t row = 0; row < dm.dim(); ++row) {
+        for (uint64_t col = 0; col < dm.dim(); ++col) {
+            const Complex expected = state[row] * std::conj(state[col]);
+            EXPECT_NEAR(std::abs(dm.data()[row * dm.dim() + col] - expected), 0.0, 1e-13)
+                << "entry (" << row << ", " << col << ")";
+        }
+    }
+}
+
+TEST(DensityMatrixTest, KrausChannelKeepsSmallPopulation) {
+    // Bit flip with probability p on diag(1 - e, e): diag((1-p)(1-e) + p e, (1-p) e + p (1-e)).
+    const double p = 1e-10;
+    const double e = 1e-12;
+    const double s0 = std::sqrt(1 - p);
+    const double s1 = std::sqrt(p);
+    Complex kraus_ops[8] = {{s0, 0}, {0, 0}, {0, 0}, {s0, 0}, {0, 0}, {s1, 0}, {s1, 0}, {0, 0}};
+
+    runtime::DensityMatrix<double> dm(1);
+    dm.data()[0] = Complex{1 - e, 0};
+    dm.data()[3] = Complex{e, 0};
+    uint32_t qubits[] = {0};
+    dm.ApplyKrausChannel(kraus_ops, 2, qubits, 1);
+
+    const double excited = (1 - p) * e + p * (1 - e);
+    EXPECT_NEAR(std::real(dm.data()[3]), excited, 1e-12 * excited);
+    EXPECT_NEAR(dm.Trace(), 1.0, 1e-15);
+}
+
+TEST(DensityMatrixTest, RejectsQubitCountsWhoseMatrixCannotExist) {
+    // dim * dim overflowed for 32..63 qubits (an empty buffer that was then written) and the
+    // shift itself for 64 and more.
+    const uint32_t max_qubits = runtime::DensityMatrix<double>::MaxQubits();
+    EXPECT_EQ(max_qubits, 29U);
+    EXPECT_EQ(runtime::DensityMatrix<float>::MaxQubits(), 29U);
+    for (const uint32_t num_qubits : {max_qubits + 1, uint32_t{31}, uint32_t{32}, uint32_t{40}, uint32_t{63},
+                                      uint32_t{64}, uint32_t{65}, std::numeric_limits<uint32_t>::max()}) {
+        EXPECT_THROW(runtime::DensityMatrix<double>{num_qubits}, std::invalid_argument) << num_qubits << " qubits";
+        EXPECT_THROW(runtime::DensityMatrix<float>{num_qubits}, std::invalid_argument) << num_qubits << " qubits";
+    }
+    const runtime::DensityMatrix<double> empty(0);
+    EXPECT_EQ(empty.dim(), 1U);
+    EXPECT_EQ(empty.size(), 1U);
 }
 
 // ============================================================

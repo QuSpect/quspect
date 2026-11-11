@@ -567,8 +567,9 @@ Backend exceptions:
 - `BackendError`
 - `AuthenticationError`
 - `TranslationError`
-- `JobError`
-- `JobTimeoutError`
+- `JobError` (`result_pending` is `False`: the job cannot deliver a result)
+- `JobTimeoutError` (a `JobError` whose `result_pending` is `True`: the result
+  is not available yet, reading again later can succeed)
 - `BackendNotFoundError`
 - `OptionalDependencyError`
 - `PartialSubmissionError`

@@ -723,6 +723,11 @@ print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线�
   基础门集（`h, rx, ry, rz, cz`）和耦合图；标定保真度为 0 的耦合器和比特会被剔除。
   线路经分解、优化后，用 SABRE 映射到夸父按保真度推荐的 `priority_qubits`
   中最小的连通子集上，再关闭服务端编译器提交，芯片按提交的物理线路原样执行。
+- **超出夸父推荐范围时，按标定数据选位。** 没有任何 `priority_qubits` 子集能容纳
+  线路时，QuSpect 会分别在整块可用芯片和标定最好的连通区域（与线路同样大小、
+  以及多两个比特）上编译，提交 CZ、单比特门与读出保真度乘积最高的那份程序。
+  估计值相同时保留整块芯片上的结果，所以标定平坦的芯片不会改变布局，除非某个
+  区域能省门。
 - `physical_qubits=[...]` / `initial_layout=[...]` 约束比特布局；`transpile=False`
   表示线路下标已是物理比特（本地会校验耦合）。
 - `server_compiler="quarkcircuit" | "qiskit" | "qsteed"`（需 `transpile=False`）
@@ -737,6 +742,11 @@ print(result.metadata["executed_qasm"])    # 芯片上实际执行的物理线�
 - 每条线路对应一个夸父任务；批量提交返回可恢复的 `CompositeJob`，可用
   `provider.retrieve_job(job.reference)` 或
   `provider.retrieve_job(task_id, backend_name="Haituo")` 重新获取。
+- 读取任务：结果尚不可用时，`job.result(timeout=...)` 抛出 `JobTimeoutError`
+  （`exc.result_pending` 为 `True`）；任务失败、已取消、夸父查不到该任务
+  （`error_type == "not_found"`）或结果无法解码时，抛出普通的 `JobError`
+  （`result_pending` 为 `False`）。`job.cancel()` 返回夸父是否确认了取消请求；
+  `job.provider_status()` 返回夸父原始的状态文本。
 
 ### 本源量子（Origin Quantum）
 
@@ -769,7 +779,9 @@ result = backend.run(qc, shots=2000)
   结果是错的；`transpile=False` 时由本源云端做映射
   （`provider_mapping=True`）。`readout_correction` 对应云端的 amend 选项（默认开）。
 - **结果**：本源返回概率，`result.probabilities` 为云端分布，`result.counts`
-  为 `round(p * shots)`（`metadata["counts_source"] == "probabilities"`）。
+  按最大余数法把 shots 分配到各结果，计数之和等于 shots
+  （`metadata["counts_source"] == "probabilities"`）。读出纠错产生的负值会被截断
+  并重新归一化，云端的原始值保留在 `metadata["quasi_probabilities"]`。
 - `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务；
   任务不可取消。真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
