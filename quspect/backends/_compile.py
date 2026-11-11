@@ -69,11 +69,18 @@ def compile_for_device(
         results are already in logical clbit order and need no qubit-level
         un-permutation.  ``layout`` is ``None`` when no routing happened.
     """
+    from quspect.transpiler._mapping import validate_initial_mapping
     from quspect.transpiler._passes import (
         DecomposePass,
         LayoutRoutingPass,
         OptimizePass,
     )
+
+    # A QuantumCircuit infers its width from the highest qubit in use, so the
+    # optimized circuit below is narrower than the input when the top qubits
+    # lose their gates (gates that cancel).  ``initial_layout`` has one entry
+    # per logical qubit of the input.
+    num_logical = circuit.num_qubits
 
     # SABRE supports only one- and two-qubit operations.  This fallback is
     # required even when native gate metadata is absent or includes CCX:
@@ -151,6 +158,13 @@ def compile_for_device(
 
     layout: list[int] | None = None
     if target.coupling_graph:
+        if dense_initial_layout is not None:
+            # Route the wires that still carry instructions from their
+            # requested qubits.  A logical qubit without any instruction left
+            # needs no wire: its physical qubit is free for routing.
+            dense_initial_layout = validate_initial_mapping(
+                dense_initial_layout, num_logical, target.num_qubits
+            )[: circuit.num_qubits]
         routed, candidate_layout, _ = LayoutRoutingPass(
             target,
             iter_num=3,
@@ -167,12 +181,12 @@ def compile_for_device(
                 for dense in candidate_layout[: routed.num_qubits]
             ]
     elif initial_layout is not None:
-        if len(initial_layout) != circuit.num_qubits:
+        if len(initial_layout) != num_logical:
             raise ValueError(
                 f"initial_layout length ({len(initial_layout)}) must equal "
-                f"the circuit qubit count ({circuit.num_qubits})."
+                f"the circuit qubit count ({num_logical})."
             )
-        layout = list(initial_layout)
+        layout = list(initial_layout)[: circuit.num_qubits]
 
     return circuit, layout
 

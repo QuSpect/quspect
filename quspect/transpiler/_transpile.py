@@ -95,6 +95,7 @@ from quspect.transpiler._mapping import (
     DEFAULT_LAYOUT_TRIALS,
     SABRE,
     _CandidatePlan,
+    validate_initial_mapping,
 )
 from quspect.transpiler._passes import DecomposePass, OptimizePass
 from quspect.transpiler._phase_fold import PhaseFoldingPass
@@ -529,7 +530,9 @@ def transpile(
         seed: Random seed for SABRE; the same seed gives the same output.
         initial_layout: Optional fixed ``initial_layout[logical] =
             physical``; disables the layout search (level 3 still tries
-            several routing seeds from it).
+            several routing seeds from it).  One entry per logical qubit
+            of ``circuit`` (``circuit.num_qubits``), including qubits that
+            end up without gates.
         iter_num: SABRE forward/backward refinement iterations per trial.
         layout_trials: Random layout trials.  Default: the SABRE default
             (6) below level 3, 20 at level 3 (subject to ``work_limit``).
@@ -1201,7 +1204,28 @@ def _transpile(
         if native and "id" not in native:
             exact_logical = _drop_identity_gates(exact_logical)
         exact_logical = pre_decompose.run(consolidate.run(exact_logical))
+    # A QuantumCircuit infers its width from the highest qubit in use: ``logical``
+    # (and each of the other circuits routed below) is narrower than the input
+    # when the top qubits lost their gates (an ``id``, gates that cancel).  The
+    # input's width is kept here; the router gets the layout of the wires that
+    # still carry gates, and the idle logical qubits are placed afterwards
+    # (:func:`_logical_layouts`).
     num_logical = max(circuit.num_qubits, logical.num_qubits)
+    if num_logical > target.num_qubits:
+        raise ValueError(
+            f"Circuit uses {num_logical} logical qubits but the target "
+            f"device has only {target.num_qubits} physical qubits."
+        )
+    requested = (
+        None
+        if initial_layout is None
+        else validate_initial_mapping(initial_layout, num_logical, target.num_qubits)
+    )
+
+    def layout_of(routed_input: QuantumCircuit) -> list[int] | None:
+        """The requested layout of the wires of ``routed_input``."""
+        return None if requested is None else requested[: routed_input.num_qubits]
+
     stats.stage_seconds["pre"] = time.perf_counter() - t0
 
     # --- routing ---------------------------------------------------------
@@ -1224,7 +1248,7 @@ def _transpile(
         solve_args: dict[str, Any] = {
             "iter_num": iter_num,
             "seed": seed,
-            "initial_mapping": initial_layout,
+            "initial_mapping": layout_of(logical),
             "layout_trials": trials,
             "exact_layout": exact_layout,
             "elide_permutations": elide_permutations,
@@ -1255,6 +1279,7 @@ def _transpile(
             route_plan.initial_mapping,
             route_plan.final_mapping,
         )
+        routed_width = route_plan.num_logical
         stats.layout_trials = 0 if initial_layout is not None else trials
         posted: tuple[QuantumCircuit, int, float] | None = None
         use_exact = False
@@ -1263,17 +1288,18 @@ def _transpile(
                 exact_logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_mapping=initial_layout,
+                initial_mapping=layout_of(exact_logical),
                 layout_trials=trials,
                 exact_layout=exact_layout,
                 elide_permutations=elide_permutations,
             )
+            width_x = exact_logical.num_qubits
             choice = _pick_routing(routed, logical, routed_x, exact_logical, post)
             use_exact = choice.use_exact
             if choice.posted is not None:
                 posted = choice.posted
         if use_exact:
-            routed, wires, final = routed_x, wires_x, final_x
+            routed, wires, final, routed_width = routed_x, wires_x, final_x, width_x
             block_approx = (0, 0.0)
             gate_approx = (0, 0.0)
         stats.num_swaps = _count_swaps(routed)
@@ -1310,6 +1336,7 @@ def _transpile(
                 stats.selected,
                 stats.num_swaps,
                 [gate_approx, block_approx, (n_approx, err)],
+                routed_width,
             )
             evaluated = [current]
             for extra in extra_plans:
@@ -1324,6 +1351,7 @@ def _transpile(
                     extra.label,
                     extra.num_swaps,
                     [gate_approx, block_approx, (plan_n, plan_err)],
+                    extra.num_logical,
                 )
                 evaluated.append(extra_choice)
                 if _score(plan_post) < _score(current.post):
@@ -1339,7 +1367,7 @@ def _transpile(
             best = current.post
             if current.routed is not None:
                 routed = current.routed
-            wires, final = current.wires, current.final
+            wires, final, routed_width = current.wires, current.final, current.width
             stats.num_swaps, stats.selected = current.num_swaps, current.label
             n_approx, err = current.approx[2]
         best_routed: QuantumCircuit | None = routed
@@ -1358,7 +1386,7 @@ def _transpile(
             logical,
             iter_num=iter_num,
             seed=seed,
-            initial_layout=initial_layout,
+            initial_layout=layout_of(logical),
             layout_trials=lt,
             swap_trials=st,
             exact_layout=exact_layout,
@@ -1377,7 +1405,7 @@ def _transpile(
                 logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_layout=initial_layout,
+                initial_layout=layout_of(logical),
                 layout_trials=lt,
                 swap_trials=st,
                 exact_layout=False,
@@ -1441,7 +1469,7 @@ def _transpile(
                 exact_logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_layout=initial_layout,
+                initial_layout=layout_of(exact_logical),
                 layout_trials=min(DEFAULT_LAYOUT_TRIALS, lt),
                 swap_trials=1,
                 exact_layout=exact_layout,
@@ -1467,7 +1495,7 @@ def _transpile(
                 comm_logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_layout=initial_layout,
+                initial_layout=layout_of(comm_logical),
                 layout_trials=lt,
                 swap_trials=st,
                 elide_permutations=elide_permutations,
@@ -1482,7 +1510,7 @@ def _transpile(
                 comm_logical,
                 iter_num=iter_num,
                 seed=seed,
-                initial_layout=initial_layout,
+                initial_layout=layout_of(comm_logical),
                 layout_trials=lt,
                 swap_trials=st,
                 elide_permutations=elide_permutations,
@@ -1587,12 +1615,14 @@ def _transpile(
                     ocand.label,
                     ocand.num_swaps,
                     parts(ocand, oapprox),
+                    ocand.num_logical,
                 )
             )
         stats.num_evaluated = len(to_eval)
         stats.selected = chosen.label
         stats.num_swaps = chosen.num_swaps
         wires, final = chosen.initial_mapping, chosen.final_mapping
+        routed_width = chosen.num_logical
         stats.stage_seconds["post"] = time.perf_counter() - t0
 
     if (
@@ -1620,6 +1650,7 @@ def _transpile(
                     stats.selected,
                     stats.num_swaps,
                     approx_parts,
+                    routed_width,
                 ),
             )
             raw_numeric, wires, final = numeric
@@ -1671,6 +1702,7 @@ def _transpile(
                         stats.selected,
                         stats.num_swaps,
                         approx_parts,
+                        routed_width,
                     ),
                 )
                 best = blk_out
@@ -1691,7 +1723,7 @@ def _transpile(
             best, depth_weight
         ):
             best = alt_final
-            wires, final = fallback.wires, fallback.final
+            wires, final, routed_width = fallback.wires, fallback.final, fallback.width
             stats.selected, stats.num_swaps = fallback.label, fallback.num_swaps
             approx_parts = fallback.approx
     _record_approximations(stats, *approx_parts)
@@ -1705,7 +1737,7 @@ def _transpile(
     stats.depth = _depth(best, two_qubit_only=False)
 
     initial_layout_out, final_layout_out = _logical_layouts(
-        wires, final, logical.num_qubits, num_logical, target.num_qubits
+        wires, final, routed_width, num_logical, target.num_qubits, requested
     )
     physical = _to_physical(best, wires)
     result = TranspileResult(
@@ -1745,6 +1777,8 @@ class _Choice:
     label: str
     num_swaps: int
     approx: list[tuple[int, float]]
+    #: logical wires of the routing (the leading entries of ``wires`` / ``final``)
+    width: int
 
 
 def _approximations(approx: ConsolidateBlocksPass) -> tuple[int, float]:
@@ -2294,21 +2328,40 @@ def _logical_layouts(
     routed_width: int,
     num_logical: int,
     num_physical: int,
+    requested: Sequence[int] | None = None,
 ) -> tuple[list[int], list[int]]:
     """Logical ``(initial_layout, final_layout)`` from wire-space mappings.
 
     The first ``routed_width`` wires are the routed logical qubits (later
     wires are routing workspace).  Logical qubits beyond the routed width
-    (idle in the compiled circuit) get unused physical qubits and stay put.
+    have no gate in the routed circuit.  They start on ``requested[q]`` when
+    a layout was requested; otherwise on physical qubits the routing did not
+    touch and, once those are used up, on its workspace wires.  A routing
+    SWAP through the physical qubit of an idle logical qubit moves its state
+    like any other, so such a qubit ends where its workspace wire ends; on
+    an untouched physical qubit it stays put.
+
+    Args:
+        wires: ``wires[wire] = physical`` at the start (logical wires first).
+        final: ``final[wire] = physical`` where the state of the wire ends.
+        routed_width: Number of logical wires of the routed circuit.
+        num_logical: Number of logical qubits of the input circuit.
+        num_physical: Number of physical qubits of the target.
+        requested: The validated ``initial_layout`` argument (one entry per
+            logical qubit of the input), if any.
     """
     initial = list(wires[:routed_width])
     end = list(final[:routed_width])
     if num_logical > routed_width:
-        used = set(wires)
-        free = [p for p in range(num_physical) if p not in used]
-        extra = free[: num_logical - routed_width]
+        if requested is not None:
+            extra = list(requested[routed_width:num_logical])
+        else:
+            used = set(wires)
+            free = [p for p in range(num_physical) if p not in used]
+            extra = (free + list(wires[routed_width:]))[: num_logical - routed_width]
+        end_of = dict(zip(wires, final, strict=True))
         initial += extra
-        end += extra
+        end += [end_of.get(p, p) for p in extra]
     return initial, end
 
 
