@@ -175,6 +175,22 @@ def test_qpu_routing_on_a_line_forces_swaps_and_still_decodes() -> None:
     assert_same_distribution(result.probabilities, quspect_exact_distribution(circuit))
 
 
+def test_qpu_routing_keeps_per_qubit_measurements_terminal() -> None:
+    """One measure instruction per qubit was refused after routing a SWAP."""
+    chips = {
+        "LINE5": chip_info_payload(5, [0, 1, 2, 3, 4], [(i, i + 1) for i in range(4)])
+    }
+    circuit = QuantumCircuit()
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [2 - qubit])
+    result = _backend(FakeCloud(chips=chips), "LINE5").run(
+        circuit, shots=100, poll_interval=1e-3
+    )
+    assert_same_distribution(result.probabilities, quspect_exact_distribution(circuit))
+
+
 def test_qpu_provider_mapping_mode_submits_logical_circuit() -> None:
     cloud = FakeCloud()
     circuit = CASES["permuted_clbits"]

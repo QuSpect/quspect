@@ -24,6 +24,16 @@ from quspect.backends._exceptions import (
 from quspect.backends.tianyan import TianyanClient, TianyanJob, TianyanProvider
 from quspect.backends.tianyan._backend import TianyanBackend, parse_chip
 from quspect.backends.tianyan._translator import angle, decode_result, translate
+from tests.backends._measurement_cases import (
+    FULL_SPELLINGS,
+    measurements_are_last,
+    random_measured_circuits,
+    used_after_measurement,
+)
+from tests.backends._originq_fakes import (
+    assert_same_distribution,
+    quspect_exact_distribution,
+)
 from tests.backends._tianyan_fakes import KEY, FakeTianyan, line_config, real_config
 
 URL = "https://tianyan.invalid"
@@ -317,3 +327,68 @@ def test_job_polls_until_results_and_recovers_from_reference() -> None:
     other = TianyanProvider(KEY, url="https://other.invalid", transport=cloud)
     with pytest.raises(ValueError, match="endpoint"):
         other.retrieve_job(restored)
+
+
+# ------------------------------------------------- terminal measurements
+
+
+def _routed(backend: TianyanBackend, circuit: QuantumCircuit) -> QuantumCircuit:
+    routed, _ = backend._route(
+        circuit,
+        "c",
+        initial_layout=None,
+        pool=backend.placement_qubits(circuit.num_qubits),
+    )
+    return routed
+
+
+def test_per_qubit_measurements_are_not_refused_after_routing() -> None:
+    """Regression: "qubit(s) [...] are used after being measured".
+
+    The fake applies the server's rule (nothing may follow a measurement),
+    so an accepted submission is a program the real cloud takes.
+    """
+    cloud = FakeTianyan(evaluate=False, chips={"line": line_config(5)})
+    backend = _backend(cloud, "line")
+    circuit = QuantumCircuit()
+    circuit.h(0).ry(0.4, 1).ry(1.1, 2)
+    circuit.cx(2, 1).cx(0, 2).cx(0, 1).cx(2, 1)
+    for qubit in range(3):
+        circuit.measure([qubit], [qubit])
+
+    backend.submit(circuit, shots=8)
+
+    lines = cloud.submissions[0]["inputCode"][0].splitlines()
+    assert [line.split()[0] for line in lines[-3:]] == ["M"] * 3
+    assert not any(line.startswith("M ") for line in lines[:-3])
+    routed = _routed(backend, circuit)
+    assert used_after_measurement(routed) == []
+    assert_same_distribution(
+        quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+    )
+
+
+@pytest.mark.parametrize("spelling", FULL_SPELLINGS)
+def test_random_circuits_keep_terminal_measurements_on_tianyan176(
+    spelling: str,
+) -> None:
+    cloud = FakeTianyan(evaluate=False)
+    backend = _backend(cloud, "tianyan176")
+    for circuit in random_measured_circuits(spelling, count=25):
+        backend.submit(circuit, shots=8)  # refused before the fix
+        routed = _routed(backend, circuit)
+        assert used_after_measurement(routed) == []
+        assert measurements_are_last(routed)
+        assert_same_distribution(
+            quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+        )
+    assert len(cloud.submissions) == 25
+
+
+def test_mid_circuit_measurement_in_the_input_is_still_refused() -> None:
+    cloud = FakeTianyan(evaluate=False, chips={"line": line_config(5)})
+    circuit = QuantumCircuit()
+    circuit.x(0).measure([0], [0]).x(0).cx(0, 1).measure([0, 1], [1, 2])
+    with pytest.raises(TranslationError, match="used after being measured"):
+        _backend(cloud, "line").submit(circuit, shots=8)
+    assert not cloud.submissions

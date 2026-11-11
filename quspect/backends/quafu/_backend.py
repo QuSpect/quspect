@@ -577,6 +577,7 @@ class QuafuBackend(CloudBackend):
         physical_qubits: Sequence[int] | None,
     ) -> tuple[QuantumCircuit, list[int]]:
         """Decompose, optimise and route; return a physically indexed circuit."""
+        from quspect.backends._compile import defer_terminal_measurements
         from quspect.ir.compilation import decompose_circuit
         from quspect.transpiler._passes import (
             DecomposePass,
@@ -599,6 +600,9 @@ class QuafuBackend(CloudBackend):
             circuit = decompose_circuit(circuit, supported_gates=names - wide)
         circuit = DecomposePass(device).run(circuit)
         circuit = OptimizePass.from_target(device).run(circuit)
+        # Keep terminal measurements terminal: routed after every gate, so no
+        # SWAP crosses a measured qubit.
+        circuit = defer_terminal_measurements(circuit)
 
         if physical_qubits is not None:
             pool = list(physical_qubits)
