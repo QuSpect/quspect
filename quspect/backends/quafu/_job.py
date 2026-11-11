@@ -33,8 +33,28 @@ _CREG_RE = re.compile(r"creg\s+\w+\[(\d+)\]\s*;")
 _QREG_RE = re.compile(r"qreg\s+\w+\[(\d+)\]\s*;")
 
 
+_IN_PROGRESS = frozenset({JobStatus.QUEUED, JobStatus.PENDING, JobStatus.RUNNING})
+
+
 def parse_status(raw: Any) -> JobStatus:
+    """Map a Quafu task status to :class:`JobStatus`.
+
+    Quafu's own client (``quafusqc``) documents only ``Finished`` and
+    ``Failed``; the map also holds the queued, running and cancelled names
+    this backend recognises.  Any other text is :attr:`JobStatus.UNKNOWN`,
+    which is *not* a running state: QuSpect cannot tell whether such a task
+    will still produce a result (:meth:`QuafuJob.provider_status` returns
+    the provider's own wording).
+    """
     return _STATUS_MAP.get(str(raw).strip().lower(), JobStatus.UNKNOWN)
+
+
+def is_task_id(value: str) -> bool:
+    """Whether *value* is a Quafu task id: a positive decimal integer.
+
+    ``0`` is not a task: ``/task/status/0`` is the chip listing.
+    """
+    return value.isascii() and value.isdigit() and int(value) > 0
 
 
 def measured_clbits(qasm: str) -> tuple[int, ...]:
@@ -160,6 +180,23 @@ def convert_result(
     )
 
 
+def cancel_accepted(answer: Any) -> bool:
+    """Whether Quafu's answer to ``/task/cancel/{tid}`` acknowledges it.
+
+    Quafu acknowledges a cancel request with an empty (``null``) body.  That
+    and an answer naming the cancelled state count as accepted.  Anything
+    else, such as an error object (``{"detail": ...}``) or a message string,
+    is a refusal.
+    """
+    if answer is None or answer is True:
+        return True
+    if isinstance(answer, str):
+        return not answer.strip() or parse_status(answer) == JobStatus.CANCELLED
+    if isinstance(answer, Mapping) and "detail" not in answer and "error" not in answer:
+        return parse_status(answer.get("status")) == JobStatus.CANCELLED
+    return False
+
+
 class QuafuJob(CloudJob):
     """Handle to one Quafu task (one circuit)."""
 
@@ -172,6 +209,10 @@ class QuafuJob(CloudJob):
     ) -> None:
         if reference.platform != "quafu":
             raise ValueError("QuafuJob requires a 'quafu' job reference.")
+        if not is_task_id(reference.job_id):
+            raise ValueError(
+                f"Quafu task ids are positive integers, got {reference.job_id!r}."
+            )
         self._client = client
         self._reference = reference
         self._return_batch = return_batch
@@ -182,15 +223,22 @@ class QuafuJob(CloudJob):
 
     @staticmethod
     def _is_terminal(payload: Mapping[str, Any]) -> bool:
+        """Whether ``/task/result`` holds the task's final answer.
+
+        Quafu answers ``{}`` until a task is done.  A payload that reports an
+        error or a status is final unless that status is a known in-progress
+        state: a status QuSpect has no mapping for ends the wait (the result
+        is then reported as failed and names the status) instead of being
+        polled as if the task were still running.
+        """
         if not payload:
             return False
         if str(payload.get("error") or "").strip():
             return True
-        return parse_status(payload.get("status")) in {
-            JobStatus.COMPLETED,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
-        }
+        status = payload.get("status")
+        if not isinstance(status, str) or not status.strip():
+            return False
+        return parse_status(status) not in _IN_PROGRESS
 
     def result(
         self,
@@ -198,7 +246,18 @@ class QuafuJob(CloudJob):
         *,
         poll_interval: float = 2.0,
     ) -> SimulationResult | ExecutionBatch:
-        """Poll until the task finishes and return its converted result."""
+        """Poll until the task finishes and return its converted result.
+
+        Raises:
+            JobTimeoutError: The result is not available after ``timeout``
+                seconds (``result_pending`` is ``True``).  The task is still
+                queued or running, or Quafu reports it finished but has not
+                published the result yet; the message quotes Quafu's status.
+            JobError: The task failed, was cancelled, is unknown to Quafu
+                (``error_type="not_found"``), ended with a status QuSpect
+                has no mapping for, or returned counts that cannot be
+                decoded (``result_pending`` is ``False``).
+        """
         if timeout is not None and (timeout < 0 or not math.isfinite(timeout)):
             raise ValueError("timeout must be non-negative and finite, or None.")
         if poll_interval <= 0 or not math.isfinite(poll_interval):
@@ -209,13 +268,15 @@ class QuafuJob(CloudJob):
             payload = self._fetch()
             if self._is_terminal(payload):
                 break
-            if self.status() == JobStatus.CANCELLED:
+            provider_status = self.provider_status()
+            if parse_status(provider_status) == JobStatus.CANCELLED:
                 payload = {"status": "Canceled", "tid": self.job_id}
                 break
             elapsed = time.monotonic() - start
             if timeout is not None and elapsed >= timeout:
                 raise JobTimeoutError(
-                    f"Quafu task {self.job_id} did not finish within {timeout} s.",
+                    f"Quafu task {self.job_id} has no result yet after "
+                    f"{timeout} s (provider status: {provider_status!r}).",
                     job_id=self.job_id,
                 )
             delay = poll_interval
@@ -245,20 +306,50 @@ class QuafuJob(CloudJob):
             )
         return result
 
+    def provider_status(self) -> str:
+        """Return Quafu's own status text for this task, unmapped.
+
+        Raises:
+            JobError: Quafu does not know the task (it answers
+                ``"task <id> not found!"``); ``error_type`` is
+                ``"not_found"``.
+        """
+        raw = self._client.get(f"/task/status/{self.job_id}")
+        text = raw.strip() if isinstance(raw, str) else str(raw)[:200]
+        if "not found" in text.lower():
+            raise JobError(
+                f"Quafu does not know task {self.job_id}: {text}",
+                error_type="not_found",
+                job_id=self.job_id,
+            )
+        return text
+
     def status(self) -> JobStatus:
-        return parse_status(self._client.get(f"/task/status/{self.job_id}"))
+        """Return the task status.
+
+        A status QuSpect has no mapping for is :attr:`JobStatus.UNKNOWN`
+        (see :func:`parse_status`); :meth:`provider_status` gives the text.
+
+        Raises:
+            JobError: Quafu does not know the task.
+        """
+        return parse_status(self.provider_status())
 
     def cancel(self) -> bool:
-        """Request cancellation of an unfinished task.
+        """Request cancellation and report whether Quafu accepted it.
 
-        Returns ``False`` for a task that already reached a terminal state.
-        Quafu acknowledges a cancel request without a body, so ``True`` means
-        the request was sent, not that the task stopped.
+        Returns ``False`` without asking for a task that already reached a
+        terminal state, and ``False`` when Quafu answers the request with
+        anything but its acknowledgement (see :func:`cancel_accepted`).
+        ``True`` means Quafu took the request, not that the task has
+        stopped: read :meth:`status` to confirm.
+
+        Raises:
+            JobError: Quafu does not know the task.
         """
         if self.done():
             return False
-        self._client.get(f"/task/cancel/{self.job_id}")
-        return True
+        return cancel_accepted(self._client.get(f"/task/cancel/{self.job_id}"))
 
     @property
     def job_id(self) -> str:

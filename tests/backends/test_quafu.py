@@ -635,3 +635,233 @@ def test_network_error_is_not_reported_as_translation_error(fake) -> None:
     with pytest.raises(BackendError) as info:
         backend.submit(_ghz(2))
     assert not isinstance(info.value, TranslationError)
+
+
+# ---------------------------------------------------------------------------
+# Reading a job: not ready, unknown to Quafu, undecodable
+# ---------------------------------------------------------------------------
+
+_TWO_BIT_QASM = "creg c[2];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n"
+
+
+class _Scripted:
+    """Answer selected routes with canned bodies; the fake serves the rest."""
+
+    def __init__(self, fake: FakeQuafu, routes: dict[str, tuple[int, bytes]]) -> None:
+        self.fake = fake
+        self.routes = dict(routes)
+        self.calls: list[str] = []
+
+    def __call__(self, method, url, headers, body, timeout):
+        path = urllib.parse.urlsplit(url).path
+        for prefix, answer in self.routes.items():
+            if path.startswith(prefix):
+                self.calls.append(path)
+                return answer
+        return self.fake(method, url, headers, body, timeout)
+
+
+def _scripted_job(fake: FakeQuafu, routes: dict[str, tuple[int, bytes]]):
+    transport = _Scripted(fake, routes)
+    provider = QuafuProvider(TOKEN, URL, transport=transport)
+    return provider.retrieve_job(4000, backend_name="Fake"), transport
+
+
+def _result_body(**fields) -> tuple[int, bytes]:
+    payload = {"tid": 4000, "error": "", "circuit": _TWO_BIT_QASM, **fields}
+    return 200, json.dumps(payload).encode()
+
+
+def test_job_errors_say_whether_the_result_is_still_pending() -> None:
+    assert JobError("failed").result_pending is False
+    assert JobTimeoutError("not ready").result_pending is True
+    assert issubclass(JobTimeoutError, JobError)  # existing handlers keep working
+
+
+def test_result_not_ready_is_a_pending_timeout(fake) -> None:
+    """Quafu says Finished but has not published the result yet."""
+    job, _ = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Finished"'), "/task/result/4000": (200, b"{}")},
+    )
+    with pytest.raises(JobTimeoutError, match="Finished") as caught:
+        job.result(timeout=0.01, poll_interval=0.001)
+    assert caught.value.result_pending is True
+    assert caught.value.job_id == "4000"
+
+
+def test_undecodable_result_is_a_job_error_that_is_not_pending(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {"/task/result/4000": _result_body(status="Finished", count={"000": 1024})},
+    )
+    with pytest.raises(JobError, match="Unable to decode") as caught:
+        job.result(timeout=5, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert caught.value.result_pending is False
+
+
+def test_task_unknown_to_quafu_is_reported_instead_of_polled(provider, fake) -> None:
+    job = provider.retrieve_job(4242)
+    with pytest.raises(JobError, match="not found") as caught:
+        job.status()
+    assert caught.value.error_type == "not_found"
+    assert caught.value.job_id == "4242"
+    with pytest.raises(JobError, match="not found") as caught:
+        job.result(timeout=0.05, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert caught.value.result_pending is False
+    with pytest.raises(JobError, match="not found"):
+        job.cancel()
+    assert ("GET", "/task/cancel/4242") not in fake.calls
+
+
+@pytest.mark.parametrize("status", ["Timeout", "Error", "Archived"])
+def test_unmapped_status_in_a_result_ends_the_wait_as_failed(fake, status) -> None:
+    """A result with a status QuSpect has no mapping for is not "running"."""
+    job, _ = _scripted_job(
+        fake,
+        {
+            "/task/status/4000": (200, json.dumps(status).encode()),
+            "/task/result/4000": _result_body(status=status, count=None),
+        },
+    )
+    with pytest.raises(JobError, match=f"status '{status}'") as caught:
+        job.result(timeout=0.05, poll_interval=0.001)
+    assert not isinstance(caught.value, JobTimeoutError)
+    assert job.status() == JobStatus.UNKNOWN
+    assert job.provider_status() == status
+
+
+def test_unmapped_task_status_is_unknown_and_named_by_the_timeout(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Archived"'), "/task/result/4000": (200, b"{}")},
+    )
+    assert job.status() == JobStatus.UNKNOWN
+    assert job.provider_status() == "Archived"
+    assert not job.done()
+    with pytest.raises(JobTimeoutError, match="Archived"):
+        job.result(timeout=0.01, poll_interval=0.001)
+
+
+def test_in_progress_status_in_a_result_keeps_waiting(fake) -> None:
+    job, _ = _scripted_job(
+        fake,
+        {
+            "/task/status/4000": (200, b'"Running"'),
+            "/task/result/4000": _result_body(status="Running"),
+        },
+    )
+    with pytest.raises(JobTimeoutError, match="Running"):
+        job.result(timeout=0.01, poll_interval=0.001)
+
+
+# ---------------------------------------------------------------------------
+# Cancel, 403 answers, task ids
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "accepted"),
+    [
+        (b"null", True),
+        (b"", True),
+        (b'"Canceled"', True),
+        (b'{"detail": "task is running, cannot cancel"}', False),
+        (b'"Failed"', False),
+        (b'"task 4000 not found!"', False),
+        (b"false", False),
+    ],
+)
+def test_cancel_reports_whether_quafu_accepted_it(fake, answer, accepted) -> None:
+    job, transport = _scripted_job(
+        fake,
+        {"/task/status/4000": (200, b'"Running"'), "/task/cancel/4000": (200, answer)},
+    )
+    assert job.cancel() is accepted
+    assert transport.calls.count("/task/cancel/4000") == 1
+
+
+def test_partial_submission_lists_tasks_whose_cancel_was_refused(fake) -> None:
+    from quspect.backends import PartialSubmissionError
+
+    fake.fail_run_after = 1
+    fake.pending_polls = 10**6
+    refusing = _Scripted(fake, {"/task/cancel/": (200, b'{"detail": "cannot cancel"}')})
+    backend = QuafuProvider(TOKEN, URL, transport=refusing).get_backend("Fake")
+    request = ExecutionRequest(
+        experiments=(
+            CircuitExperiment(_ghz(2), label="x"),
+            CircuitExperiment(_ghz(2), label="y"),
+        ),
+        shots=1024,
+    )
+    with pytest.raises(PartialSubmissionError) as info:
+        backend.submit_request(request)
+    assert info.value.cancellation_failures == ("1000",)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "token_rejected"),
+    [
+        (401, b'{"detail": "invalid token"}', True),
+        (401, b'{"detail": "program not in the run"}', True),
+        (403, b'{"detail": "Token expired"}', True),
+        (403, b'{"detail": "Not authenticated"}', True),
+        (403, b'"Forbidden"', True),
+        (403, b"", True),
+        (403, b"{}", True),
+        (403, b'{"detail": "program not in the run"}', False),
+        (403, b'"chip Baihua is under maintenance"', False),
+    ],
+)
+def test_only_credential_answers_read_as_a_rejected_token(
+    status, body, token_rejected
+) -> None:
+    """A 403 whose body gives another reason is not a rejected token."""
+    from quspect.backends._exceptions import BackendError
+    from quspect.backends.quafu._client import QuafuClient
+
+    client = QuafuClient(TOKEN, URL, transport=lambda *args: (status, body))
+    with pytest.raises(BackendError) as caught:
+        client.get("/task/status/7")
+    message = str(caught.value)
+    assert isinstance(caught.value, AuthenticationError) is token_rejected
+    assert ("rejected the API token" in message) is token_rejected
+    if not token_rejected:
+        reason = json.loads(body)
+        reason = reason["detail"] if isinstance(reason, dict) else reason
+        assert message == f"Quafu refused GET /task/status/7 (HTTP 403): {reason}"
+    assert TOKEN not in message
+
+
+@pytest.mark.parametrize("answer", [b"0", b"-1"])
+def test_submit_rejects_a_non_positive_task_id(fake, answer) -> None:
+    from quspect.backends._exceptions import BackendError
+
+    transport = _Scripted(fake, {"/task/run/": (200, answer)})
+    backend = QuafuProvider(TOKEN, URL, transport=transport).get_backend("Fake")
+    with pytest.raises(BackendError, match="task id"):
+        backend.submit(_ghz(2))
+
+
+@pytest.mark.parametrize("task_id", [0, "0", "00", -1, "-1"])
+def test_retrieve_rejects_non_positive_task_ids(provider, fake, task_id) -> None:
+    """``/task/status/0`` is the chip listing, not a task."""
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(task_id)
+    reference = JobReference(platform="quafu", backend_name="Fake", job_id=str(task_id))
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(reference)
+    composite = JobReference(
+        platform="quafu",
+        backend_name="Fake",
+        job_id="composite",
+        child_job_ids=("1000", str(task_id)),
+        batch_size=2,
+        child_batch_sizes=(1, 1),
+    )
+    with pytest.raises(ValueError, match="positive"):
+        provider.retrieve_job(composite)
+    assert not any("/task/status/0" in path for _, path in fake.calls[2:])
