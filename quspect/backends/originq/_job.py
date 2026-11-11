@@ -18,7 +18,11 @@ from quspect.simulation.result import SimulationResult
 PLATFORM = "originq"
 
 # ``taskState`` values (pyqpanda3 JobStatus: WAITING=1, COMPUTING=2,
-# FINISHED=3, FAILED=4, QUEUING=5).
+# FINISHED=3, FAILED=4, QUEUING=5).  The SDK has no cancelled member, and
+# which ``taskState`` the cloud reports for a cancelled task has not been
+# observed, so none is mapped to ``JobStatus.CANCELLED``: any other value
+# stays ``UNKNOWN``.  (pyqpanda3 0.5.1 itself reports every value outside
+# 1-5 as FAILED with "returned unsupported taskState".)
 _STATUS_MAP: dict[str, JobStatus] = {
     "1": JobStatus.PENDING,
     "2": JobStatus.RUNNING,
@@ -79,8 +83,27 @@ class OriginQJob(CloudJob):
         return map_status(self._detail().get("taskState"))
 
     def cancel(self) -> bool:
-        """Origin Quantum exposes no cancellation; always returns ``False``."""
-        return False
+        """Ask Origin Quantum to cancel the task (a batch is one task).
+
+        Sends a single request, without querying the status first and
+        without retrying.  Returns ``True`` when the cloud accepted the
+        request and ``False`` when it answered that the task cannot be
+        cancelled.  ``True`` does not mean the task has stopped.
+
+        Which ``taskState`` a cancelled task reports is not known: afterwards
+        :meth:`status` returns whatever the cloud reports, ``UNKNOWN`` for a
+        value outside pyqpanda3's five states, and :meth:`result` keeps
+        polling while it does, so pass a ``timeout``.
+
+        Raises:
+            JobError: The request failed (network, HTTP error, rejected key
+                or an unreadable answer); whether the task was cancelled is
+                then unknown.
+        """
+        try:
+            return self._client.cancel_task(self._task_id)
+        except Exception as exc:
+            raise JobError(str(exc), job_id=self._task_id) from exc
 
     def result(
         self,
