@@ -193,9 +193,10 @@ from quspect.simulation import Simulator, SimulationResult
 
 `Simulator(seed=None)` implements `Backend`.
 
-- `.run(circuit, shots=1024, save_statevector=False, **options) -> SimulationResult`
+- `.run(circuit, shots=1024, save_statevector=False, seed=None, **options) -> SimulationResult`
 - `.statevector(circuit) -> np.ndarray`
 - `.name == "simulator"`
+- Seeds: with `Simulator(seed=s)` every `.run()` restarts from `s` (same call, same result). `run(..., seed=k)` seeds one run only. Without a seed every run draws new entropy. `DensityMatrixSimulator` and `MonteCarloSimulator` follow the same rule.
 
 Execution behavior:
 
@@ -240,12 +241,12 @@ from quspect.simulation import DensityMatrix, DensityMatrixSimulator
 
 `DensityMatrixSimulator(seed=None)`:
 
-- `.run(circuit, shots=1024, save_statevector=False, **options)`
+- `.run(circuit, shots=1024, save_statevector=False, seed=None, **options)`
 - `.density_matrix(circuit)`
 
 `MonteCarloSimulator(seed=None)`:
 
-- `.run(circuit, shots=1024, save_statevector=False, **options)`
+- `.run(circuit, shots=1024, save_statevector=False, seed=None, **options)`
 
 ## Noise
 
@@ -612,7 +613,7 @@ from quspect.native import NativeExecutor, NativeImportError
 API:
 
 - `NativeExecutor(precision="double", seed=0)`
-- `.run(qsal_json, shots=0, return_statevector=False, return_expectations=False, return_samples=False)`
+- `.run(qsal_json, shots=0, return_statevector=False, return_expectations=False, return_samples=False, seed=None)` (every call restarts from the executor's seed unless `seed` is given)
 - `.decode(qsal_json)`
 - `.run_program(program, shots=0, return_statevector=False, return_expectations=False, return_samples=False)`
 - Internal `_prepare_adjoint(qsal_json)` creates the reusable native plan used by

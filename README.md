@@ -544,6 +544,8 @@ print(result.top_outcomes(3))     # top-3 outcomes
 - **Terminal measurements** — all `measure` ops at circuit end: evolve once, then sample
 - **Mid-circuit measurements** — measurements interleaved with gates: full re-execution per shot with state collapse
 
+**Seeds:** `Simulator(seed=s)` restarts from `s` on every `run()`, so the same call returns the same result. `sim.run(circuit, seed=k)` seeds one run only, for example to draw independent samples from one simulator. Without a seed every run draws new entropy. `DensityMatrixSimulator` and `MonteCarloSimulator` follow the same rule.
+
 ### Backend-neutral Parameter Sweeps
 
 `ExecutionRequest.sweep()` snapshots one parameterized template and binds every

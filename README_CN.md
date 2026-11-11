@@ -524,6 +524,8 @@ print(result.top_outcomes(3))     # 前 3 个最常见结果
 - **末尾测量** — 所有 `measure` 操作位于线路末尾：仅演化一次，然后采样
 - **中间测量** — 测量与门操作交错排列：每次采样独立重新执行，每次测量后坍缩状态
 
+**随机种子：** `Simulator(seed=s)` 的每次 `run()` 都从 `s` 重新开始，同样的调用得到同样的结果。`sim.run(circuit, seed=k)` 只为这一次运行指定种子，可用于在同一个模拟器上取得相互独立的采样。不设种子时，每次运行都使用新的系统随机数。`DensityMatrixSimulator` 与 `MonteCarloSimulator` 遵循同一规则。
+
 ### 后端无关的参数扫描
 
 `ExecutionRequest.sweep()` 会快照一个参数化模板，并按输入顺序绑定每个参数点。
