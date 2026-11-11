@@ -57,6 +57,15 @@ before starting another run. Failures before creation use ``not_created``.
 Polling failures use ``not_applicable``: retry the read using the saved task ID,
 never treat a read failure as evidence that submission failed.
 
+A create request that the provider answers with an HTTP client error (for
+example 400, 401, 403 or 404) is a definite refusal and uses ``rejected``: no
+task exists, and ``status_code`` and ``provider_message`` on the error say why.
+Timeouts, conflicts and throttling (408, 409, 425, 429), server errors and an
+answer without a task ID stay ``unknown``. ``provider_message`` is the
+provider's own text with credentials and URLs removed; show it to the user, do
+not parse it. A failed ``poll`` snapshot carries the same field when the
+provider explained the failure.
+
 Cloud limitations
 -----------------
 
@@ -69,6 +78,12 @@ is a vendor routing value, not proof of which physical machine executes a job.
 it. Coefficient quantization and its admissible ranges remain provider-defined;
 this adapter does not silently round coefficients or claim exact hardware energy
 equivalence.
+
+Since November 2026 the upload signature names a directory (``dir``), and the
+provider's storage policy only admits object keys under it. The client uploads
+to ``<dir><random>/quspect-qubo.csv``; the random segment keeps two submissions
+apart even when the provider signs the same directory twice. A signature
+without ``dir`` keeps the earlier ``<random>/quspect-qubo.csv`` key.
 
 The conversion and transport are covered by exhaustive small-model identities and
 mocked protocol tests. Live account acceptance is a separate deployment check.
