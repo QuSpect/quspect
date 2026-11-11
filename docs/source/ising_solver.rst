@@ -73,6 +73,14 @@ writes to a fixed result slot.  Thread scheduling therefore cannot change the
 result.  All reads, including duplicates, are retained and stably sorted by
 ascending energy.
 
+The read seed is a hash of the pair: the base seed is scrambled with
+SplitMix64, the read index is added, and the sum is scrambled again.  Different
+base seeds, adjacent ones included, therefore give unrelated reads, and
+``num_reads=1`` at seeds ``s, s+1, ...`` is a set of independent runs.
+Releases up to 0.6.2 hashed ``base_seed + read_index``, which made read ``k``
+of seed ``s`` identical to read ``0`` of seed ``s + k``; a given seed returns
+different samples since that was corrected.
+
 Exact oracle
 ------------
 
