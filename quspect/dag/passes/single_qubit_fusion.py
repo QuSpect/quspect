@@ -222,11 +222,16 @@ class SingleQubitGateFusion(BasePass):
     resynthesized with :func:`quspect.gates.synthesis.synthesize_one_qubit`
     using only basis gates (e.g. ``rz·h·rz·h·rz`` for an ``{h, rz}``
     basis, with identity rotations dropped), and the run is replaced only
-    if the replacement is strictly cheaper than the run. The cost of a
-    run is its gate count, where a non-basis gate counts as the length of
-    its decomposition into the basis. Runs equal to the identity (up to
-    global phase) are removed. Single non-basis gates are resynthesized
-    too when that is cheaper than decomposing them.
+    if the replacement is strictly cheaper than the run and has no more
+    gates than the run. The cost of a run is its gate count, where a
+    non-basis gate counts as the length of its decomposition into the
+    basis. Runs equal to the identity (up to global phase) are removed.
+    Single non-basis gates are resynthesized too when one basis gate does
+    it (``s`` → ``rz(π/2)``). The pass never adds gates: a run with
+    non-basis gates whose shortest synthesis is longer than the run itself
+    (``ry(0.7)`` alone on ``{h, rz}``) is left unchanged, so lower a
+    circuit to the basis first (``DecomposePass``) when every gate of the
+    output has to be in the basis.
 
     Args:
         basis_gates: Optional target gate set. ``None`` (default) keeps
@@ -339,7 +344,12 @@ class SingleQubitGateFusion(BasePass):
         """Shorter basis sequence for a run of single-qubit gates, or ``None``.
 
         ``None`` means the run is kept: a single basis gate, a run whose
-        matrix is unavailable, or no strictly cheaper synthesis.
+        matrix is unavailable, no strictly cheaper synthesis, or a synthesis
+        with more gates than the run.  The last case needs a gate outside
+        the basis, which costs the length of its decomposition: ``ry(0.7)``
+        costs more than the five gates of ``rz·h·rz·h·rz``, but the pass
+        writes a replacement into the nodes of the run (here one) and never
+        adds nodes, so such a run is left for a decomposition pass.
         """
         from quspect.gates.synthesis import synthesize_one_qubit
 
@@ -352,6 +362,8 @@ class SingleQubitGateFusion(BasePass):
             return None
         replacement = synthesize_one_qubit(combined, basis)
         if replacement is None or len(replacement) >= cost:
+            return None
+        if len(replacement) > len(gates):
             return None
         return replacement
 
@@ -413,7 +425,9 @@ class SingleQubitGateFusion(BasePass):
                 continue
 
             # Reuse the first nodes of the run for the replacement gates
-            # and splice out the remainder.
+            # and splice out the remainder.  The replacement never has more
+            # gates than the run (see ``_resynthesized_run``), so every gate
+            # of it gets a node.
             for nid, new_gate in zip(block, replacement, strict=False):
                 old_instr = dag.get_node(nid).instruction
                 assert old_instr is not None
