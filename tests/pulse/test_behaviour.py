@@ -36,7 +36,13 @@ def test_package_reexports_extension(pulse: Any) -> None:
     from quspect.pulse import envelopes_compat
 
     compat = set(envelopes_compat.__all__)
+    # ``align`` is the one function wrapped in Python (complex amplitudes of
+    # any precision); everything else is the extension's own object.
+    wrapped = {"align"}
     for name in pulse.__all__:
+        if name in wrapped:
+            assert getattr(pulse, name) is not getattr(_pulse, name)
+            continue
         source = envelopes_compat if name in compat else _pulse
         assert getattr(pulse, name) is getattr(source, name)
     assert compat <= set(pulse.__all__)
@@ -136,3 +142,147 @@ def test_none_envelope_raises(pulse: Any, g: Any) -> None:
         g + None
     with pytest.raises(TypeError):
         pulse.mix(None, 0.1, 0.0, True)
+
+
+# ---- behaviour shared with envelopes-qc 0.1.5 that is easy to trip over ----
+
+
+def _sample(pulse: Any, env: Any, t: float) -> complex:
+    t0, wave = pulse.decode_envelope(env, pulse.WaveCache(1.0), t - 5.0, t + 5.0)
+    return complex(wave[round(t - t0)])
+
+
+def _align_cases() -> list[tuple[str, Any, Any]]:
+    """``(label, amplitudes, the same amplitudes as the extension takes them)``."""
+    real = [1.0, 0.25]
+    mixed = [1.0, 1j]
+    return [
+        ("no-amp", None, None),
+        ("float32", np.array(real, np.float32), np.array(real, np.float32)),
+        ("float64", np.array(real, np.float64), np.array(real, np.float64)),
+        ("int", np.array([1, 2]), np.array([1, 2])),
+        ("float-list", real, real),
+        ("complex64", np.array(mixed, np.complex64), np.array(mixed, np.complex64)),
+        ("complex-list", mixed, mixed),
+        ("complex128", np.array(mixed, np.complex128), np.array(mixed, np.complex64)),
+        (
+            "complex128-scalars",
+            [np.complex128(1.0), np.complex128(1j)],
+            np.array(mixed, np.complex64),
+        ),
+        (
+            "complex128-real-valued",
+            np.array(real, np.complex128),
+            np.array(real, np.complex64),
+        ),
+    ]
+
+
+def test_align_keeps_complex128_amplitudes(pulse: Any) -> None:
+    """Known issue: complex128 amplitudes lost their imaginary part.
+
+    envelopes-qc (and ``quspect._pulse.align``) match a complex128 array to
+    the float32 overload and only emit a ComplexWarning.
+    """
+    import warnings
+
+    drag = pulse.GaussianDRAG(0, 10, 0.5, 0.5, 0, 0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        env = pulse.align(
+            drag, np.array([0.0, 40.0]), np.array([1, 1j], dtype=np.complex128)
+        )
+    assert caught == []
+    assert _sample(pulse, env, 40.0) == pytest.approx(0.5j)
+    assert _sample(pulse, env, 0.0) == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("amp", "native_amp"),
+    [case[1:] for case in _align_cases()],
+    ids=[case[0] for case in _align_cases()],
+)
+def test_align_is_the_extension_align_for_every_amplitude_type(
+    pulse: Any, d: Any, amp: Any, native_amp: Any
+) -> None:
+    """The wrapper changes nothing but the precision of complex amplitudes."""
+    from quspect import _pulse
+
+    dt = np.array([0.0, 40.0])
+    if amp is None:
+        env, expected = pulse.align(d, dt), _pulse.align(d, dt)
+    else:
+        env, expected = pulse.align(d, dt, amp), _pulse.align(d, dt, native_amp)
+    assert pulse.serialization(env) == pulse.serialization(expected)
+    wc = pulse.WaveCache(0.5)
+    t1, w1 = pulse.decode_envelope(env, wc)
+    t2, w2 = pulse.decode_envelope(expected, wc)
+    assert t1 == t2
+    assert w1.dtype == w2.dtype
+    assert w1.tobytes() == w2.tobytes()
+
+
+def test_align_keyword_and_error_behaviour(pulse: Any, g: Any) -> None:
+    env = pulse.align(env=g, dt=np.array([0.0, 8.0]), amp=np.array([1.0, 2.0]))
+    assert repr(env).startswith("EnvSum(")
+    with pytest.raises(TypeError):
+        pulse.align(None, np.array([0.0]))
+    with pytest.raises(TypeError):
+        pulse.align(g, np.array([0.0]), "a")
+
+
+@pytest.mark.parametrize("df", [0.13, -0.02])
+def test_static_mix_travels_with_later_shifts_only(pulse: Any, df: float) -> None:
+    """``mix(..., dynamical=False)`` and ``>>`` do not commute (as upstream).
+
+    The carrier of a static mix has zero phase at ``t = 0`` when ``mix`` is
+    called and then moves with every shift applied afterwards.  A shift
+    already inside the envelope does not move it.
+    """
+
+    def carrier(t: float) -> complex:
+        return complex(np.exp(-2j * np.pi * df * t))
+
+    def g() -> Any:
+        return pulse.Gaussian(0, 4, 1)
+
+    mixed_then_shifted = pulse.mix(g(), df, 0.0, False) >> 50
+    shifted_then_mixed = pulse.mix(g() >> 50, df, 0.0, False)
+    assert _sample(pulse, mixed_then_shifted, 50.0) == pytest.approx(1.0, abs=1e-5)
+    assert _sample(pulse, shifted_then_mixed, 50.0) == pytest.approx(
+        carrier(50.0), abs=1e-5
+    )
+    both = pulse.mix(g() >> 30, df, 0.0, False) >> 50
+    assert _sample(pulse, both, 80.0) == pytest.approx(carrier(30.0), abs=1e-5)
+    # align() shifts after the mix: every copy starts at zero phase.
+    copies = pulse.align(pulse.mix(g(), df, 0.0, False), np.array([0.0, 50.0]))
+    assert _sample(pulse, copies, 50.0) == pytest.approx(1.0, abs=1e-5)
+    # A dynamical mix keeps the absolute carrier in either order.
+    for env in (
+        pulse.mix(g(), df, 0.0, True) >> 50,
+        pulse.mix(g() >> 50, df, 0.0, True),
+        pulse.align(pulse.mix(g(), df, 0.0, True), np.array([0.0, 50.0])),
+    ):
+        assert _sample(pulse, env, 50.0) == pytest.approx(carrier(50.0), abs=1e-5)
+
+
+def test_decoded_array_is_its_own_buffer(pulse: Any, g: Any) -> None:
+    """Each decode returns a new array; the cache is never handed out.
+
+    The docstring kept from envelopes-qc says "zero-copy view of the internal
+    buffer": the array wraps the buffer of that one result without a copy.
+    """
+    wc = pulse.WaveCache(1.0)
+    _, first = pulse.decode_envelope(g, wc, 0.0, 20.0)
+    _, second = pulse.decode_envelope(g, wc, 0.0, 20.0)
+    assert not np.shares_memory(first, second)
+    assert first.flags.writeable
+    assert not first.flags.owndata  # wraps the C++ result buffer, no copy
+    expected = first.copy()
+    first[:] = 7.0
+    _, third = pulse.decode_envelope(g, wc, 0.0, 20.0)
+    np.testing.assert_array_equal(second, expected)
+    np.testing.assert_array_equal(third, expected)
+    _, whole_a = pulse.decode_envelope(g, wc)
+    _, whole_b = pulse.decode_envelope(g, wc)
+    assert not np.shares_memory(whole_a, whole_b)

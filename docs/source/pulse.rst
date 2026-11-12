@@ -15,8 +15,10 @@ the original, it is built from source on every supported platform, including
 Linux on aarch64.
 
 The classes and functions are re-exported from the native extension
-``quspect._pulse``.  Importing :mod:`quspect.pulse` raises :class:`ImportError`
-when the extension has not been built (see :doc:`installation`).
+``quspect._pulse``; only ``align`` is a thin Python function around the
+extension's (see "Differences from envelopes-qc" below).  Importing
+:mod:`quspect.pulse` raises :class:`ImportError` when the extension has not
+been built (see :doc:`installation`).
 
 Quick example
 -------------
@@ -100,12 +102,22 @@ Envelopes form expression trees:
   (``COMPLEXEnvProd``) constant stored in single precision.
 * ``env >> dt`` shifts in time (``EnvShift``).  Shifts and scales are pushed
   through sums, so ``(a + b) >> dt`` is ``(a >> dt) + (b >> dt)``.
-* ``mix(env, df, phase, dynamical)`` applies sideband mixing.  With
-  ``dynamical=True`` the carrier phase is zero at ``t = 0``; with
-  ``dynamical=False`` it is zero at the shifted start of each copy.
+* ``mix(env, df, phase, dynamical)`` applies sideband mixing: the envelope
+  is multiplied by the carrier ``exp(i(-2π·df·t + phase))``.  With
+  ``dynamical=True`` the carrier is fixed in absolute time, whatever shifts
+  come before or after.  With ``dynamical=False`` the carrier is the same
+  when ``mix`` is called but then moves with the envelope:
+  ``mix(env, df, phase, False) >> dt`` multiplies by
+  ``exp(i(-2π·df·(t - dt) + phase))``.  A shift already inside the envelope
+  does not move it, so ``mix(env >> dt, df, phase, False)`` and
+  ``mix(env, df, phase, False) >> dt`` differ, exactly as in envelopes-qc.
+  Mix first and shift (or ``align``) afterwards to give every copy the same
+  starting phase.
 * ``align(env, dt, amp=None)`` places copies of ``env`` at the offsets
   ``dt``, optionally scaled by real (``float32``) or complex (``complex64``)
-  amplitudes.  It is much faster than summing shifted copies in Python.
+  amplitudes.  Complex amplitudes of any precision, such as numpy's default
+  ``complex128``, are converted to ``complex64``.  It is much faster than
+  summing shifted copies in Python.
 * ``split(env, starts, ends)`` distributes the terms of a sum into blocks.
   Each term must lie completely inside a block; empty blocks get a
   zero-length ``Rect``.
@@ -129,7 +141,11 @@ Decoding
 ``(start_time, wave)``, where ``wave`` is a ``float32`` array for real
 envelopes and ``complex64`` for complex ones.  Samples lie on the absolute
 grid ``n · resolution`` of the :class:`~quspect.pulse.WaveCache`, and the
-array is a fresh buffer that may be modified in place.
+array is a fresh buffer that may be modified in place: every call returns its
+own array, and the cache is never handed out.  The function's docstring, kept
+from envelopes-qc, calls the result a "zero-copy view of the internal
+buffer"; that buffer is the one of this single result, which the array wraps
+without copying.
 
 ``decode_envelope(env, wc, start, end)`` crops or zero-pads the result to the
 window ``[start, end)``.  The returned start time is ``start`` rounded to
@@ -157,6 +173,12 @@ Differences from envelopes-qc
   names and call signatures are unchanged.
 * The pure-Python reference implementation ``envelopes.evp`` is not
   included.
+* :func:`quspect.pulse.align` keeps complex amplitudes of any precision.
+  envelopes-qc, and the extension function ``quspect._pulse.align`` that the
+  stand-in described below exposes as ``evc.align``, match a ``complex128``
+  array to the real version: the imaginary parts are dropped with only a
+  ``ComplexWarning``.  Results for ``float32``, ``float64`` and ``complex64``
+  amplitudes are the same in both.
 * Inputs that crash or hang envelopes-qc 0.1.5 raise Python exceptions
   instead, or work as expected:
 
@@ -219,7 +241,11 @@ Keep in mind:
 * Objects from the two implementations are different C++ types and cannot be
   mixed.  Pass only :mod:`quspect.pulse` envelopes to code imported under the
   stand-in.
-* ``envelopes.evp`` (the pure-Python implementation) is not provided.
+* ``envelopes.evp`` (the pure-Python implementation) is not provided;
+  importing it raises :class:`ImportError` saying so.  The other top-level
+  names are those of envelopes-qc.  Envelope classes are attributes of
+  ``evc`` (``evc.GaussianDRAG``): ``from envelopes import GaussianDRAG``
+  fails with envelopes-qc as well.
 * ``lqcloud`` declares envelopes-qc as a dependency, and envelopes-qc has no
   linux/aarch64 wheel.  On that platform install it with
   ``pip install --no-deps lqcloud`` plus its other dependencies.
