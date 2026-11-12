@@ -58,7 +58,9 @@ jobs:
   test:
     name: test (${{ matrix.kernel }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # 第 21 轮（#14–#16）之后全量测试变慢：AVX2 组合要跑两遍金标准（AVX2 与 scalar 模块），
+    # 实测 45–60 分钟，60 分钟的上限会在较慢的 runner 上把已通过的任务取消。
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
