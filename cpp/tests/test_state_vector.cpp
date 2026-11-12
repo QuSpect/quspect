@@ -1,6 +1,8 @@
 #include <cmath>
 
 #include <complex>
+#include <new>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -70,4 +72,27 @@ TEST(StateVectorTest, LargeQubitCount) {
     StateVector<double> sv(10);
     EXPECT_EQ(sv.dim(), 1024);
     EXPECT_NEAR(std::real(sv.data()[0]), 1.0, 1e-12);
+}
+
+TEST(StateVectorTest, UnallocatableWidthNamesTheState) {
+    // 2^56 amplitudes and more exceed every address space, so nothing is allocated.  The failure
+    // must be an allocation error (MemoryError in Python) that names the width, not the
+    // std::length_error text "vector".
+    for (uint32_t num_qubits : {56U, 59U, 60U, 63U, 64U, 200U}) {
+        try {
+            StateVector<double> sv(num_qubits);
+            FAIL() << "allocated " << num_qubits << " qubits";
+        } catch (const std::bad_alloc& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("state vector of " + std::to_string(num_qubits) + " qubits"), std::string::npos)
+                << message;
+            EXPECT_NE(message.find("2^" + std::to_string(num_qubits + 4) + " bytes"), std::string::npos) << message;
+        }
+    }
+    try {
+        StateVector<float> sv(60, 1);
+        FAIL() << "allocated 60 qubits";
+    } catch (const std::bad_alloc& error) {
+        EXPECT_NE(std::string(error.what()).find("2^63 bytes"), std::string::npos) << error.what();
+    }
 }
