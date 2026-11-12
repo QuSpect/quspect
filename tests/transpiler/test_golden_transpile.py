@@ -373,12 +373,24 @@ def test_golden_table_matches_circuits() -> None:
     assert tuple(GOLDEN) == LEVELS
     for level in LEVELS:
         assert set(GOLDEN[level]) == set(CIRCUITS)
+    assert sorted(_GOLDEN_CASES) == sorted((lv, n) for lv in LEVELS for n in CIRCUITS)
 
 
 # 按（级别, 电路）参数化：每个摘要仍覆盖该电路的全部 12 个目标（拓扑 x 门集），
 # 与 GOLDEN 的粒度一致。节点名为 test_transpile_golden_digests[<级别>-<电路>]。
-@pytest.mark.parametrize("name", tuple(CIRCUITS))
-@pytest.mark.parametrize("level", LEVELS)
+# 顺序：最慢的排在最前（第 3 级，其中最慢的几个电路在先）。并行运行时墙钟时间的下限是
+# 最慢的单个测试，它越早开始，末尾等它的时间越短；顺序不影响节点名与覆盖范围。
+_SLOWEST_FIRST = ("three_qubit_8", "three_qubit_5", "random_10", "qft_9", "adder_10")
+_GOLDEN_CASES = [
+    (level, name)
+    for level in reversed(LEVELS)
+    for name in (*_SLOWEST_FIRST, *(n for n in CIRCUITS if n not in _SLOWEST_FIRST))
+]
+
+
+@pytest.mark.parametrize(
+    ("level", "name"), _GOLDEN_CASES, ids=[f"{lv}-{n}" for lv, n in _GOLDEN_CASES]
+)
 def test_transpile_golden_digests(level: int, name: str) -> None:
     """Every platform and build produces exactly these compilations."""
     _require_level(level)

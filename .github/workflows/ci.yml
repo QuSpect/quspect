@@ -223,7 +223,8 @@ jobs:
 
       # COVERAGE_FILE 单独指定，避免与下一步 generate_report 的覆盖率数据冲突
       # （pytest-xdist 的各 worker 写 .coverage.tests.<后缀>，结束时由主进程合并）。
-      # -n auto：每个 CPU 一个 worker。--dist worksteal：测试逐个分发，空闲的 worker 从
+      # -n auto：每个物理核一个 worker（dev 依赖里的 pytest-xdist[psutil] 带 psutil；
+      # 没有 psutil 时按逻辑核数）。--dist worksteal：测试逐个分发，空闲的 worker 从
       # 其他 worker 的队列里取，同一文件里的重测试（test_golden_transpile.py 的第 3 级
       # 金标准按电路参数化）会摊到不同 worker 上；不要用按文件 / 按模块分组的 loadfile / loadscope。
       # PR 上跳过 slow 测试；-m "" 不做筛选（全量）。--durations 在日志里列出最慢的测试，
