@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from quspect.circuit.parameter import Parameter, ParameterExpression
@@ -621,3 +622,140 @@ class TestQubitOperatorValidationRegressions:
     def test_latex_omits_unit_coefficients(self) -> None:
         op = QubitOperator({((0, "X"),): 1.0, ((1, "Z"),): -1.0})
         assert op._repr_latex_() == r"$\sigma_{0}^{X} - \sigma_{1}^{Z}$"
+
+
+_PAULI_MATS = {
+    "X": np.array([[0, 1], [1, 0]], dtype=complex),
+    "Y": np.array([[0, -1j], [1j, 0]], dtype=complex),
+    "Z": np.array([[1, 0], [0, -1]], dtype=complex),
+}
+
+
+def _dense(op: QubitOperator, n: int) -> np.ndarray:
+    """Little-endian dense matrix (qubit 0 is the rightmost tensor factor)."""
+    total = np.zeros((2**n, 2**n), dtype=complex)
+    for term, coeff in op:
+        letters = dict(term)
+        mat = np.ones((1, 1), dtype=complex)
+        for qubit in range(n - 1, -1, -1):
+            mat = np.kron(mat, _PAULI_MATS.get(letters.get(qubit, ""), np.eye(2)))
+        total += complex(coeff) * mat  # type: ignore[arg-type]
+    return total
+
+
+def _random_operator(rng: np.random.Generator, n: int, terms: int) -> QubitOperator:
+    data: dict[tuple[tuple[int, str], ...], complex] = {}
+    for _ in range(terms):
+        letters = rng.choice(list("IXYZ"), size=n)
+        term = tuple((q, str(p)) for q, p in enumerate(letters) if p != "I")
+        coeff = complex(rng.normal(), rng.normal() if rng.random() < 0.5 else 0.0)
+        data[term] = data.get(term, 0) + coeff
+    return QubitOperator(data)  # type: ignore[arg-type]
+
+
+class TestQubitOperatorProduct:
+    """``op * op`` is the operator product (Pauli algebra)."""
+
+    def test_docstring_examples(self) -> None:
+        x = QubitOperator.from_pauli_string("X")
+        z = QubitOperator.from_pauli_string("Z")
+        assert x * z == QubitOperator({((0, "Y"),): -1j})
+        assert z * x == QubitOperator({((0, "Y"),): 1j})
+        assert x * x == QubitOperator.identity()
+
+    def test_different_qubits_keep_real_coefficients(self) -> None:
+        a = QubitOperator({((0, "X"),): 2.0})
+        b = QubitOperator({((1, "Z"),): 0.5})
+        product = a * b
+        assert product.terms == {((0, "X"), (1, "Z")): 1.0}
+        assert isinstance(product.terms[((0, "X"), (1, "Z"))], float)
+
+    def test_cancelling_terms_are_dropped(self) -> None:
+        x = QubitOperator.from_pauli_string("X")
+        z = QubitOperator.from_pauli_string("Z")
+        assert (x + z) * (x - z) == QubitOperator({((0, "Y"),): 2j})
+        assert ((x + z) * (x - z)).terms.keys() == {((0, "Y"),)}
+
+    def test_zero_and_identity(self) -> None:
+        op = QubitOperator({((0, "X"), (2, "Y")): 1.5, (): -0.25})
+        assert (op * QubitOperator.zero()).is_zero
+        assert (QubitOperator.zero() * op).is_zero
+        assert op * QubitOperator.identity() == op
+        assert QubitOperator.identity(2.0) * op == 2.0 * op
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4, 5])
+    def test_random_products_match_dense_matrices(self, n: int) -> None:
+        rng = np.random.default_rng(1600 + n)
+        for _ in range(40):
+            a = _random_operator(rng, n, int(rng.integers(1, 7)))
+            b = _random_operator(rng, n, int(rng.integers(1, 7)))
+            np.testing.assert_allclose(
+                _dense(a * b, n), _dense(a, n) @ _dense(b, n), atol=1e-12
+            )
+
+    def test_product_is_associative_and_distributive(self) -> None:
+        rng = np.random.default_rng(1616)
+        a, b, c = (_random_operator(rng, 3, 4) for _ in range(3))
+        np.testing.assert_allclose(
+            _dense((a * b) * c, 3), _dense(a * (b * c), 3), atol=1e-12
+        )
+        np.testing.assert_allclose(
+            _dense(a * (b + c), 3), _dense(a * b + a * c, 3), atol=1e-12
+        )
+
+    def test_in_place_product_returns_new_operator(self) -> None:
+        x = QubitOperator.from_pauli_string("X")
+        op = x
+        op *= QubitOperator.from_pauli_string("Y")
+        assert op == QubitOperator({((0, "Z"),): 1j})
+        assert x == QubitOperator.from_pauli_string("X")
+
+    def test_symbolic_coefficient_times_numeric_operator(self) -> None:
+        t = Parameter("t")
+        a = QubitOperator({((0, "X"),): t})
+        b = QubitOperator({((1, "Z"),): 2.0, ((0, "X"),): 1.0})
+        product = a * b
+        assert product.bind_parameters({t: 0.5}) == QubitOperator(
+            {((0, "X"), (1, "Z")): 1.0, (): 0.5}
+        )
+
+    def test_symbolic_coefficient_with_imaginary_phase_is_refused(self) -> None:
+        t = Parameter("t")
+        a = QubitOperator({((0, "X"),): t})
+        with pytest.raises(ValueError, match="imaginary"):
+            a * QubitOperator.from_pauli_string("Z")
+
+    def test_two_symbolic_coefficients_are_refused(self) -> None:
+        t, u = Parameter("t"), Parameter("u")
+        with pytest.raises(ValueError, match="symbolic"):
+            QubitOperator({((0, "X"),): t}) * QubitOperator({((1, "Z"),): u})
+
+    def test_unsupported_operand_still_raises_type_error(self) -> None:
+        with pytest.raises(TypeError):
+            QubitOperator.from_pauli_string("X") * "Z"  # type: ignore[operator]
+
+
+class TestQubitOperatorDocstrings:
+    """The documented spellings run (known issue: ``coeff=`` in the class docstring)."""
+
+    def test_class_docstring_uses_the_real_keyword(self) -> None:
+        doc = QubitOperator.__doc__ or ""
+        assert "coeff=" not in doc
+        assert "from_pauli_string('XZ', coefficient=0.5)" in doc
+        assert QubitOperator.from_pauli_string("XZ", coefficient=0.5) == QubitOperator(
+            {((0, "X"), (1, "Z")): 0.5}
+        )
+
+    def test_qubit_count_is_documented_as_a_method(self) -> None:
+        doc = QubitOperator.qubit_count.__doc__ or ""
+        assert "method" in doc
+        assert callable(QubitOperator.qubit_count)
+
+    def test_every_docstring_example_runs(self) -> None:
+        import doctest
+
+        import quspect.operators.qubit_operator as module
+
+        result = doctest.testmod(module)
+        assert result.attempted >= 20
+        assert result.failed == 0

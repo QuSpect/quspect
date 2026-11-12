@@ -387,7 +387,7 @@ optimized = pm.run(dag)
 
 ```python
 from quspect import FermionOperator, QubitOperator
-from quspect.operators.transforms import jordan_wigner
+from quspect.operators.transforms import jordan_wigner, reverse_jordan_wigner
 
 # 泡利字符串算符
 H = QubitOperator({
@@ -400,6 +400,12 @@ f = FermionOperator({((2, 1), (1, 1), (0, 0), (3, 0)): 2.0})
 
 # Jordan-Wigner 变换：费米子 → 量子比特
 qubit_op = jordan_wigner(f)
+
+# 逆变换：量子比特 → 费米子（结果未做正规序，需要时调用 .normal_order()）
+fermion_op = reverse_jordan_wigner(qubit_op)
+
+# 算符乘积（泡利代数）：X0 * Z0 == -1j * Y0
+xz = QubitOperator.from_pauli_string("X") * QubitOperator.from_pauli_string("Z")
 ```
 
 ### IR 导出

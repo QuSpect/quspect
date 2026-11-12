@@ -400,7 +400,7 @@ Support for second-quantized operator algebra:
 
 ```python
 from quspect import FermionOperator, QubitOperator
-from quspect.operators.transforms import jordan_wigner
+from quspect.operators.transforms import jordan_wigner, reverse_jordan_wigner
 
 # Pauli string operators
 H = QubitOperator({
@@ -413,6 +413,12 @@ f = FermionOperator({((2, 1), (1, 1), (0, 0), (3, 0)): 2.0})
 
 # Jordan-Wigner transformation: fermions → qubits
 qubit_op = jordan_wigner(f)
+
+# ...and back (not normal-ordered; call .normal_order() if needed)
+fermion_op = reverse_jordan_wigner(qubit_op)
+
+# Operator product (Pauli algebra): X0 * Z0 == -1j * Y0
+xz = QubitOperator.from_pauli_string("X") * QubitOperator.from_pauli_string("Z")
 ```
 
 ### IR Export
