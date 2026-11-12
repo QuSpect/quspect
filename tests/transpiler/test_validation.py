@@ -234,3 +234,77 @@ def test_malformed_final_layout_is_rejected(final_layout: list[int]) -> None:
 
     with pytest.raises(ValueError, match="final_layout"):
         check_compilation_consistency(circuit, compiler=malformed)
+
+
+def test_large_device_only_simulates_the_occupied_qubits() -> None:
+    """Three qubits placed at the far end of a 40-qubit line are a 2**3 state,
+    not 2**34 (the highest physical index + 1)."""
+    circuit = QuantumCircuit().h(0).cx(0, 1).cx(1, 2).t(2)
+    target = _line_target(40)
+
+    result = check_compilation_consistency(
+        circuit,
+        compiler=lambda item: transpile(
+            item, target, seed=0, initial_layout=[31, 32, 33]
+        ),
+    )
+
+    assert result.compiled_qubits == (31, 32, 33)
+    assert result.compiled_statevector.shape == (2**3,)
+    assert result.final_layout is not None
+    assert set(result.final_layout) <= set(result.compiled_qubits)
+    assert result.compilation_fidelity == pytest.approx(1.0)
+    assert result.consistent is True
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_routed_circuit_on_a_large_device_is_consistent(seed: int) -> None:
+    """Routing on a 6x6 grid borrows a few qubits; only those are simulated."""
+    circuit = generate_random_circuit(6, 6, seed=seed)
+    edges = [(r * 6 + c, r * 6 + c + 1) for r in range(6) for c in range(5)]
+    edges += [(r * 6 + c, (r + 1) * 6 + c) for r in range(5) for c in range(6)]
+    target = CompilationTarget.from_coupling_map(
+        36, edges, native_gates={"cz", "rz", "h", "x"}
+    )
+    compiled: list[TranspileResult] = []
+
+    def compiler(item: QuantumCircuit) -> TranspileResult:
+        compiled.append(transpile(item, target, seed=seed))
+        return compiled[-1]
+
+    result = check_compilation_consistency(circuit, compiler=compiler)
+
+    assert result.compiled_qubits is not None
+    occupied = set(compiled[0].circuit.active_qubits) | set(compiled[0].final_layout)
+    assert set(result.compiled_qubits) == occupied
+    assert result.compiled_qubits == tuple(sorted(occupied))
+    assert result.compiled_statevector.shape == (2 ** len(occupied),)
+    assert result.compilation_consistent is True
+
+
+def test_gate_on_a_qubit_outside_the_layout_is_flagged() -> None:
+    """A qubit the compiled circuit touches is simulated, wherever it is."""
+    circuit = QuantumCircuit().h(0).cx(0, 1)
+    target = _line_target(30)
+
+    def stray_gate(item: QuantumCircuit) -> TranspileResult:
+        compiled = transpile(item, target, seed=0, initial_layout=[20, 21])
+        physical = compiled.circuit.copy()
+        physical.x(27)
+        return dataclasses.replace(compiled, circuit=physical)
+
+    result = check_compilation_consistency(circuit, compiler=stray_gate)
+
+    assert result.compiled_qubits == (20, 21, 27)
+    assert result.compilation_fidelity == pytest.approx(0.0, abs=1e-12)
+    assert result.compilation_consistent is False
+
+
+def test_bare_circuit_keeps_its_own_register() -> None:
+    circuit = QuantumCircuit().h(0).cx(0, 2)
+
+    result = check_compilation_consistency(circuit, compiler=lambda item: item.copy())
+
+    assert result.compiled_qubits is None
+    assert result.compiled_statevector.shape == (2**3,)
+    assert result.consistent is True

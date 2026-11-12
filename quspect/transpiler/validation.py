@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral, Real
 from typing import TYPE_CHECKING
 
@@ -39,8 +39,11 @@ class CompilationConsistencyResult:
         quspect_statevector: Original state computed by QuSpect.
         qiskit_statevector: Original-QASM state computed by Qiskit.
         compiled_statevector: Compiled-circuit state computed by QuSpect, on
-            the compiled circuit's own qubits (physical qubits when the
-            compiler returns a :class:`~quspect.transpiler.TranspileResult`).
+            the compiled circuit's own qubits.  When the compiler returns a
+            :class:`~quspect.transpiler.TranspileResult` these are the
+            physical qubits it occupies (``compiled_qubits``), not the whole
+            device: bit ``k`` of a basis index is physical qubit
+            ``compiled_qubits[k]``.
         quspect_qiskit_fidelity: Fidelity between the QuSpect and Qiskit
             interpretations of the original circuit.
         compilation_fidelity: Fidelity between the original QuSpect state,
@@ -54,6 +57,11 @@ class CompilationConsistencyResult:
             :class:`~quspect.transpiler.TranspileResult`, or ``None`` when the
             compiler returned a bare circuit, whose qubit ``q`` is then
             compared with original qubit ``q``.
+        compiled_qubits: The physical qubits of ``compiled_statevector`` in
+            ascending order: every qubit the compiled circuit acts on and
+            every qubit of ``final_layout``.  Physical qubits it leaves out
+            are untouched and in ``|0>``, so a small circuit on a large
+            device stays a small state.  ``None`` for a bare circuit.
     """
 
     original_circuit: QuantumCircuit
@@ -67,6 +75,7 @@ class CompilationConsistencyResult:
     quspect_qiskit_consistent: bool
     compilation_consistent: bool
     final_layout: tuple[int, ...] | None = None
+    compiled_qubits: tuple[int, ...] | None = None
 
     @property
     def consistent(self) -> bool:
@@ -176,7 +185,11 @@ def check_compilation_consistency(
     return the whole :class:`~quspect.transpiler.TranspileResult`, for
     example ``compiler=lambda c: transpile(c, target, seed=0)``. The original
     state is then compared with logical qubit ``q`` on physical qubit
-    ``final_layout[q]`` and every other physical qubit in ``|0>``. Both
+    ``final_layout[q]`` and every other physical qubit in ``|0>``. Only the
+    physical qubits the result occupies are simulated (the ones its circuit
+    acts on and the ones of ``final_layout``; see ``compiled_qubits`` of the
+    result), so the cost follows the circuit, not the size of the device or
+    the highest physical index. Both
     states start from ``|0...0>``, which every initial layout prepares
     alike, so ``initial_layout`` does not enter this check. A bare
     :class:`QuantumCircuit` is compared qubit for qubit, so passing only
@@ -266,13 +279,24 @@ def check_compilation_consistency(
         )
 
     expected_state = quspect_state
+    compiled_qubits: tuple[int, ...] | None = None
     if final_layout is None:
         compiled = _unitary_view(compiled)
+        simulated = compiled
     else:
         width = max(compiled.num_qubits, max(final_layout, default=-1) + 1)
         compiled = _unitary_view(compiled, num_qubits=width)
-        expected_state = _place_state(quspect_state, final_layout, width)
-    compiled_state = np.asarray(simulator.statevector(compiled), dtype=complex)
+        # A device qubit the result never touches stays in |0> on both sides:
+        # simulate the occupied ones only (2**occupied amplitudes instead of
+        # 2**(highest physical index + 1)).
+        simulated, compiled_qubits = _occupied_view(compiled, final_layout)
+        dense = {physical: k for k, physical in enumerate(compiled_qubits)}
+        expected_state = _place_state(
+            quspect_state,
+            tuple(dense[physical] for physical in final_layout),
+            len(compiled_qubits),
+        )
+    compiled_state = np.asarray(simulator.statevector(simulated), dtype=complex)
 
     qasm_fidelity = _state_fidelity(quspect_state, qiskit_state)
     compilation_fidelity = _state_fidelity(expected_state, compiled_state)
@@ -289,6 +313,7 @@ def check_compilation_consistency(
         quspect_qiskit_consistent=(1.0 - qasm_fidelity <= tolerance),
         compilation_consistent=(1.0 - compilation_fidelity <= tolerance),
         final_layout=final_layout,
+        compiled_qubits=compiled_qubits,
     )
 
 
@@ -310,6 +335,35 @@ def _checked_final_layout(layout: Sequence[int], num_qubits: int) -> tuple[int, 
             f"on a distinct non-negative physical qubit, got {list(checked)}."
         )
     return tuple(int(physical) for physical in checked)
+
+
+def _occupied_view(
+    circuit: QuantumCircuit, layout: tuple[int, ...]
+) -> tuple[QuantumCircuit, tuple[int, ...]]:
+    """``circuit`` on its occupied qubits only, renumbered in ascending order.
+
+    Occupied are the qubits of its instructions and those of ``layout``.
+    Returns the renumbered circuit, exactly ``len(occupied)`` wide, and the
+    occupied qubits (new index ``k`` is old qubit ``occupied[k]``).
+    """
+    occupied = sorted(
+        {qubit for instruction in circuit.instructions for qubit in instruction.qubits}
+        | set(layout)
+    )
+    dense = {qubit: k for k, qubit in enumerate(occupied)}
+    view = QuantumCircuit._from_instruction_snapshot(
+        [
+            replace(
+                instruction,
+                qubits=tuple(dense[qubit] for qubit in instruction.qubits),
+            )
+            for instruction in circuit.instructions
+        ],
+        name=circuit.name,
+    )
+    if view.num_qubits < len(occupied):
+        view.id(len(occupied) - 1)
+    return view, tuple(occupied)
 
 
 def _place_state(
