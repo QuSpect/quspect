@@ -77,6 +77,9 @@ def _build_gate_map() -> dict[str, Callable[..., None]]:
     _reg("crz", lambda qc, q, p: qc.crz(float(p[0]), q[0], q[1]))
     _reg("cp", lambda qc, q, p: _cp(qc, q, p))
     _reg("cu3", lambda qc, q, p: _cu3(qc, q, p))
+    _reg("rxx", lambda qc, q, p: _pauli_pair(qc, "x", q, p))
+    _reg("ryy", lambda qc, q, p: _pauli_pair(qc, "y", q, p))
+    _reg("rzz", lambda qc, q, p: _pauli_pair(qc, "z", q, p))
 
     # three-qubit
     _reg("ccx", lambda qc, q, p: qc.ccx(q[0], q[1], q[2]))
@@ -119,6 +122,30 @@ def _cp(qc: Any, qubits: list[int], params: list[float]) -> None:
     control, target = qubits
     qc.p(theta / 2, control)
     qc.crz(theta, control, target)
+
+
+def _pauli_pair(qc: Any, axis: str, qubits: list[int], params: list[float]) -> None:
+    """``exp(-i·θ/2·P⊗P)`` (``rxx``/``ryy``/``rzz``) in its exact CX form.
+
+    ``CX · RZ(θ) · CX`` is ``rzz``; ``H`` (``rxx``) or ``RX(±π/2)`` (``ryy``)
+    on both qubits rotate ``Z⊗Z`` into ``P⊗P``.  Uses only lqcloud methods
+    the other gates already rely on.
+    """
+    theta = float(params[0])
+    a, b = qubits
+
+    def basis(sign: float) -> None:
+        for qubit in (a, b):
+            if axis == "x":
+                qc.h(qubit)
+            elif axis == "y":
+                qc.rx(sign * math.pi / 2, qubit)
+
+    basis(1.0)
+    qc.cx(a, b)
+    qc.rz(theta, b)
+    qc.cx(a, b)
+    basis(-1.0)
 
 
 _GATE_MAP = _build_gate_map()

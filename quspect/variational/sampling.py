@@ -38,6 +38,9 @@ from quspect.variational.result import (
 
 GroupingMode = Literal["qwc", "none"]
 _SAMPLING_WORKLOAD_VERSION = 1
+#: Gates ``exp(-i * theta/2 * P)`` for a Pauli word ``P`` (eigenvalues ±1):
+#: the two-term ±π/2 parameter-shift rule is exact for each of them.
+_SHIFT_GATES = frozenset({"rx", "ry", "rz", "rxx", "ryy", "rzz"})
 
 
 @dataclass(frozen=True)
@@ -550,6 +553,9 @@ def _compile_plan(
             "rx",
             "ry",
             "rz",
+            "rxx",
+            "ryy",
+            "rzz",
         },
     )
     if circuit.num_qubits == 0:
@@ -700,10 +706,10 @@ def _shift_occurrences(
                     raise ValueError(f"Gate {gate.name!r} has a non-finite constant.")
                 continue
 
-            if gate.name.lower() not in {"rx", "ry", "rz"} or gate_parameter_index != 0:
+            if gate.name.lower() not in _SHIFT_GATES or gate_parameter_index != 0:
                 raise ValueError(
                     "Sampling parameter-shift currently supports symbolic RX, RY, "
-                    f"and RZ only; got {gate.name!r}."
+                    f"RZ, RXX, RYY, and RZZ only; got {gate.name!r}."
                 )
             if not math.isfinite(constant):
                 raise ValueError(f"Gate {gate.name!r} has a non-finite offset.")

@@ -125,6 +125,8 @@ Gate builders:
 - Controlled rotations: `.crx(theta, control, target)`, `.cry(...)`, `.crz(...)`
 - Controlled phase/universal: `.cp(theta, control, target)`,
   `.cu3(theta, phi, lam, control, target)`
+- Two-qubit Pauli rotations `exp(-i*theta/2 * P⊗P)`: `.rxx(theta, a, b)`,
+  `.ryy(theta, a, b)`, `.rzz(theta, a, b)` (symmetric in `a`, `b`)
 - Three-qubit: `.ccx(control1, control2, target)`
 - Generic: `.append(gate, qubits, clbits=())`
 
@@ -194,6 +196,7 @@ Parameterized templates:
 
 - `RX`, `RY`, `RZ`, `P`, `U1`, `U2`, `U3`
 - `CRX`, `CRY`, `CRZ`, `CP`, `CU3`
+- `RXX`, `RYY`, `RZZ`
 - `ALL_PARAMETERIZED`
 
 `Gate` is metadata: name, qubit count, label, params. Create concrete parameterized gates with `RX.with_params(0.5)`. Matrix computation lives in `quspect.gates._matrix_utils.gate_matrix`.

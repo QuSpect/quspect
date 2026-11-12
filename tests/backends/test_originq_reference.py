@@ -68,6 +68,9 @@ _GATE_CASES = {
     "crz": lambda c: c.crz(_T, 2, 0),
     "cp": lambda c: c.cp(_T, 2, 0),
     "cu3": lambda c: c.cu3(_T, _F, _L, 2, 0),
+    "rxx": lambda c: c.rxx(_T, 2, 0),
+    "ryy": lambda c: c.ryy(_F, 0, 2),
+    "rzz": lambda c: c.rzz(_L, 1, 2),
     "ccx": lambda c: c.ccx(2, 0, 1),
 }
 

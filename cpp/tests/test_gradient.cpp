@@ -266,6 +266,101 @@ TEST(AdjointGradientTest, HighQubitCZGateMatchesAnalyticGradient) {
     EXPECT_NEAR(result.gradients[0][0], -std::sin(theta), 1e-12);
 }
 
+namespace {
+
+runtime::GateOperation PairRotation(const std::string& name, uint32_t q0, uint32_t q1,
+                                    const runtime::ParameterExpression& expression) {
+    auto gate = FixedGate(name, {q0, q1});
+    gate.parameter_expressions.push_back(expression);
+    return gate;
+}
+
+}  // namespace
+
+TEST(AdjointGradientTest, RzzOnPlusStatesMatchesAnalyticGradient) {
+    // RZZ(θ)|++⟩：⟨X0⟩ = cos θ（X0 与 Z0Z1 反对易）
+    runtime::QSALProgram program;
+    program.num_qubits = 2;
+    program.parameter_names = {"theta"};
+    program.ops.push_back(FixedGate("h", {0}));
+    program.ops.push_back(FixedGate("h", {1}));
+    program.ops.push_back(PairRotation("rzz", 1, 0, Expression(0.0, {{"theta", 1.0}})));
+    AddObservable(program, "X0", 1.0, {{0, 'X'}});
+
+    const double theta = 0.83;
+    const auto result = executor::AdjointGradientExecutor().Run(program, {{"theta", theta}});
+    const auto float_result = executor::AdjointGradientExecutor().Run(program, {{"theta", theta}},
+                                                                      executor::PrecisionKind::kFloat32);
+
+    EXPECT_NEAR(result.expectations[0], std::cos(theta), 1e-12);
+    EXPECT_NEAR(result.gradients[0][0], -std::sin(theta), 1e-12);
+    EXPECT_NEAR(float_result.expectations[0], std::cos(theta), 2e-6);
+    EXPECT_NEAR(float_result.gradients[0][0], -std::sin(theta), 2e-6);
+}
+
+TEST(AdjointGradientTest, PauliPairRotationsMatchCentralFiniteDifference) {
+    runtime::QSALProgram program;
+    program.num_qubits = 4;
+    program.parameter_names = {"a", "b", "c"};
+    const double prep[4] = {0.3, -1.1, 0.7, 2.0};
+    for (uint32_t qubit = 0; qubit < 4; ++qubit) {
+        program.ops.push_back(FixedGate("h", {qubit}));
+        program.ops.push_back(Rotation("ry", qubit, Expression(prep[qubit], {})));
+    }
+    program.ops.push_back(PairRotation("rxx", 0, 3, Expression(0.2, {{"a", 1.0}})));
+    program.ops.push_back(PairRotation("ryy", 3, 1, Expression(-0.1, {{"a", 0.5}, {"b", -1.5}})));
+    program.ops.push_back(FixedGate("cx", {1, 2}));
+    program.ops.push_back(PairRotation("rzz", 2, 0, Expression(0.0, {{"c", 2.0}})));
+    program.ops.push_back(PairRotation("ryy", 0, 2, Expression(0.4, {{"b", 1.0}})));
+    program.ops.push_back(Rotation("rx", 1, Expression(0.0, {{"c", -0.7}})));
+    AddObservable(program, "H", 0.6, {{0, 'Z'}, {3, 'Y'}});
+    AddObservable(program, "H", -0.3, {{1, 'X'}, {2, 'X'}});
+    AddObservable(program, "H", 0.45, {{0, 'Y'}, {1, 'Z'}, {2, 'Y'}});
+    AddObservable(program, "Z1", 1.0, {{1, 'Z'}});
+
+    const std::unordered_map<std::string, double> values{{"a", 0.31}, {"b", -0.47}, {"c", 1.13}};
+    const auto result = executor::AdjointGradientExecutor().Run(program, values);
+    const double epsilon = 1e-6;
+    for (std::size_t observable = 0; observable < 2; ++observable) {
+        for (std::size_t p = 0; p < program.parameter_names.size(); ++p) {
+            const auto& name = program.parameter_names[p];
+            auto plus = values;
+            auto minus = values;
+            plus[name] += epsilon;
+            minus[name] -= epsilon;
+            const double finite_difference
+                = (Expectation(program, plus, observable) - Expectation(program, minus, observable)) / (2 * epsilon);
+            EXPECT_NEAR(result.gradients[observable][p], finite_difference, 2e-9)
+                << "observable " << observable << " parameter " << name;
+        }
+    }
+}
+
+TEST(AdjointGradientTest, PauliPairRotationsNeedTwoDistinctQubitsAndOneAngle) {
+    executor::AdjointGradientExecutor gradient;
+    runtime::QSALProgram one_qubit;
+    one_qubit.num_qubits = 2;
+    auto gate = FixedGate("rzz", {0});
+    gate.parameter_expressions.push_back(Expression(0.3, {}));
+    one_qubit.ops.push_back(gate);
+    AddObservable(one_qubit, "Z", 1.0, {{0, 'Z'}});
+    EXPECT_THROW(gradient.Run(one_qubit, {}), std::invalid_argument);
+
+    runtime::QSALProgram duplicate;
+    duplicate.num_qubits = 2;
+    duplicate.ops.push_back(PairRotation("rxx", 1, 1, Expression(0.3, {})));
+    AddObservable(duplicate, "Z", 1.0, {{0, 'Z'}});
+    EXPECT_THROW(gradient.Run(duplicate, {}), std::invalid_argument);
+
+    runtime::QSALProgram two_angles;
+    two_angles.num_qubits = 2;
+    auto pair = PairRotation("ryy", 0, 1, Expression(0.3, {}));
+    pair.parameter_expressions.push_back(Expression(0.1, {}));
+    two_angles.ops.push_back(pair);
+    AddObservable(two_angles, "Z", 1.0, {{0, 'Z'}});
+    EXPECT_THROW(gradient.Run(two_angles, {}), std::invalid_argument);
+}
+
 TEST(AdjointGradientTest, RejectsParameterBindingErrors) {
     runtime::QSALProgram program;
     program.num_qubits = 1;

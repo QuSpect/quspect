@@ -16,7 +16,8 @@ Verified conventions (enforced in ``test_conventions.py``)
    ``Statevector``.  No permutation is needed.
 2. **Circuit API argument order** matches qiskit: ``cx(control, target)``,
    ``ccx(c1, c2, target)``, ``crx/cry/crz/cp(theta, control, target)``,
-   ``cu3(theta, phi, lam, control, target)``.  Gate correspondences:
+   ``cu3(theta, phi, lam, control, target)``,
+   ``rxx/ryy/rzz(theta, qubit1, qubit2)``.  Gate correspondences:
    ``cu3 -> qiskit cu(theta, phi, lam, 0, c, t)``, ``u1 -> p``,
    ``u2(phi, lam) -> u(pi/2, phi, lam)``, ``u3 -> u``, ``id -> id``.  All
    gates match qiskit *exactly*, with no global phase difference.

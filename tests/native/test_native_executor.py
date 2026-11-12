@@ -156,7 +156,14 @@ class TestNativeModuleAvailable:
         assert "avx2_available" in caps
         assert caps["objective_plans"] is True
         assert tuple(caps["differentiation_methods"]) == ("adjoint",)
-        assert tuple(caps["differentiable_gates"]) == ("rx", "ry", "rz")
+        assert tuple(caps["differentiable_gates"]) == (
+            "rx",
+            "ry",
+            "rz",
+            "rxx",
+            "ryy",
+            "rzz",
+        )
         assert "adjoint_gradient" not in caps
 
     def test_native_executor_importable(self) -> None:

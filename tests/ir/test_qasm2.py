@@ -69,11 +69,20 @@ class TestGateRegistry:
             )
 
     def test_all_parameterized_gates_have_mapping(self) -> None:
-        """Every parameterized gate template has a QASM mapping."""
+        """Every parameterized gate template has a QASM mapping.
+
+        ``ryy`` is the one exception: ``qelib1.inc`` has no such gate, so it
+        is decomposed (DECOMPOSE) or declared (EXTENDED) instead.
+        """
         from quspect.gates.parameterized import ALL_PARAMETERIZED
+        from quspect.ir.compilation import get_rules_for
 
         for gate in ALL_PARAMETERIZED:
             qasm_name = _get_qasm_gate_name(gate.name)
+            if gate.name == "ryy":
+                assert qasm_name is None
+                assert get_rules_for(gate.name, gate.num_qubits)
+                continue
             assert qasm_name is not None, (
                 f"Parameterized gate {gate.name!r} has no QASM mapping"
             )
@@ -287,6 +296,8 @@ class TestParameterizedGateEmission:
             ("crx", (0.5, 0, 1), "crx(0.5) q[0],q[1];"),
             ("cry", (0.3, 0, 1), "cry(0.3) q[0],q[1];"),
             ("crz", (1.57, 0, 1), "crz(1.57) q[0],q[1];"),
+            ("rxx", (0.5, 1, 0), "rxx(0.5) q[1],q[0];"),
+            ("rzz", (-0.25, 0, 1), "rzz(-0.25) q[0],q[1];"),
         ],
     )
     def test_two_qubit_param_gate(
@@ -388,6 +399,15 @@ class TestErrorConditions:
         with pytest.raises(UnsupportedGateError) as exc_info:
             exporter.export(circ)
         assert exc_info.value.gate_name == "my_custom_gate"
+
+    def test_ryy_strict_points_to_decompose_and_extended(self) -> None:
+        """``ryy`` is not in qelib1.inc, but it has a rule: say so."""
+        circ = QuantumCircuit(name="test").ryy(0.5, 0, 1)
+        with pytest.raises(UnsupportedGateError) as exc_info:
+            QASM2Exporter().export(circ)
+        assert exc_info.value.gate_name == "ryy"
+        assert "DECOMPOSE" in exc_info.value.suggestion
+        assert "EXTENDED" in exc_info.value.suggestion
 
     def test_bound_parameter_succeeds(self) -> None:
         """After binding, a parameterized gate exports without error."""
@@ -1152,3 +1172,67 @@ class TestExtendedDeclarations:
         circ.append(Gate(name="myzz", num_qubits=2, params=(Parameter("t"),)), (0, 1))
         with pytest.raises(ParameterizedGateError):
             _export(circ, mode=QASM2ExportMode.EXTENDED)
+
+
+# =============================================================================
+# Two-qubit Pauli rotations
+# =============================================================================
+
+
+class TestPauliPairRotationExport:
+    """``rxx``/``rzz`` are qelib1 gates; ``ryy`` is decomposed or declared."""
+
+    @staticmethod
+    def _circuit() -> QuantumCircuit:
+        return (
+            QuantumCircuit(name="t")
+            .h(0)
+            .rxx(0.3, 0, 1)
+            .ryy(-0.4, 1, 2)
+            .rzz(0.5, 2, 0)
+            .ryy(1.25, 0, 2)
+        )
+
+    def test_decompose_keeps_rxx_rzz_and_lowers_ryy_exactly(self) -> None:
+        qasm = _export(self._circuit(), mode=QASM2ExportMode.DECOMPOSE)
+        assert "ryy" not in qasm
+        assert "rxx(0.3) q[0],q[1];" in qasm
+        assert "rzz(0.5) q[2],q[0];" in qasm
+        back = qasm2_loads(qasm)
+        assert {i.gate.name for i in back} == {"h", "rxx", "rzz", "rx"}
+        _assert_same_unitary(back, self._circuit())
+
+    def test_extended_declares_ryy_once_with_a_formal_parameter(self) -> None:
+        qasm = _export(self._circuit(), mode=QASM2ExportMode.EXTENDED)
+        assert qasm.count("gate ryy(p0) a,b {") == 1
+        assert "ryy(-0.4) q[1],q[2];" in qasm
+        assert "ryy(1.25) q[0],q[2];" in qasm
+        _assert_same_unitary(qasm2_loads(qasm), self._circuit())
+
+    def test_round_trip_keeps_rxx_and_rzz_whole(self) -> None:
+        circ = QuantumCircuit(name="t").rxx(0.1, 2, 0).rzz(-0.7, 1, 2)
+        back = qasm2_loads(_export(circ))
+        assert [(i.gate.name, i.gate.params, i.qubits) for i in back] == [
+            ("rxx", (0.1,), (2, 0)),
+            ("rzz", (-0.7,), (1, 2)),
+        ]
+
+
+def _assert_same_unitary(a: QuantumCircuit, b: QuantumCircuit) -> None:
+    """Element-wise equal unitaries (no global-phase freedom)."""
+    n = max(a.num_qubits, b.num_qubits)
+    np.testing.assert_allclose(_unitary(a, n), _unitary(b, n), atol=1e-12)
+
+
+def _unitary(circuit: QuantumCircuit, n: int) -> np.ndarray:
+    """Big-endian unitary of a gate-only circuit on ``n`` qubits."""
+    from quspect.gates._matrix_utils import gate_matrix
+
+    psi = np.eye(2**n, dtype=complex).reshape([2] * n + [2**n])
+    for ins in circuit:
+        assert ins.gate is not None
+        k = len(ins.qubits)
+        g = np.asarray(gate_matrix(ins.gate), dtype=complex).reshape([2] * (2 * k))
+        psi = np.tensordot(g, psi, axes=(list(range(k, 2 * k)), list(ins.qubits)))
+        psi = np.moveaxis(psi, list(range(k)), list(ins.qubits))
+    return psi.reshape(2**n, 2**n)

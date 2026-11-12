@@ -74,6 +74,10 @@ _QASM2_GATE_MAP: dict[str, str] = {
     "crz": "crz",
     "cp": "cu1",
     "cu3": "cu3",
+    # Two-qubit Pauli rotations (``qelib1.inc`` has no ``ryy``; it is
+    # decomposed in DECOMPOSE mode and declared in EXTENDED mode)
+    "rxx": "rxx",
+    "rzz": "rzz",
 }
 
 
@@ -432,11 +436,18 @@ class QASM2Exporter:
                 qubits_str = ",".join(f"q[{q}]" for q in qubits)
                 return f"{decl.call_head(gate.params)} {qubits_str};"
             else:
+                from quspect.ir.compilation import get_rules_for
+
+                # A gate with a rule (e.g. ``ryy``, which qelib1.inc lacks)
+                # only reaches here in STRICT mode: point to the other modes.
+                has_rule = bool(get_rules_for(gate.name, gate.num_qubits))
                 raise UnsupportedGateError(
                     gate.name,
                     f"OpenQASM 2.0 ({self._config.mode.name} mode)",
                     suggestion=(
-                        "No decomposition rule is available for this gate. "
+                        ""
+                        if has_rule
+                        else "No decomposition rule is available for this gate. "
                         "Register a custom GateDecompositionRule in "
                         "quspect.ir.compilation."
                     ),

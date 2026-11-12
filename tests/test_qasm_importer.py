@@ -467,8 +467,6 @@ class TestQASM2Qelib1Gates:
             ("cy q[0],q[1];", 2, _controlled(_Y)),
             ("csx q[0],q[1];", 2, _controlled(_SX)),
             ("cswap q[0],q[1],q[2];", 3, _controlled(_SWAP)),
-            ("rzz(0.3) q[0],q[1];", 2, _pauli_rotation(_Z, 0.3)),
-            ("rxx(0.3) q[0],q[1];", 2, _pauli_rotation(_X, 0.3)),
             (
                 "cu(0.3,0.4,0.5,0.6) q[0],q[1];",
                 2,
@@ -497,6 +495,28 @@ class TestQASM2Qelib1Gates:
             HEADER + "qreg q[3];\ncrz(0.2) q[0],q[1];\nccx q[0],q[1],q[2];"
         )
         assert [i.gate.name for i in circ if i.gate is not None] == ["crz", "ccx"]
+
+    @pytest.mark.parametrize(
+        ("stmt", "name", "expected"),
+        [
+            ("rzz(0.3) q[1],q[0];", "rzz", _pauli_rotation(_Z, 0.3)),
+            ("rxx(-pi/4) q[1],q[0];", "rxx", _pauli_rotation(_X, -math.pi / 4)),
+        ],
+    )
+    def test_rxx_and_rzz_are_native(
+        self, stmt: str, name: str, expected: np.ndarray
+    ) -> None:
+        circ = qasm2_loads(HEADER + "qreg q[2];\n" + stmt)
+        assert [(i.gate.name, i.qubits) for i in circ if i.gate] == [(name, (1, 0))]
+        np.testing.assert_allclose(_unitary(circ, 2), expected, atol=1e-12)
+
+    def test_ryy_is_not_a_qelib1_gate(self) -> None:
+        with pytest.raises(QASM2ParseError, match="Unknown gate 'ryy'"):
+            qasm2_loads(HEADER + "qreg q[2];\nryy(0.3) q[0],q[1];")
+
+    def test_rzz_cannot_be_redefined_after_include(self) -> None:
+        with pytest.raises(QASM2ParseError, match="'rzz' is already defined"):
+            qasm2_loads(HEADER + "qreg q[2];\ngate rzz(t) a,b { cx a,b; }")
 
     def test_redefining_included_gate_raises(self) -> None:
         with pytest.raises(QASM2ParseError, match="'h' is already defined"):

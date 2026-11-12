@@ -311,17 +311,17 @@ def _build_routing_dag(
     With ``commutation`` (needs ``circuit`` to look up the gates), nodes
     that commute are not ordered: on each qubit, consecutive multi-qubit
     gates that act diagonally in the same basis there — ``Z`` (``cz``,
-    ``cp``, ``crz``, ``rzz``, a ``cx``/``ccx`` control) or ``X`` (a
-    ``cx``/``ccx`` target) — form a *commuting group*, and the single-qubit
-    gates between them may belong to it if they are diagonal in the same
-    basis (``rz``, ``t``… or ``x``, ``rx``…).  A group member only depends
-    on the nodes before the group, a node after the group on all its
-    members.  Single-qubit gates stay attached (as prefix) to the next node
-    on their qubit: inside a group they commute with every member; gates
-    that open a group (e.g. an ``h`` before a run of ``cp``) are emitted
-    with its first node, which the other members then depend on.  Two
-    gates diagonal in the same basis on every shared qubit commute, so any
-    execution order of the DAG gives the same unitary.
+    ``cp``, ``crz``, ``rzz``, a ``cx``/``ccx`` control), ``X`` (``rxx``, a
+    ``cx``/``ccx`` target) or ``Y`` (``ryy``) — form a *commuting group*, and
+    the single-qubit gates between them may belong to it if they are
+    diagonal in the same basis (``rz``, ``t``… or ``x``, ``rx``…).  A group
+    member only depends on the nodes before the group, a node after the
+    group on all its members.  Single-qubit gates stay attached (as prefix)
+    to the next node on their qubit: inside a group they commute with every
+    member; gates that open a group (e.g. an ``h`` before a run of ``cp``)
+    are emitted with its first node, which the other members then depend
+    on.  Two gates diagonal in the same basis on every shared qubit commute,
+    so any execution order of the DAG gives the same unitary.
 
     With ``merge_pairs`` (ignored with ``commutation``), a two-qubit gate
     whose qubits' last node is the same two-qubit node on the same pair is

@@ -9,8 +9,9 @@ at this level it is a plain cancellation.
 The pair may be separated by gates that commute with it.  Commutation is
 decided by a per-qubit rule that is exact (sufficient, never wrong): two
 gates commute if, on every qubit they share, both act diagonally in the
-same basis — ``Z`` (e.g. a control, ``rz``, ``t``, either qubit of ``cz``)
-or ``X`` (e.g. a CX/Toffoli target, ``x``, ``rx``).  For instance
+same basis — ``Z`` (e.g. a control, ``rz``, ``t``, either qubit of ``cz``
+or ``rzz``), ``X`` (e.g. a CX/Toffoli target, ``x``, ``rx``, either qubit of
+``rxx``) or ``Y`` (either qubit of ``ryy``).  For instance
 ``ccx(0, 1, 2) · t(0) · cx(3, 2) · ccx(0, 1, 2)`` reduces to
 ``t(0) · cx(3, 2)`` (``t`` acts diagonally on the control, and qubit 2 is
 the target of both the Toffoli and the CX).
@@ -38,6 +39,9 @@ _Z_1Q = frozenset({"id", "z", "s", "sdg", "t", "tdg", "rz", "p", "u1"})
 _X_1Q = frozenset({"x", "rx", "sx", "sxdg"})
 #: Two-qubit gates diagonal on both qubits.
 _DIAGONAL_2Q = frozenset({"cz", "cp", "crz", "cu1", "rzz", "cs", "csdg"})
+#: Two-qubit gates diagonal in the ``X`` (``Y``) basis on both qubits.
+_X_DIAGONAL_2Q = frozenset({"rxx"})
+_Y_DIAGONAL_2Q = frozenset({"ryy"})
 #: Controlled gates whose target operator is ``X``-diagonal.
 _X_TARGET_2Q = frozenset({"cx", "crx", "csx"})
 
@@ -59,8 +63,9 @@ def basis_on(gate: Gate, qubits: tuple[int, ...], q: int) -> str | None:
         q: One of the operands.
 
     Returns:
-        ``"Z"`` (e.g. ``rz``, ``cz``, a control), ``"X"`` (e.g. ``x``, a
-        CX/Toffoli target) or ``None`` (neither, or unknown).
+        ``"Z"`` (e.g. ``rz``, ``cz``, ``rzz``, a control), ``"X"`` (e.g.
+        ``x``, ``rxx``, a CX/Toffoli target), ``"Y"`` (``ryy``) or ``None``
+        (none of these, or unknown).
 
     Example:
         >>> from quspect.gates.standard import CX
@@ -77,6 +82,10 @@ def basis_on(gate: Gate, qubits: tuple[int, ...], q: int) -> str | None:
         return None
     if name in _DIAGONAL_2Q and len(qubits) == 2:
         return "Z"
+    if name in _X_DIAGONAL_2Q and len(qubits) == 2:
+        return "X"
+    if name in _Y_DIAGONAL_2Q and len(qubits) == 2:
+        return "Y"
     if name in _X_TARGET_2Q and len(qubits) == 2:
         return "Z" if pos == 0 else "X"
     if name == "ccx" and len(qubits) == 3:

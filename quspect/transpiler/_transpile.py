@@ -36,9 +36,9 @@ estimate of their two-qubit count after block resynthesis, the best few
 (plus the one level 2 would use) go through the full post-routing
 pipeline, and the winner is chosen by ``(two-qubit gates, two-qubit depth,
 total gates)``.  A second candidate family routes the CX-level circuit
-(``cx``, ``cp``, ``crz``, ``rzz`` kept whole) on a commutation-aware DAG
-with a bonus for SWAPs that merge with the gate just executed on their
-pair; this is what turns QAOA-like and CX-ladder circuits into
+(``cx``, ``cp``, ``crz``, ``rzz``, ``rxx``, ``ryy`` kept whole) on a
+commutation-aware DAG with a bonus for SWAPs that merge with the gate just
+executed on their pair; this is what turns QAOA-like and CX-ladder circuits into
 swap-network-like routings.  A third family routes on block nodes without
 mirror gates (mirror decisions are greedy and occasionally hurt, e.g. 2-D
 Trotter circuits on a line); all families are merged by estimated
@@ -133,7 +133,7 @@ _LEVEL3_EVAL_BUDGET_2Q = 2_500
 # 相位折叠（路由前）从这一级开始启用
 _PHASE_FOLD_LEVEL = 2
 # 对易感知候选：完整评估的个数、SWAP 融合奖励、占 work_limit 的比例，
-# 以及路由前保留不分解的门（对易规则需要看到完整的 cx / cp / crz / rzz；
+# 以及路由前保留不分解的门（对易规则需要看到完整的 cx / cp / crz / rzz / rxx / ryy；
 # ccx 分解掉后其 CX 也能参与对易，实测比整体路由 Toffoli 更好）
 _COMM_EVALUATIONS = 1
 # 普通门级 SABRE（CX 级线路，无块节点 / 镜像 / 对易 / 融合奖励）候选：完整评估的
@@ -142,7 +142,7 @@ _PLAIN_EVALUATIONS = 4
 _PLAIN_WORK = 1.0
 _COMM_FUSION = 0.3
 _COMM_WORK = 1.0
-_COMMUTING_KEEP = frozenset({"cx", "cp", "crz", "rzz"})
+_COMMUTING_KEEP = frozenset({"cx", "cp", "crz", "rzz", "rxx", "ryy"})
 # 大电路（路由 DAG 节点数超过 _COMM_SMALL）只有当对易 DAG 的深度缩短到
 # _COMM_MIN_GAIN 以下时才做对易感知搜索：随机电路、Heisenberg 链几乎没有
 # 可利用的对易性，跳过可省近一半路由时间；小电路上这一族候选仍常常更好
@@ -2160,10 +2160,10 @@ def _commutation_candidates(
 ) -> list[_CandidatePlan]:
     """Level-3 candidates routed on a commutation-aware DAG.
 
-    ``logical`` is the CX-level circuit (``cx``/``cp``/``crz``/``rzz`` kept
-    whole).  The search gets ``_COMM_WORK`` of the routing budget; the
-    returned candidates are relabelled ``comm/...`` and never flagged as
-    the level-2 default.
+    ``logical`` is the CX-level circuit (``cx``/``cp``/``crz``/``rzz``/
+    ``rxx``/``ryy`` kept whole).  The search gets ``_COMM_WORK`` of the
+    routing budget; the returned candidates are relabelled ``comm/...`` and
+    never flagged as the level-2 default.
     """
     sabre = SABRE(
         target,

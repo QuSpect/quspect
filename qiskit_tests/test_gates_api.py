@@ -51,6 +51,9 @@ _EXPECTED_PARAM = {
     "crz": (2, 1),
     "cp": (2, 1),
     "cu3": (2, 3),
+    "rxx": (2, 1),
+    "ryy": (2, 1),
+    "rzz": (2, 1),
 }
 _ANGLES = [0.0, math.pi, -math.pi, math.pi / 2, 2 * math.pi, 1e-9, 0.731, -2.4, 7.5]
 
@@ -63,7 +66,7 @@ def test_all_standard_contents() -> None:
 
 
 def test_all_parameterized_templates() -> None:
-    """ALL_PARAMETERIZED lists the 12 templates, none carrying parameters."""
+    """ALL_PARAMETERIZED lists the 15 templates, none carrying parameters."""
     assert {g.name: g.num_qubits for g in ALL_PARAMETERIZED} == {
         k: v[0] for k, v in _EXPECTED_PARAM.items()
     }

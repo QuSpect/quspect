@@ -102,7 +102,11 @@ TEST(IrCircuit, OpaqueNamesAndOpTable) {
     EXPECT_EQ(GateKindFromName("sxdg"), OpKind::kSXdg);
     EXPECT_EQ(GateKindFromName("u1"), OpKind::kU1);
     EXPECT_FALSE(GateKindFromName("measure").has_value());
-    EXPECT_FALSE(GateKindFromName("rzz").has_value());
+    EXPECT_EQ(GateKindFromName("rzz"), OpKind::kRZZ);
+    EXPECT_EQ(GetOpInfo(OpKind::kRXX).name, "rxx");
+    EXPECT_EQ(GetOpInfo(OpKind::kRYY).num_qubits, 2);
+    EXPECT_EQ(GetOpInfo(OpKind::kRZZ).num_params, 1);
+    EXPECT_FALSE(GateKindFromName("rzx").has_value());
 }
 
 }  // namespace

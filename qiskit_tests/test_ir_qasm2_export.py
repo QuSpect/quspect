@@ -51,6 +51,9 @@ from quspect.ir import (
 from quspect.ir.qasm2 import _format_float, get_supported_gates
 
 GATE_PARAMS: tuple[float, ...] = (0.37, -1.21, 2.53)
+#: Gates STRICT mode emits directly: every built-in gate except ``ryy``,
+#: which qelib1.inc does not define (it is decomposed or declared instead).
+QELIB1_GATES: tuple[str, ...] = tuple(sorted(set(GATE_SPECS) - {"ryy"}))
 
 
 @pytest.fixture(autouse=True)
@@ -74,12 +77,16 @@ def _export(circ: quspect.QuantumCircuit, **kwargs: object) -> str:
 @pytest.mark.qiskit_ref
 @pytest.mark.parametrize("name", sorted(GATE_SPECS))
 def test_each_gate_exports_to_identical_qiskit_unitary(name: str) -> None:
-    """Every supported gate exports to QASM that qiskit reads with no phase error."""
+    """Every supported gate exports to QASM that qiskit reads with no phase error.
+
+    ``ryy`` is not in qelib1.inc: it is checked through DECOMPOSE mode.
+    """
     spec = GATE_SPECS[name]
     circ = quspect.QuantumCircuit()
     qubits = list(range(spec.num_qubits))[::-1]  # reversed qubits exercise order
     spec.apply_quspect(circ, GATE_PARAMS[: spec.num_params], qubits)
-    qc = qiskit_loads(QASM2Exporter().export(circ))
+    mode = QASM2ExportMode.STRICT if name in QELIB1_GATES else QASM2ExportMode.DECOMPOSE
+    qc = qiskit_loads(_export(circ, mode=mode))
     assert qc.num_qubits == spec.num_qubits
     assert_unitary_equal(
         qiskit_circuit_unitary(qc), qiskit_circuit_unitary(circ), atol=1e-8
@@ -90,7 +97,7 @@ def test_each_gate_exports_to_identical_qiskit_unitary(name: str) -> None:
 @pytest.mark.parametrize("seed", range(12))
 def test_random_circuit_export_matches_qiskit(seed: int) -> None:
     """Random 4-qubit circuits survive export -> qiskit.qasm2.loads exactly."""
-    circ, qc_ref = random_circuit_pair(4, 30, seed)
+    circ, qc_ref = random_circuit_pair(4, 30, seed, gate_set=QELIB1_GATES)
     qc = qiskit_loads(QASM2Exporter().export(circ))
     # Exact equality is expected (all qelib1 definitions match quspect's
     # matrices); the 10-significant-digit float formatting limits atol.
@@ -103,7 +110,7 @@ def test_random_circuit_export_matches_qiskit(seed: int) -> None:
 @pytest.mark.parametrize("seed", range(6))
 def test_export_measurement_mapping_matches_qiskit(seed: int) -> None:
     """``measure q[i] -> c[j]`` pairs and register sizes survive the export."""
-    circ, _ = random_circuit_pair(3, 12, seed)
+    circ, _ = random_circuit_pair(3, 12, seed, gate_set=QELIB1_GATES)
     rng = np.random.default_rng(seed)
     clbits = [int(c) for c in rng.permutation(5)[:3]]
     circ.barrier()
@@ -124,7 +131,7 @@ def test_export_measurement_mapping_matches_qiskit(seed: int) -> None:
 @pytest.mark.parametrize("seed", range(6))
 def test_export_then_quspect_import_roundtrip(seed: int) -> None:
     """quspect export -> quspect import preserves the unitary and measurements."""
-    circ, _ = random_circuit_pair(3, 25, seed)
+    circ, _ = random_circuit_pair(3, 25, seed, gate_set=QELIB1_GATES)
     circ.measure([2, 0], [0, 1])
     back = qasm2_loads(QASM2Exporter().export(circ))
     assert quspect_measure_map(back) == quspect_measure_map(circ)
@@ -137,16 +144,18 @@ def test_export_then_quspect_import_roundtrip(seed: int) -> None:
 
 @pytest.mark.qiskit_ref
 def test_strict_output_needs_extended_qelib1_only_for_swap_crx_cry() -> None:
-    """Only ``swap``/``crx``/``cry``/``sx``/``sxdg`` are outside spec-strict qelib1.
+    """Only ``swap``/``crx``/``cry``/``sx``/``sxdg``/``rxx``/``rzz`` are outside
+    spec-strict qelib1.
 
-    (``sx``/``sxdg`` are in the qelib1.inc shipped by Qiskit and QASMBench, not
-    in the one of the OpenQASM 2.0 paper.)
+    (``sx``/``sxdg``/``rxx``/``rzz`` are in the qelib1.inc shipped by Qiskit and
+    QASMBench, not in the one of the OpenQASM 2.0 paper.)
 
     quspect emits them directly in STRICT mode; qiskit only accepts them with
     ``LEGACY_CUSTOM_INSTRUCTIONS`` (the extended qelib1 shipped by qiskit).
     """
     needs_legacy = set()
-    for name, spec in GATE_SPECS.items():
+    for name in QELIB1_GATES:
+        spec = GATE_SPECS[name]
         circ = quspect.QuantumCircuit()
         spec.apply_quspect(circ, GATE_PARAMS[: spec.num_params], range(spec.num_qubits))
         text = QASM2Exporter().export(circ)
@@ -155,7 +164,7 @@ def test_strict_output_needs_extended_qelib1_only_for_swap_crx_cry() -> None:
         except qiskit.qasm2.QASM2ParseError:
             needs_legacy.add(name)
         qiskit_loads(text)  # always fine with the legacy instruction set
-    assert needs_legacy == {"swap", "crx", "cry", "sx", "sxdg"}
+    assert needs_legacy == {"swap", "crx", "cry", "sx", "sxdg", "rxx", "rzz"}
 
 
 # =============================================================================
@@ -288,8 +297,8 @@ def test_format_float(value: float, text: str) -> None:
 
 
 def test_supported_gates_registry() -> None:
-    """``get_supported_gates`` is exactly the 25 quspect gate names."""
-    assert get_supported_gates() == set(GATE_SPECS)
+    """``get_supported_gates`` is every quspect gate name except ``ryy``."""
+    assert get_supported_gates() == set(QELIB1_GATES)
 
 
 # =============================================================================
@@ -385,7 +394,7 @@ def _register_bell() -> None:
 @pytest.mark.qiskit_ref
 def test_decompose_mode_equals_strict_for_supported_gates() -> None:
     """For qelib1-only circuits DECOMPOSE emits the same text as STRICT."""
-    circ, _ = random_circuit_pair(3, 20, 3)
+    circ, _ = random_circuit_pair(3, 20, 3, gate_set=QELIB1_GATES)
     assert _export(circ, mode=QASM2ExportMode.DECOMPOSE) == _export(circ)
 
 
@@ -470,7 +479,7 @@ def test_extended_mode_declares_parameter_free_custom_gate() -> None:
 
 def test_extended_mode_without_custom_gates_equals_strict() -> None:
     """EXTENDED with only qelib1 gates emits no declarations."""
-    circ, _ = random_circuit_pair(2, 10, 1)
+    circ, _ = random_circuit_pair(2, 10, 1, gate_set=QELIB1_GATES)
     assert _export(circ, mode=QASM2ExportMode.EXTENDED) == _export(circ)
 
 

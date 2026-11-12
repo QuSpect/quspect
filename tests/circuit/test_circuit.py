@@ -180,6 +180,52 @@ class TestQuantumCircuitParameterizedGates:
         circ.crz(0.3, 0, 1)
         assert len(circ) == 1
 
+    @pytest.mark.parametrize("name", ["rxx", "ryy", "rzz"])
+    def test_pauli_pair_rotations(self, name: str) -> None:
+        """rxx/ryy/rzz(theta, a, b) append the template with its label."""
+        theta = Parameter("θ")
+        circ = getattr(QuantumCircuit(), name)(0.25, 2, 0)
+        getattr(circ, name)(theta, 0, 1)
+        first, second = circ.instructions
+        assert first.gate is not None and second.gate is not None
+        assert (first.gate.name, first.gate.params, first.qubits) == (
+            name,
+            (0.25,),
+            (2, 0),
+        )
+        assert first.gate.label == name.upper()
+        assert circ.parameters == {theta}
+        bound = circ.bind_parameters({theta: -0.5})
+        assert bound.instructions[1].gate.params == (-0.5,)  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize("name", ["rxx", "ryy", "rzz"])
+    def test_pauli_pair_rotation_dagger_negates_angle(self, name: str) -> None:
+        circ = getattr(QuantumCircuit(), name)(0.7, 0, 1)
+        inverse = circ.dagger().instructions[0].gate
+        assert inverse is not None
+        assert (inverse.name, inverse.params) == (name, (-0.7,))
+
+    @pytest.mark.parametrize("name", ["rxx", "ryy", "rzz"])
+    def test_pauli_pair_rotation_json_and_qsal_round_trip(self, name: str) -> None:
+        from quspect.ir.qsal import dumps, loads
+
+        theta = Parameter("t")
+        circ = getattr(QuantumCircuit(), name)(2 * theta + 0.5, 1, 0)
+        for back in (
+            QuantumCircuit.from_json(circ.to_json()),
+            loads(dumps(circ)).circuit,
+        ):
+            gate = back.instructions[0].gate
+            assert gate is not None
+            assert (gate.name, gate.num_qubits, back.instructions[0].qubits) == (
+                name,
+                2,
+                (1, 0),
+            )
+            assert back.bind_parameters({theta: 1.0}).instructions[0].gate.params == (
+                2.5,
+            )  # type: ignore[union-attr]
+
 
 class TestQuantumCircuitDynamicQubitCount:
     """Test dynamic qubit/clbit count inference."""

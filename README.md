@@ -59,7 +59,7 @@ by the C++ high-performance engine.
 ## Features
 
 - **Fluent circuit API** — build circuits with method chaining; no pre-declared qubit counts
-- **24 built-in gate templates** — standard gates (H, X, CX, CCX, SWAP…) and parameterized rotations (RX, RY, RZ, U3…), plus measurements and barriers
+- **30 built-in gate templates** — standard gates (H, X, CX, CCX, SWAP…) and parameterized rotations (RX, RY, RZ, U3, CRZ, RXX, RYY, RZZ…), plus measurements and barriers
 - **Symbolic parameters** — define variational circuits with named `Parameter` placeholders and bind to values later
 - **DAG compiler** — compile circuits into a DAG IR with topological ordering, layer partitioning, and critical path analysis
 - **Optimization passes** — `GateCancellation`, `CommutationAnalysis`, `RotationMerging`, `SingleQubitGateFusion`, `EliminateDiagonalBeforeMeasurement`
@@ -340,6 +340,7 @@ The central class for building quantum programs. Qubit and classical bit counts 
 | `.s(q)` `.sdg(q)` `.t(q)` `.tdg(q)` | Phase / rotation gates |
 | `.rx(θ,q)` `.ry(θ,q)` `.rz(θ,q)` `.p(θ,q)` | Parameterized rotations |
 | `.cx(c,t)` `.cz(c,t)` `.swap(a,b)` | Two-qubit gates |
+| `.rxx(θ,a,b)` `.ryy(θ,a,b)` `.rzz(θ,a,b)` | Two-qubit Pauli rotations `exp(-iθ/2·P⊗P)` (Ising / Trotter steps) |
 | `.ccx(c1,c2,t)` | Toffoli (controlled-controlled-X) |
 | `.measure(qubits, clbits)` | Projective measurement |
 | `.measure_all()` | Measure all qubits |

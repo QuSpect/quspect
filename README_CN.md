@@ -56,7 +56,7 @@ QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASC
 ## 特性
 
 - **流式线路 API** — 方法链式构建线路，无需预先声明量子比特数量
-- **24 个内置量子门模板** — 标准门（H、X、CX、CCX、SWAP…）、参数化旋转门（RX、RY、RZ、U3…），另支持测量与屏障
+- **30 个内置量子门模板** — 标准门（H、X、CX、CCX、SWAP…）、参数化旋转门（RX、RY、RZ、U3、CRZ、RXX、RYY、RZZ…），另支持测量与屏障
 - **符号参数** — 用命名 `Parameter` 占位符定义变分线路，稍后绑定具体数值
 - **DAG 编译器** — 将线路编译为 DAG 中间表示（IR），支持拓扑排序、分层划分与关键路径分析
 - **优化通道** — `GateCancellation`（门消除）、`CommutationAnalysis`（交换分析）、`RotationMerging`（旋转合并）、`SingleQubitGateFusion`（单比特门融合）、`EliminateDiagonalBeforeMeasurement`（测量前对角门消除）
@@ -326,6 +326,7 @@ API 与 envelopes-qc 0.1.5（`envelopes.evc`）一致，解码出的波形逐位
 | `.s(q)` `.sdg(q)` `.t(q)` `.tdg(q)` | 相位/旋转门 |
 | `.rx(θ,q)` `.ry(θ,q)` `.rz(θ,q)` `.p(θ,q)` | 参数化旋转门 |
 | `.cx(c,t)` `.cz(c,t)` `.swap(a,b)` | 两量子比特门 |
+| `.rxx(θ,a,b)` `.ryy(θ,a,b)` `.rzz(θ,a,b)` | 两比特泡利旋转 `exp(-iθ/2·P⊗P)`（Ising / Trotter 步） |
 | `.ccx(c1,c2,t)` | Toffoli 门（控-控-X） |
 | `.measure(qubits, clbits)` | 投影测量 |
 | `.measure_all()` | 测量所有量子比特 |

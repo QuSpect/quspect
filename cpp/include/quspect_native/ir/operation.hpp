@@ -42,6 +42,9 @@ enum class OpKind : std::uint8_t {
     kCRZ,
     kCP,
     kCU3,
+    kRXX,
+    kRYY,
+    kRZZ,
     // 名字不在上表中的门
     kOpaque,
     // 非门指令
@@ -71,6 +74,7 @@ inline constexpr std::array<OpInfo, kNumOpKinds> kOpTable = {{
     {"p", 1, 1},     {"u1", 1, 1},    {"u2", 1, 2},
     {"u3", 1, 3},    {"crx", 2, 1},   {"cry", 2, 1},
     {"crz", 2, 1},   {"cp", 2, 1},    {"cu3", 2, 3},
+    {"rxx", 2, 1},   {"ryy", 2, 1},   {"rzz", 2, 1},
     {"", kVariable, kVariable},       {"measure", kVariable, 0},
     {"barrier", kVariable, 0},        {"channel", kVariable, 0},
 }};

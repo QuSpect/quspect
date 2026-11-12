@@ -168,6 +168,9 @@ _PARAM_COUNTS: dict[str, int] = {
     "crz": 1,
     "cp": 1,
     "cu3": 3,
+    "rxx": 1,
+    "ryy": 1,
+    "rzz": 1,
 }
 
 
@@ -236,6 +239,8 @@ def _parameterized_matrix(gate: Gate) -> np.ndarray:
         return _crz_matrix(params[0])
     if name == "cp":
         return _cp_matrix(params[0])
+    if name in ("rxx", "ryy", "rzz"):
+        return _pauli_pair_matrix(name[1], params[0])
     return _cu3_matrix(params[0], params[1], params[2])
 
 
@@ -358,3 +363,30 @@ def _cu3_matrix(theta: float, phi: float, lam: float) -> np.ndarray:
     result = np.eye(4, dtype=complex)
     result[2:, 2:] = u3
     return result
+
+
+def _pauli_pair_matrix(axis: str, theta: float) -> np.ndarray:
+    """Two-qubit Pauli rotation ``exp(-i * θ/2 * P⊗P)`` for ``P`` = X, Y or Z.
+
+    Equals ``cos(θ/2) * I - i * sin(θ/2) * P⊗P``; the matrix is symmetric in
+    the two qubits, so the operand order does not matter.
+    """
+    c = math.cos(theta / 2)
+    s = math.sin(theta / 2)
+    if axis == "z":
+        # Z⊗Z = diag(1, -1, -1, 1)
+        even = c - 1j * s
+        odd = c + 1j * s
+        return np.diag(np.array([even, odd, odd, even], dtype=complex))
+    # X⊗X and Y⊗Y flip both qubits; Y⊗Y has -1 on the |00>↔|11> corners.
+    corner = -1j * s if axis == "x" else 1j * s
+    flip = -1j * s
+    return np.array(
+        [
+            [c, 0, 0, corner],
+            [0, c, flip, 0],
+            [0, flip, c, 0],
+            [corner, 0, 0, c],
+        ],
+        dtype=complex,
+    )

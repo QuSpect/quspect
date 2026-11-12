@@ -42,13 +42,15 @@ std::string ToLower(const std::string& s) {
 bool IsParameterizedGate(const std::string& name) {
     std::string lower = ToLower(name);
     return lower == "rx" || lower == "ry" || lower == "rz" || lower == "p" || lower == "u1" || lower == "u2"
-           || lower == "u3" || lower == "crx" || lower == "cry" || lower == "crz" || lower == "cp" || lower == "cu3";
+           || lower == "u3" || lower == "crx" || lower == "cry" || lower == "crz" || lower == "cp" || lower == "cu3"
+           || lower == "rxx" || lower == "ryy" || lower == "rzz";
 }
 
 /// 已知的 named gate 名称集合
 bool IsKnownNamedGate(const std::string& name) {
     static const std::vector<std::string> known = {
-        "x", "y", "z", "h", "s", "sdg", "t", "tdg", "rx", "ry", "rz", "cx", "cnot", "cz", "swap", "id", "ccx", "ccnot",
+        "x",  "y",    "z",  "h",    "s",  "sdg", "t",     "tdg", "rx",  "ry",  "rz",
+        "cx", "cnot", "cz", "swap", "id", "ccx", "ccnot", "rxx", "ryy", "rzz",
     };
     std::string lower = ToLower(name);
     return std::find(known.begin(), known.end(), lower) != known.end();

@@ -24,7 +24,6 @@ gate u0(gamma) q { id q; }
 gate cy a,b { sdg b; cx a,b; s b; }
 gate cswap a,b,c { cx c,b; ccx a,b,c; cx c,b; }
 gate cu(theta,phi,lambda,gamma) c,t { p(gamma) c; cu3(theta,phi,lambda) c,t; }
-gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }
 )";
 
 const Qasm2Library& Lib() {
@@ -89,15 +88,30 @@ TEST(Qasm2Parser, ExpressionSemantics) {
 TEST(Qasm2Parser, LibraryAndUserGatesExpand) {
     Circuit c = Parse("qreg q[3];\ngate g(a,b) x,y { rzz(a*b) x,y; barrier x; cy y,x; }\n"
                       "g(2,0.25) q[2],q[0]; cswap q[0],q[1],q[2];\n");
-    // rzz -> cx rz cx ; cy -> sdg cx s ; cswap -> cx ccx cx
-    ASSERT_EQ(c.size(), 9u);
-    EXPECT_EQ(c[0].op.kind, OpKind::kCX);
+    // rzz 是原生门 ; cy -> sdg cx s ; cswap -> cx ccx cx（门体内的 barrier 被丢弃）
+    ASSERT_EQ(c.size(), 7u);
+    EXPECT_EQ(c[0].op.kind, OpKind::kRZZ);
     EXPECT_EQ(c[0].qubits[0], 2u);
-    EXPECT_EQ(c[1].op.kind, OpKind::kRZ);
-    EXPECT_EQ(c[1].op.params[0], 0.5);
-    EXPECT_EQ(c[3].op.kind, OpKind::kSdg);
-    EXPECT_EQ(c[3].qubits[0], 2u);
-    EXPECT_EQ(c[7].op.kind, OpKind::kCCX);
+    EXPECT_EQ(c[0].qubits[1], 0u);
+    EXPECT_EQ(c[0].op.params[0], 0.5);
+    EXPECT_EQ(c[1].op.kind, OpKind::kSdg);
+    EXPECT_EQ(c[1].qubits[0], 2u);
+    EXPECT_EQ(c[5].op.kind, OpKind::kCCX);
+}
+
+TEST(Qasm2Parser, PauliPairRotationsAreNative) {
+    Circuit c = Parse("qreg q[2];\nrxx(0.3) q[0],q[1]; rzz(-pi/2) q[1],q[0];\n");
+    ASSERT_EQ(c.size(), 2u);
+    EXPECT_EQ(c[0].op.kind, OpKind::kRXX);
+    EXPECT_EQ(c[0].op.params[0], 0.3);
+    EXPECT_EQ(c[1].op.kind, OpKind::kRZZ);
+    EXPECT_EQ(c[1].qubits[0], 1u);
+    EXPECT_EQ(c[1].op.params[0], -(3.141592653589793 / 2));
+    // qelib1.inc 没有 ryy；rzz 需要一个参数
+    EXPECT_FALSE(Accepts("OPENQASM 2.0; include \"qelib1.inc\"; qreg q[2]; ryy(0.1) q[0],q[1];"));
+    EXPECT_FALSE(Accepts("OPENQASM 2.0; include \"qelib1.inc\"; qreg q[2]; rzz q[0],q[1];"));
+    // 包含 qelib1.inc 之后不能重定义
+    EXPECT_FALSE(Accepts("OPENQASM 2.0; include \"qelib1.inc\"; gate rzz(t) a,b { cx a,b; }"));
 }
 
 TEST(Qasm2Parser, BareBarrierUsesActiveQubitsSorted) {

@@ -37,6 +37,7 @@ from quspect.ir import (
     register_decomposition,
 )
 from quspect.ir.compilation import _EXTRA_RULES, BUILTIN_DECOMPOSITIONS
+from quspect.ir.qasm2 import get_supported_gates
 
 BUILTIN_NAMES = sorted({r.gate_name for r in BUILTIN_DECOMPOSITIONS})
 
@@ -83,7 +84,7 @@ def test_builtin_rule_inventory() -> None:
     assert (
         sorted(
             ["swap", "ccx", "cx", "cz", "rx", "ry", "p", "u1", "u2", "u3"]
-            + ["crz", "crx", "cry", "cp", "cu3", "sx", "sxdg"]
+            + ["crz", "crx", "cry", "cp", "cu3", "sx", "sxdg", "rzz", "rxx", "ryy"]
         )
         == BUILTIN_NAMES
     )
@@ -256,8 +257,11 @@ def test_rule_dataclass_is_frozen() -> None:
 
 
 def test_decompose_circuit_default_supported_set_is_identity() -> None:
-    """With the QASM registry as supported set every built-in gate passes."""
-    circ, _ = random_circuit_pair(3, 30, 7)
+    """With the QASM registry as supported set every qelib1 gate passes.
+
+    (``ryy`` is the one built-in gate outside qelib1.inc; it is decomposed.)
+    """
+    circ, _ = random_circuit_pair(3, 30, 7, gate_set=sorted(get_supported_gates()))
     circ.measure([0], [0])
     out = decompose_circuit(circ)
     assert out.instructions == circ.instructions

@@ -163,6 +163,21 @@ class TestParameterizedGateCancellation:
         optimized = GateCancellation().run(dag)
         assert optimized.num_nodes() == 4
 
+    def test_pauli_pair_rotations_cancel(self) -> None:
+        """RXX/RYY/RZZ(θ)·(-θ) on the same ordered pair cancel."""
+        for name in ("rxx", "ryy", "rzz"):
+            circ = QuantumCircuit()
+            getattr(circ, name)(0.4, 1, 0)
+            getattr(circ, name)(-0.4, 1, 0)
+            optimized = GateCancellation().run(circ.to_dag())
+            assert optimized.num_nodes() == 4, name
+
+    def test_pauli_pair_rotations_of_different_axes_do_not_cancel(self) -> None:
+        circ = QuantumCircuit().rxx(0.4, 0, 1).rzz(-0.4, 0, 1)
+        dag = circ.to_dag()
+        before = dag.num_nodes()
+        assert GateCancellation().run(dag).num_nodes() == before
+
     def test_parameterized_not_cancelled_with_symbolic(self) -> None:
         """Symbolic parameters should NOT be cancelled."""
         from quspect import Parameter

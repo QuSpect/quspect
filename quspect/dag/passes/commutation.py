@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 #: Gate names in the "Z-family" (diagonal in computational basis,
 #: commute with each other and with CNOT controls).
-Z_FAMILY: set[str] = {"z", "s", "sdg", "t", "tdg", "rz", "p", "cz"}
+Z_FAMILY: set[str] = {"z", "s", "sdg", "t", "tdg", "rz", "p", "cz", "rzz"}
 
 #: Gate names in the "X-family" (commute with CNOT targets).
 X_FAMILY: set[str] = {"x", "rx"}

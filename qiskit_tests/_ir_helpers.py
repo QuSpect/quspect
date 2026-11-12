@@ -120,6 +120,9 @@ LEGACY_IMPORTABLE: dict[str, tuple[Any, int, int]] = {
     "cp": (qlib.CPhaseGate, 2, 1),
     "cu1": (qlib.CU1Gate, 2, 1),
     "cu3": (qlib.CU3Gate, 2, 3),
+    "rxx": (qlib.RXXGate, 2, 1),
+    "ryy": (qlib.RYYGate, 2, 1),
+    "rzz": (qlib.RZZGate, 2, 1),
     "ccx": (qlib.CCXGate, 3, 0),
 }
 
