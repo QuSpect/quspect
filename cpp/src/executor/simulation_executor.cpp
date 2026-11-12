@@ -9,6 +9,7 @@
 
 #include "quspect_native/executor/executor.hpp"
 #include "quspect_native/kernels/dispatch_table.hpp"
+#include "quspect_native/kernels/sampling.hpp"
 #include "quspect_native/runtime/classical_register.hpp"
 #include "quspect_native/runtime/program.hpp"
 #include "quspect_native/runtime/runtime_engine.hpp"
@@ -99,6 +100,38 @@ std::string PackedToBitstring(uint64_t packed, uint32_t num_bits) {
         s[num_bits - 1 - i] = ((packed >> i) & 1ULL) ? '1' : '0';
     }
     return s;
+}
+
+/// Sample the terminal measurements of every shot from the final state.
+///
+/// The state does not change between shots, so its cumulative distribution is built once and
+/// each shot costs one binary search.  (Calling the dispatch-table sampling kernel per shot
+/// rebuilt the 2^n prefix sum every time, which made the run time grow with shots * 2^n.)  The
+/// random numbers and the selected basis states are the same as with the per-shot kernel calls,
+/// so seeded results are unchanged.
+template <typename FP>
+void SampleTerminalMeasurements(const runtime::StateVector<FP>& state, const runtime::QSALProgram& program,
+                                uint64_t seed, uint64_t shots, bool return_samples, ExecutionResult* result) {
+    const auto mapping = CollectTerminalMeasures(program.ops);
+    const uint32_t num_clbits = program.num_clbits;
+    const std::vector<double> cumulative = kernels::cumulative_probabilities(state.data(), state.dim());
+
+    std::mt19937_64 sampling_rng(seed);
+    std::uniform_real_distribution<double> dist01(0.0, 1.0);
+
+    for (uint64_t shot = 0; shot < shots; ++shot) {
+        const double r = dist01(sampling_rng);
+        const uint64_t basis = kernels::sample_from_cumulative(cumulative, r);
+        const uint64_t packed = BasisToPackedSample(basis, mapping);
+
+        if (return_samples) {
+            result->packed_samples.push_back(packed);
+        }
+
+        if (num_clbits > 0) {
+            result->counts[PackedToBitstring(packed, num_clbits)]++;
+        }
+    }
 }
 
 void RejectSymbolicParameters(const runtime::QSALProgram& program) {
@@ -197,27 +230,8 @@ ExecutionResult SimulationExecutor::Run(const runtime::QSALProgram& program, con
 
             // 终端采样
             if (effective_shots > 0 && has_terminal_measures) {
-                const auto& sv = engine.GetStateVector();
-                auto mapping = CollectTerminalMeasures(program.ops);
-                uint32_t num_clbits = program.num_clbits;
-
-                std::mt19937_64 sampling_rng(master_seed);
-                std::uniform_real_distribution<double> dist01(0.0, 1.0);
-
-                for (uint64_t shot = 0; shot < effective_shots; ++shot) {
-                    double r = dist01(sampling_rng);
-                    uint64_t basis = table.sampling(sv.data(), sv.dim(), r);
-                    uint64_t packed = BasisToPackedSample(basis, mapping);
-
-                    if (request.return_samples) {
-                        result.packed_samples.push_back(packed);
-                    }
-
-                    if (num_clbits > 0) {
-                        std::string bs = PackedToBitstring(packed, num_clbits);
-                        result.counts[bs]++;
-                    }
-                }
+                SampleTerminalMeasurements(engine.GetStateVector(), program, master_seed, effective_shots,
+                                           request.return_samples, &result);
             }
 
             result.metadata["precision"] = "double";
@@ -237,27 +251,8 @@ ExecutionResult SimulationExecutor::Run(const runtime::QSALProgram& program, con
 
             // 终端采样
             if (effective_shots > 0 && has_terminal_measures) {
-                const auto& sv = engine.GetStateVector();
-                auto mapping = CollectTerminalMeasures(program.ops);
-                uint32_t num_clbits = program.num_clbits;
-
-                std::mt19937_64 sampling_rng(master_seed);
-                std::uniform_real_distribution<double> dist01(0.0, 1.0);
-
-                for (uint64_t shot = 0; shot < effective_shots; ++shot) {
-                    double r = dist01(sampling_rng);
-                    uint64_t basis = table.sampling(sv.data(), sv.dim(), r);
-                    uint64_t packed = BasisToPackedSample(basis, mapping);
-
-                    if (request.return_samples) {
-                        result.packed_samples.push_back(packed);
-                    }
-
-                    if (num_clbits > 0) {
-                        std::string bs = PackedToBitstring(packed, num_clbits);
-                        result.counts[bs]++;
-                    }
-                }
+                SampleTerminalMeasurements(engine.GetStateVector(), program, master_seed, effective_shots,
+                                           request.return_samples, &result);
             }
 
             result.metadata["precision"] = "single";

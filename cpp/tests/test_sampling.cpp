@@ -1,11 +1,13 @@
 #include <cmath>
 
 #include <complex>
+#include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "quspect_native/kernels/dispatch_table.hpp"
+#include "quspect_native/kernels/sampling.hpp"
 
 using namespace quspect::native::kernels;
 
@@ -63,4 +65,50 @@ TEST(SamplingTest, ProbabilityZeroPlus) {
 
     double p0 = table.prob0(state.data(), 2, 0);
     EXPECT_NEAR(p0, 0.5, 1e-10);
+}
+
+TEST(SamplingTest, CumulativeSamplingMatchesTheSingleShotKernel) {
+    // The executor builds the cumulative distribution once and searches it for
+    // every shot; each sample must be the one table.sampling() returns for the
+    // same random number, zero-probability states and the interval ends included.
+    const auto& table = GetDispatchF64();
+    std::mt19937_64 rng(2026);
+    std::uniform_real_distribution<double> dist01(0.0, 1.0);
+    std::vector<std::complex<double>> state(64);
+    double norm = 0.0;
+    for (size_t i = 0; i < state.size(); ++i) {
+        if (i % 5 == 0) {
+            continue;  // zero amplitude
+        }
+        state[i] = std::complex<double>(dist01(rng) - 0.5, dist01(rng) - 0.5);
+        norm += std::norm(state[i]);
+    }
+    for (auto& amplitude : state) {
+        amplitude /= std::sqrt(norm);
+    }
+
+    const std::vector<double> cumulative = cumulative_probabilities(state.data(), state.size());
+    ASSERT_EQ(cumulative.size(), state.size());
+    EXPECT_NEAR(cumulative.back(), 1.0, 1e-12);
+
+    std::vector<double> draws = {0.0, std::nextafter(1.0, 0.0), 0.5};
+    for (int i = 0; i < 2000; ++i) {
+        draws.push_back(dist01(rng));
+    }
+    for (double r : draws) {
+        EXPECT_EQ(sample_from_cumulative(cumulative, r), table.sampling(state.data(), state.size(), r)) << r;
+    }
+}
+
+TEST(SamplingTest, CumulativeSamplingSinglePrecision) {
+    const auto& table = GetDispatchF32();
+    std::vector<std::complex<float>> state(8);
+    for (size_t i = 0; i < state.size(); ++i) {
+        state[i] = std::complex<float>(static_cast<float>(i + 1) / 20.0f, 0.1f);
+    }
+    const std::vector<double> cumulative = cumulative_probabilities(state.data(), state.size());
+    for (int i = 0; i < 100; ++i) {
+        const double r = (static_cast<double>(i) + 0.5) / 100.0;
+        EXPECT_EQ(sample_from_cumulative(cumulative, r), table.sampling(state.data(), state.size(), r)) << r;
+    }
 }

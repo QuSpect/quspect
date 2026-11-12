@@ -6,6 +6,38 @@
 #include <vector>
 
 #include "quspect_native/common/parallel.hpp"
+#include "quspect_native/kernels/sampling.hpp"
+
+namespace quspect::native::kernels {
+
+/// 累积概率前缀和（按下标顺序、双精度累加；顺序固定，采样结果与线程数无关）
+template <typename FP>
+std::vector<double> cumulative_probabilities(const std::complex<FP>* state, uint64_t dim) {
+    std::vector<double> prefix_sum(dim);
+    double accum = 0.0;
+    for (uint64_t i = 0; i < dim; ++i) {
+        accum += static_cast<double>(std::norm(state[i]));
+        prefix_sum[i] = accum;
+    }
+    return prefix_sum;
+}
+
+/// 在前缀和中二分查找随机数对应的 basis index
+uint64_t sample_from_cumulative(const std::vector<double>& cumulative, double random01) {
+    if (cumulative.empty()) {
+        return 0;
+    }
+    const double r = random01 * cumulative.back();  // 总和应该接近 1
+    const auto it = std::lower_bound(cumulative.begin(), cumulative.end(), r);
+    const uint64_t idx = static_cast<uint64_t>(std::distance(cumulative.begin(), it));
+    return std::min<uint64_t>(idx, cumulative.size() - 1);
+}
+
+// 显式实例化
+template std::vector<double> cumulative_probabilities<float>(const std::complex<float>*, uint64_t);
+template std::vector<double> cumulative_probabilities<double>(const std::complex<double>*, uint64_t);
+
+}  // namespace quspect::native::kernels
 
 namespace quspect::native::kernels::scalar {
 
@@ -14,23 +46,12 @@ namespace quspect::native::kernels::scalar {
 /// 算法：
 /// 1. 构建累积概率前缀和
 /// 2. 用随机数在前缀和中二分查找
+///
+/// 每次调用都重新构建前缀和（O(dim)）。对同一个状态多次采样时，应当只构建一次
+/// cumulative_probabilities，再逐次调用 sample_from_cumulative（结果相同）。
 template <typename FP>
 uint64_t sample_from_statevector(const std::complex<FP>* state, uint64_t dim, double random01) {
-    // 构建累积概率前缀和
-    std::vector<double> prefix_sum(dim);
-    double accum = 0.0;
-    for (uint64_t i = 0; i < dim; ++i) {
-        accum += static_cast<double>(std::norm(state[i]));
-        prefix_sum[i] = accum;
-    }
-
-    // 二分查找
-    double r = random01 * accum;  // accum 应该接近 1
-    auto it = std::lower_bound(prefix_sum.begin(), prefix_sum.end(), r);
-    uint64_t idx = static_cast<uint64_t>(std::distance(prefix_sum.begin(), it));
-    if (idx >= dim)
-        idx = dim - 1;
-    return idx;
+    return sample_from_cumulative(cumulative_probabilities(state, dim), random01);
 }
 
 /// 单比特测量坍缩 kernel

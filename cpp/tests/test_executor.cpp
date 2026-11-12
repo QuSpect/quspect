@@ -1,11 +1,13 @@
 #include <cmath>
 #include <complex>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "quspect_native/executor/executor.hpp"
+#include "quspect_native/kernels/dispatch_table.hpp"
 #include "quspect_native/runtime/program.hpp"
 
 using namespace quspect::native;
@@ -154,4 +156,54 @@ TEST(ExecutorTest, NoisyTerminalMeasurementHonorsClassicalBitMapping) {
     }
     ASSERT_EQ(result.counts.size(), 1);
     EXPECT_EQ(result.counts.at("100"), req.shots);
+}
+
+TEST(ExecutorTest, TerminalSamplingKeepsTheSeededSamples) {
+    // Terminal measurements are sampled from one cumulative distribution built
+    // after the single evolution.  The samples must stay those of the earlier
+    // per-shot kernel calls: one uniform number of mt19937_64(seed) per shot.
+    runtime::QSALProgram program;
+    program.num_qubits = 3;
+    program.num_clbits = 3;
+    for (uint32_t qubit = 0; qubit < 3; ++qubit) {
+        runtime::GateOperation rotation;
+        rotation.opcode = runtime::OpCode::kNamedGate;
+        rotation.name = "ry";
+        rotation.qubits = {qubit};
+        rotation.params_f64 = {0.4 + 0.7 * qubit};
+        program.ops.push_back(rotation);
+    }
+    runtime::MeasureOperation measure;
+    measure.qubits = {0, 1, 2};
+    measure.clbits = {2, 0, 1};
+    program.ops.emplace_back(std::move(measure));
+
+    for (const auto precision : {executor::PrecisionKind::kFloat64, executor::PrecisionKind::kFloat32}) {
+        executor::SimulationExecutor sim({precision, 77});
+        executor::ExecutionRequest req;
+        req.shots = 3000;
+        req.return_samples = true;
+        req.return_statevector = true;
+        const auto result = sim.Run(program, req);
+        ASSERT_EQ(result.packed_samples.size(), req.shots);
+        EXPECT_EQ(result.metadata.at("measurement_mode"), "terminal");
+
+        std::mt19937_64 rng(77);
+        std::uniform_real_distribution<double> dist01(0.0, 1.0);
+        uint64_t total = 0;
+        for (uint64_t shot = 0; shot < req.shots; ++shot) {
+            const double r = dist01(rng);
+            const uint64_t basis = precision == executor::PrecisionKind::kFloat64
+                                       ? kernels::GetDispatchF64().sampling(result.statevector_f64.data(), 8, r)
+                                       : kernels::GetDispatchF32().sampling(result.statevector_f32.data(), 8, r);
+            const uint64_t packed = ((basis & 1ULL) << 2) | (((basis >> 1) & 1ULL) << 0) | (((basis >> 2) & 1ULL) << 1);
+            ASSERT_EQ(result.packed_samples[shot], packed) << shot;
+        }
+        for (const auto& [bitstring, count] : result.counts) {
+            EXPECT_EQ(bitstring.size(), 3u);
+            total += count;
+        }
+        EXPECT_EQ(total, req.shots);
+        EXPECT_EQ(result.counts.size(), 8u);
+    }
 }
