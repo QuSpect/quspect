@@ -732,7 +732,7 @@ def test_rejects_unmeasured_and_duplicate_clbits(backend) -> None:
         backend.submit(unmeasured)
     duplicate = QuantumCircuit()
     duplicate.h(0)
-    duplicate.measure([0, 1], [0, 0])
+    duplicate.measure([0], [0]).measure([1], [0])
     with pytest.raises(TranslationError, match="more than"):
         backend.submit(duplicate)
 
