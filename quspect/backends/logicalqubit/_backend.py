@@ -617,10 +617,24 @@ class LogicalQubitBackend(CloudBackend):
 
     @property
     def native_gate_set(self) -> set[str]:
+        """QuSpect gate names of the chip's declared native gates.
+
+        A chip may declare its gates in lqcloud's own names; those with a
+        QuSpect gate that the translator sends as exactly that native gate
+        are renamed (``xhalf`` is ``sx``, ``mxhalf`` is ``sxdg``, ``su2`` is
+        ``u3``; see ``LQCLOUD_NATIVE_GATE_NAMES`` in the translator).  Other
+        names are kept as declared; compilation only uses the ones QuSpect
+        knows.  The chip's own spelling stays in ``config``.
+        """
+        from quspect.backends.logicalqubit._translator import (
+            LQCLOUD_NATIVE_GATE_NAMES,
+        )
+
         cfg = self._get_config()
         raw = cfg.get("native_gate_set", cfg.get("native_gates", []))
         if isinstance(raw, (list, tuple, set)):
-            return {str(gate).lower() for gate in raw}
+            names = (str(gate).lower() for gate in raw)
+            return {LQCLOUD_NATIVE_GATE_NAMES.get(name, name) for name in names}
         return set()
 
     @property

@@ -306,6 +306,12 @@ def test_translator_gate_name_mapping_and_params() -> None:
     ]
 
 
+def test_translator_sends_sx_and_sxdg_as_native_gates() -> None:
+    """√X and its inverse are one lqcloud gate each, not ``H · S · H``."""
+    circ = quspect.QuantumCircuit().sx(1).sxdg(0)
+    assert _translate(circ).ops == [("sx", (1,)), ("sxdg", (0,))]
+
+
 @pytest.mark.qiskit_ref
 @pytest.mark.parametrize("seed", range(6))
 def test_translator_random_circuits_match_qiskit(seed: int) -> None:
@@ -1066,6 +1072,26 @@ def test_backend_native_gate_decomposition() -> None:
     result = be.run(circ, shots=SHOTS)
     names = {op for op, _ in sdk.calls[0][0].ops}
     assert "ccx" not in names and "cx" not in names
+    assert_counts_match(result.counts, qiskit_probabilities(circ), SHOTS)
+
+
+def test_backend_native_gates_in_lqcloud_names() -> None:
+    """A chip declaring lqcloud's own native names compiles to those gates."""
+    sdk = FakeSDKBackend(
+        config={
+            "qubits": 3,
+            "native_gates": ["x", "y", "z", "xhalf", "yhalf", "rz", "cz", "su2"],
+            "topology": {"coupling_map": [[0, 1], [1, 2]]},
+        }
+    )
+    be = LogicalQubitBackend(sdk)
+    assert be.native_gate_set == {"x", "y", "z", "sx", "yhalf", "rz", "cz", "u3"}
+    circ = quspect.QuantumCircuit().h(0).cx(0, 1).sx(2).cx(1, 2).measure_all()
+    result = be.run(circ, shots=SHOTS)
+    names = {op for op, _ in sdk.calls[0][0].ops}
+    # ``sx`` is lqcloud's xhalf and ``u`` is one su2; SWAPs come from routing.
+    assert names <= {"x", "y", "z", "sx", "rz", "cz", "u", "swap", "barrier", "measure"}
+    assert "h" not in names and "s" not in names
     assert_counts_match(result.counts, qiskit_probabilities(circ), SHOTS)
 
 
