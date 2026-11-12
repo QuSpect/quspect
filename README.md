@@ -626,7 +626,18 @@ print(result.counts)
 
 ### Compilation and Physical Layout
 
-By default `backend.run()` attempts to compile a bound circuit for the target:
+By default `backend.run()` compiles a bound circuit for the target with
+`quspect.transpiler.transpile()` at its default optimization level and a fixed
+seed, so a hardware run gets the compiler you call in your own code: gates
+lowered to the chip's native set, layout and routing on the coupling graph,
+and optimization after routing. Measurements at the end of the circuit stay at
+the end; each classical bit is read from the physical qubit that holds its
+logical qubit after routing.
+
+Circuits `transpile()` does not take keep the pass pipeline below: mid-circuit
+measurements, barriers between gates (a barrier stays an optimization fence),
+devices whose reported gates do not form a basis, and circuits with more than
+200 two-qubit gates (compile time).
 
 1. **Decompose** — non-native gates are recursively decomposed to the chip's native gate set (e.g. `CX → H + CZ + H`, `RX → H + RZ + H`)
 2. **Optimize** — topology-independent cancellation, commutation, rotation

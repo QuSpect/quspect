@@ -478,10 +478,12 @@ class LogicalQubitBackend(CloudBackend):
         initial_layout: Sequence[int] | None = None,
         physical_qubits: Sequence[int] | None = None,
     ) -> tuple[QuantumCircuit, list[int] | None]:
-        """Decompose, optimize, then deterministically route a bound circuit.
+        """Compile a bound circuit for the device, deterministically.
 
         ``physical_qubits`` restricts routing to an induced device subgraph.
         ``initial_layout`` fixes the starting logical-to-physical mapping.
+        Each compilation is one
+        :func:`~quspect.backends._compile.compile_for_device` call.
 
         With neither, the placement is automatic.  Routing on the whole chip
         knows its topology only and tends to settle on the lowest indices,
