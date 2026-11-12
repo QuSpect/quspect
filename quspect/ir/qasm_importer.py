@@ -947,6 +947,8 @@ class QASM2Importer:
                 mis-applied gate, or uses an unsupported construct
                 (``if``, ``reset``, opaque gates).  The message includes the
                 line and column of the problem.
+            TypeError: If ``source`` is not a ``str`` (for example ``None``
+                or ``bytes``).
 
         Example:
             >>> circ = QASM2Importer().imports(
@@ -955,6 +957,12 @@ class QASM2Importer:
             >>> circ[0].gate.params
             (1.5707963267948966,)
         """
+        if not isinstance(source, str):
+            raise TypeError(
+                "OpenQASM 2.0 source must be a str, got "
+                f"{type(source).__name__}. Read a file with "
+                "Path(...).read_text() and decode bytes first."
+            )
         native = native_ir()
         if native is not None:
             # C++ fast path: same semantics; inputs that the reference parser
@@ -982,6 +990,7 @@ def qasm2_loads(source: str) -> QuantumCircuit:
         QASM2ParseError: If the source is malformed or uses an unknown or
             unsupported gate or construct.  The message includes the line
             and column of the problem.
+        TypeError: If ``source`` is not a ``str``.
 
     Example:
         >>> qasm = '''

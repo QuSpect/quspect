@@ -247,16 +247,13 @@ def test_empty_circuit_raises() -> None:
         QASM2Exporter().export(quspect.QuantumCircuit())
 
 
-def test_noise_channel_is_emitted_as_comment() -> None:
-    """Noise channels have no QASM form and are emitted as a comment line."""
+@pytest.mark.parametrize("mode", list(QASM2ExportMode))
+def test_noise_channel_is_refused(mode: QASM2ExportMode) -> None:
+    """Noise channels have no QASM form: the export is refused, not idealised."""
     circ = quspect.QuantumCircuit()
     circ.h(0).depolarize(0.1, 0).x(0)
-    lines = QASM2Exporter().export(circ).splitlines()
-    assert lines[-3:] == [
-        "h q[0];",
-        "// unknown instruction type: InstructionType.CHANNEL",
-        "x q[0];",
-    ]
+    with pytest.raises(UnsupportedGateError, match="noise channel"):
+        QASM2Exporter(QASM2ExportConfig(mode=mode)).export(circ)
 
 
 @pytest.mark.qiskit_ref

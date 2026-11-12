@@ -162,6 +162,32 @@ class QASM2ExportConfig:
     barrier_as_comment: bool = False
 
 
+def _refuse_noise_channels(circuit: QuantumCircuit) -> None:
+    """Refuse a circuit with noise channels.
+
+    OpenQASM 2.0 describes unitary gates, measurements and barriers only.
+    Leaving a channel out would hand the reader the ideal circuit under the
+    name of the noisy one.
+
+    Raises:
+        UnsupportedGateError: Naming the first noise channel found.
+    """
+    for index, instr in enumerate(circuit.instructions):
+        if instr.is_channel:
+            name = instr.channel.name if instr.channel is not None else "channel"
+            raise UnsupportedGateError(
+                name,
+                "OpenQASM 2.0",
+                suggestion=(
+                    f"Instruction {index} is a noise channel ({name!r} on "
+                    f"qubits {instr.qubits}), which OpenQASM 2.0 cannot "
+                    "express. Export the circuit as QSAL (quspect.ir.dumps) "
+                    "to keep its noise, or export the circuit without its "
+                    "noise channels."
+                ),
+            )
+
+
 # =============================================================================
 # Exporter
 # =============================================================================
@@ -182,6 +208,11 @@ class QASM2Exporter:
     Gates not recognized in the QASM registry cause an
     :exc:`UnsupportedGateError` in STRICT mode.  EXTENDED and DECOMPOSE
     modes provide alternate handling (Phase 2).
+
+    Noise channels have no OpenQASM 2.0 form.  A circuit that contains one
+    is refused in every mode (:exc:`UnsupportedGateError`) rather than
+    written as its noiseless circuit; QSAL (:func:`quspect.ir.dumps`) keeps
+    channels.
 
     Example:
         >>> from quspect.ir import QASM2Exporter
@@ -228,7 +259,8 @@ class QASM2Exporter:
             UnsupportedGateError: If the circuit contains gates not
                 supported by OpenQASM 2.0 and (in DECOMPOSE / EXTENDED
                 mode) not reducible to supported gates through the
-                registered decomposition rules.
+                registered decomposition rules, or if it contains a noise
+                channel (in any mode).
             ValueError: If a gate angle is not finite.
 
         Example:
@@ -239,6 +271,7 @@ class QASM2Exporter:
         """
         if len(circuit) == 0:
             raise ValueError("Cannot export an empty circuit to OpenQASM 2.0.")
+        _refuse_noise_channels(circuit)
 
         # Pre-process circuit for DECOMPOSE / EXTENDED modes
         processed = circuit
@@ -351,8 +384,16 @@ class QASM2Exporter:
             elif instr.type == InstructionType.BARRIER:
                 line = self._emit_barrier_instruction(instr)
             else:
-                # Unknown instruction type — skip with a comment
-                line = f"// unknown instruction type: {instr.type}"
+                # export() refuses noise channels before it gets here; never
+                # drop an instruction this writer does not know.
+                raise UnsupportedGateError(
+                    instr.type.name.lower(),
+                    "OpenQASM 2.0",
+                    suggestion=(
+                        f"Instruction type {instr.type.name} cannot be "
+                        "written as OpenQASM 2.0."
+                    ),
+                )
             lines.append(f"{indent}{line}")
 
     # ------------------------------------------------------------------
