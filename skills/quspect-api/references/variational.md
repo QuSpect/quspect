@@ -147,7 +147,7 @@ def max_cut_operator(edges):
     return QubitOperator(terms)
 ```
 
-Construct a depth-`p` QAOA ansatz using supported differentiable rotations:
+Construct a depth-`p` QAOA ansatz:
 
 ```python
 def qaoa_ansatz(num_qubits, edges, depth):
@@ -171,22 +171,23 @@ Compile the cut expectation and maximize it with BFGS:
 
 ```python
 edges = ((0, 1), (1, 2), (2, 3), (3, 0))
-circuit = qaoa_ansatz(4, edges, depth=2)
-objective = ObservableObjective(circuit, {"cut": max_cut_operator(edges)})
-plan = AdjointEngine().compile(objective)
-x0 = np.asarray([
+qaoa_circuit = qaoa_ansatz(4, edges, depth=2)
+qaoa_objective = ObservableObjective(qaoa_circuit, {"cut": max_cut_operator(edges)})
+qaoa_plan = AdjointEngine().compile(qaoa_objective)
+qaoa_x0 = np.asarray([
     0.4 if parameter.name.startswith("gamma_") else 0.2
-    for parameter in plan.parameter_order
+    for parameter in qaoa_plan.parameter_order
 ])
 
 def loss_and_gradient(x):
-    evaluation = plan.evaluate(x)
+    evaluation = qaoa_plan.evaluate(x)
     return -evaluation.value("cut"), -evaluation.derivative("cut")
 
-optimum = minimize(loss_and_gradient, x0, jac=True, method="BFGS")
+qaoa_optimum = minimize(loss_and_gradient, qaoa_x0, jac=True, method="BFGS")
+assert -qaoa_optimum.fun > 3.0  # the best cut of this ring is 4
 ```
 
-After optimization, bind `optimum.x`, obtain a state vector or add measurements,
+After optimization, bind `qaoa_optimum.x`, obtain a state vector or add measurements,
 and decode bit `q` from integer state index with `(state >> q) & 1`. Validate the
 reported cut against a classical brute-force solution for small example graphs.
 Avoid an all-zero QAOA start because it can be a symmetry-induced stationary
@@ -196,8 +197,9 @@ point; use a deterministic nonzero start or several random starts.
 
 1. Build or import a `FermionOperator`.
 2. Transform it with `jordan_wigner` or `bravyi_kitaev`.
-3. Construct a hardware-efficient or chemistry-informed ansatz from symbolic
-   `RX`, `RY`, and `RZ` rotations plus fixed entangling gates.
+3. Construct a hardware-efficient or chemistry-informed ansatz. Any
+   parameterized gate may carry a symbolic angle (see
+   [Limits and cost model](#limits-and-cost-model)).
 4. Wrap the ansatz and qubit Hamiltonian in `ObservableObjective`.
 5. Compile once with `AdjointEngine` for development or `SamplingEngine` for
    finite-shot/QPU execution.
@@ -219,6 +221,9 @@ qubit_hamiltonian = jordan_wigner(fermionic_hamiltonian)
 `SamplingEngine` creates basis-change/measurement circuits, groups
 qubit-wise-commuting terms, and computes occurrence-level parameter-shift
 gradients followed by the affine chain rule.
+
+This needs the `lqcloud` package, `LQCLOUD_API_KEY`, and a device name in
+`LQCLOUD_BACKEND`:
 
 ```python
 import os
@@ -319,16 +324,20 @@ instead of collapsing dimensions manually.
 
 ## Limits and cost model
 
-- Symbolic differentiable gates are currently `RX`, `RY`, and `RZ` after
-  decomposition. Their angles may be affine expressions and share parameters.
+- Every parameterized gate of the circuit API may carry symbolic angles, with
+  both engines: `rx`, `ry`, `rz`, `p`, `u1`, `u2`, `u3` and the controlled
+  `crx`, `cry`, `crz`, `cp`, `cu3`. They are lowered to rotations before
+  differentiation. Angles may be affine expressions and share parameters.
 - Adjoint objectives require noiseless unitary state preparation, no
   measurements, and fixed real Hermitian Pauli observables.
 - Sampled objectives also reject explicit noise channels in state preparation;
   physical QPU noise still affects results naturally.
-- Sampled gradients reject symbolic controlled rotations and symbolic
-  observable coefficients.
-- Sampling experiments per point are approximately
-  `measurement_groups * (1 + 2 * symbolic_rotation_occurrences)`.
+- Both engines reject symbolic observable coefficients; bind the operator
+  first.
+- Sampling experiments per point are
+  `measurement_groups * (1 + 2 * symbolic_rotation_occurrences)`, counted after
+  lowering: a symbolic `crx`, `cry` or `crz` is two occurrences, `cp` three, and
+  `cu3` up to six. Read `plan.num_experiments_per_point` for the exact number.
 - QWC grouping reduces circuits but is not general commuting grouping.
 - Exact state-vector memory grows exponentially. Adjoint working memory is
   roughly one primal state plus one costate per observable.

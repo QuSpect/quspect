@@ -2,7 +2,23 @@
 
 Use this reference for calibrated physical-qubit selection, initial layouts,
 SABRE routing, compiled-circuit correctness, mapping investigations, and
-LogicalQubit hardware submission.
+LogicalQubit hardware submission. To compile for a gate set and coupling graph
+without a backend, use `transpile()`; see [compilation.md](compilation.md).
+
+The examples need the `lqcloud` package, `LQCLOUD_API_KEY`, and a device name
+in `LQCLOUD_BACKEND`. They assume a device on which qubits 7 to 11 form a line:
+
+```python
+import os
+
+from quspect import QuantumCircuit
+from quspect.backends.logicalqubit import LogicalQubitProvider
+
+provider = LogicalQubitProvider()
+backend = provider.get_backend(os.environ["LQCLOUD_BACKEND"])
+
+circuit = QuantumCircuit(name="ghz").h(0).cx(0, 1).cx(1, 2).cx(2, 3).measure_all()
+```
 
 ## Public submission modes
 
@@ -43,24 +59,34 @@ unique, in-range integer sequence whose length equals the input circuit's
 logical qubit count.
 
 Use direct submission only for a circuit already compiled for the intended
-topology:
+topology, for example by `transpile()` on the chosen qubits. Its wire-space
+view is what the provider takes: wire `w` of `wire_circuit` sits on
+`wire_layout[w]` of the compiled target.
 
 ```python
+from quspect.transpiler import CompilationTarget, transpile
+
+device = CompilationTarget.from_backend(backend)
+pool, dense_to_physical = device.induced_subgraph([7, 8, 9, 10])
+compiled = transpile(circuit, pool, seed=0)
+wires = compiled.wire_circuit.num_qubits
+
 job = backend.submit(
-    compiled_circuit,
+    compiled.wire_circuit,
     shots=4096,
     transpile=False,
-    initial_layout=[7, 8, 9, 10],
+    initial_layout=[dense_to_physical[q] for q in compiled.wire_layout[:wires]],
 )
 ```
 
-Here `initial_layout` is passed directly to the provider. Do not combine
-`physical_qubits` with `transpile=False`; it raises `ValueError`.
+Here `initial_layout` is passed directly to the provider, one entry per circuit
+wire. Do not combine `physical_qubits` with `transpile=False`; it raises
+`ValueError`.
 
 ## Lower-level transpiler API
 
 ```python
-from quspect.transpiler import CompilationTarget, SABRE
+from quspect.transpiler import SABRE
 
 target = CompilationTarget.from_backend(backend)
 subtarget, dense_to_physical = target.induced_subgraph([7, 8, 9, 10, 11])
