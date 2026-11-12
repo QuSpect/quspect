@@ -217,6 +217,10 @@ def state_error(
     states and the basis state ``|0101…⟩`` (dense simulation, at most
     :data:`STATE_ERROR_MAX_QUBITS` qubits).
 
+    The distance is the norm of the phase-aligned difference of the two
+    states, so errors far below ``1e-8`` are resolved (down to the accuracy
+    of the reference evolution, about ``1e-13``).
+
     Args:
         num_qubits: Number of qubits.
         terms: Hamiltonian terms.
@@ -240,8 +244,13 @@ def state_error(
         _exact_evolve(num_qubits, terms, time, psi) if reference is None else reference
     )
     out = _apply_rotations(num_qubits, rotations, psi)
-    ov = np.abs(np.sum(np.conj(ref) * out, axis=0))
-    return float(np.sqrt(np.maximum(0.0, 2.0 - 2.0 * np.minimum(ov, 1.0))).max())
+    # min_φ ‖out − e^{iφ} ref‖ is attained at φ = arg⟨ref|out⟩.  Take the norm
+    # of that difference: the closed form sqrt(2 − 2|⟨ref|out⟩|) loses half
+    # of the digits (nothing below 2e-8) and assumes ‖out‖ = 1 exactly.
+    ov = np.sum(np.conj(ref) * out, axis=0)
+    mag = np.abs(ov)
+    phase = np.divide(ov, mag, out=np.ones_like(ov), where=mag > 0.0)
+    return float(np.linalg.norm(out - ref * phase, axis=0).max())
 
 
 def _bits(num_qubits: int, terms: Sequence[PauliTerm]) -> tuple[np.ndarray, np.ndarray]:

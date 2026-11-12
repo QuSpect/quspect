@@ -217,6 +217,29 @@ def test_order_terms_support_groups_bonds() -> None:
         order_terms(terms, "random")
 
 
+def test_state_error_resolves_errors_far_below_1e_8() -> None:
+    """The distance is computed directly, not as sqrt(2 - 2|<a|b>|).
+
+    That expression cannot resolve anything below about 2e-8 in double
+    precision and turns a norm drift of 1e-12 after many rotations into an
+    "error" of 1e-6.
+    """
+    exact = [("ZZ", (0, 1), 1.0), ("Z", (0,), 0.5)]  # commuting: no Trotter error
+    assert state_error(2, exact, 1.0, product_formula(exact, 1.0, 1, 1)) < 1e-12
+
+    terms = [("XX", (0, 1), 0.7), ("Z", (0,), 0.5), ("Y", (1,), 0.3)]
+    errors = {
+        steps: state_error(2, terms, 1.0, product_formula(terms, 1.0, steps, 2))
+        for steps in (10, 100, 1000, 10000)
+    }
+    assert errors[10] == pytest.approx(9.7366e-4, rel=1e-4)
+    # second order: 10x the steps divides the error by 100, down to 1e-9
+    for steps in (10, 100, 1000):
+        ratio = errors[steps] / errors[10 * steps]
+        assert ratio == pytest.approx(100.0, rel=0.02), (steps, errors)
+    assert errors[10000] < 2e-9
+
+
 def test_state_error_and_bound_converge() -> None:
     terms = heisenberg(4)
     errs = [
