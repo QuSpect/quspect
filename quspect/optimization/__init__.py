@@ -42,6 +42,7 @@ from quspect.optimization.native_solver import (
     NativeIsingResult,
     NativeIsingSolver,
     NativeIsingSolverError,
+    default_beta_range,
 )
 from quspect.optimization.program import (
     LinearEqualityConstraint,
@@ -84,4 +85,5 @@ __all__ = [
     "NativeIsingResult",
     "NativeIsingSolver",
     "NativeIsingSolverError",
+    "default_beta_range",
 ]
