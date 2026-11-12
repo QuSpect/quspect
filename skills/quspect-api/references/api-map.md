@@ -203,6 +203,7 @@ Execution behavior:
 - No-measurement circuit evolves once and reports `num_shots == 0`; use `save_statevector=True` or `.statevector`.
 - Terminal measurements evolve once, then sample.
 - Mid-circuit measurements re-execute per shot with collapse.
+- `.statevector` needs a unitary circuit (terminal measurements are ignored): mid-circuit measurements and noise channels raise `ValueError`. For a noisy circuit use `DensityMatrixSimulator().density_matrix(circuit)`, or `.run(circuit, save_statevector=True)` for the state of one sampled trajectory.
 - Native executor is used via QSAL; unbound symbolic parameters raise `ValueError`.
 
 `SimulationResult`:

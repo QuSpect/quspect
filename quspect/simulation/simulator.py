@@ -185,6 +185,10 @@ class Simulator(Backend):
         (the pre-measurement state is returned). An empty (0-qubit)
         circuit returns the 0-qubit state ``[1+0j]``.
 
+        The circuit must be unitary up to its terminal measurements: the
+        result is the one state the circuit prepares, never a random
+        sample, and does not depend on the simulator's seed.
+
         Args:
             circuit: The circuit to execute. All parameters must be
                 bound to concrete float values.
@@ -200,6 +204,13 @@ class Simulator(Backend):
                 (a gate or noise channel after a measurement), because the
                 final state then depends on random measurement outcomes.
                 Use :meth:`run` with ``save_statevector=True`` instead.
+            ValueError: If the circuit contains a noise channel: its final
+                state is a mixed state, not a state vector. Use
+                :meth:`DensityMatrixSimulator.density_matrix
+                <quspect.simulation.DensityMatrixSimulator.density_matrix>`
+                for that state, or :meth:`run` with
+                ``save_statevector=True`` for the state of one sampled
+                trajectory.
 
         Example:
             >>> from quspect import QuantumCircuit
@@ -221,6 +232,14 @@ class Simulator(Backend):
                 "final state depends on random measurement outcomes. Use "
                 "run(..., save_statevector=True) to obtain one sampled "
                 "post-measurement state."
+            )
+        if any(instr.is_channel for instr in circuit.instructions):
+            raise ValueError(
+                "statevector() does not support noise channels: a noisy "
+                "circuit ends in a mixed state, not a state vector. Use "
+                "DensityMatrixSimulator().density_matrix(circuit) for that "
+                "state, or run(..., save_statevector=True) to obtain the "
+                "state of one sampled trajectory."
             )
         qsal_json = dumps(circuit)
         cpp_result = self._native.run(qsal_json, shots=0, return_statevector=True)
