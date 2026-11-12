@@ -1,11 +1,24 @@
 name: CI
 
-# 只在指向 main 的 PR 上运行；合入 main 后不再重复跑（不配 push 触发）。
-# workflow_dispatch 用于手动触发。
+# 在指向 main 的 PR 上运行；合入 main 后不再重复跑（不配 push 触发）。
+# PR 上 pytest 跳过带 slow 标记的测试（-m "not slow"）：它们是不变性检查（哈希种子、
+# 线程数、平台数学库、原生 / Python 路由后端一致）的全量版，每一项都有一个不带标记的
+# 精简版留在 PR 上；scalar 模块的金标准复查也只跑第 1、2 级。
+# 全量（含 slow、scalar 模块复查全部级别）在两处运行：
+# - schedule：每晚对 main 跑一次（定时触发只作用于默认分支）；
+# - workflow_dispatch：手动触发，slow 输入默认勾选，取消勾选则与 PR 相同。
 on:
   pull_request:
     branches: [main]
+  schedule:
+    # 每天 19:17 UTC（北京时间 03:17）；避开整点，整点的定时任务排队最久。
+    - cron: "17 19 * * *"
   workflow_dispatch:
+    inputs:
+      slow:
+        description: "Run the full suite, including tests marked slow and the level-3 scalar golden re-check (as the nightly run does)"
+        type: boolean
+        default: true
 
 # 同一个 PR（或同一分支的手动触发）有新运行时，取消旧的运行。
 concurrency:
@@ -18,6 +31,8 @@ permissions:
 env:
   PYTHON_VERSION: "3.13"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # "true"：全量运行（每晚定时，或手动触发且勾选 slow）；"false"：PR 的精简运行。
+  FULL_SUITE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.slow == true) }}
 
 jobs:
   lint:
@@ -58,8 +73,8 @@ jobs:
   test:
     name: test (${{ matrix.kernel }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # 第 21 轮（#14–#16）之后全量测试变慢：AVX2 组合要跑两遍金标准（AVX2 与 scalar 模块），
-    # 实测 45–60 分钟，60 分钟的上限会在较慢的 runner 上把已通过的任务取消。
+    # 上限按每晚的全量运行留出余量：第 21 轮（#14–#16）之后第 3 级编译变慢，全量测试
+    # 串行时实测 45–60 分钟。PR 上跳过 slow 测试并用 pytest-xdist 并行，远低于此。
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -206,23 +221,41 @@ jobs:
               raise SystemExit(f"kernel_backend() is {kernel_backend()!r}, expected 'scalar'")
           EOF
 
-      # COVERAGE_FILE 单独指定，避免与下一步 generate_report 的覆盖率数据冲突。
+      # COVERAGE_FILE 单独指定，避免与下一步 generate_report 的覆盖率数据冲突
+      # （pytest-xdist 的各 worker 写 .coverage.tests.<后缀>，结束时由主进程合并）。
+      # -n auto：每个物理核一个 worker（dev 依赖里的 pytest-xdist[psutil] 带 psutil；
+      # 没有 psutil 时按逻辑核数）。--dist worksteal：测试逐个分发，空闲的 worker 从
+      # 其他 worker 的队列里取，同一文件里的重测试（test_golden_transpile.py 的第 3 级
+      # 金标准按电路参数化）会摊到不同 worker 上；不要用按文件 / 按模块分组的 loadfile / loadscope。
+      # PR 上跳过 slow 测试；-m "" 不做筛选（全量）。--durations 在日志里列出最慢的测试，
+      # 便于发现新增的重测试（并行时墙钟时间由最慢的几个测试决定）。
       - name: pytest tests
         env:
           COVERAGE_FILE: .coverage.tests
-        run: pytest tests -q
+        run: |
+          if [ "$FULL_SUITE" = "true" ]; then markexpr=""; else markexpr="not slow"; fi
+          pytest tests -q -n auto --dist worksteal -m "$markexpr" --durations=30
 
       # 跨平台金标准（完整 transpile 输出与确定性数值层的摘要）：pytest tests 已经在默认模块上
       # 跑过；AVX2 runner 上再用 scalar 模块跑一遍，两个模块必须给出逐位相同的结果。
+      # PR 上只复查第 1、2 级（QUSPECT_TEST_GOLDEN_LEVELS 限制 test_golden_transpile.py
+      # 编译的级别）且跳过 slow 测试；第 3 级的 scalar 复查由每晚全量与发布时的 x86 wheel
+      # 测试覆盖。
       - name: Golden digests with the scalar module
         if: matrix.kernel == 'avx2'
         env:
           QUSPECT_DISABLE_AVX2: "1"
-        run: >-
-          pytest -q -o addopts="" -p no:cacheprovider
-          tests/transpiler/test_golden_transpile.py
-          tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent
-          tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics
+        run: |
+          if [ "$FULL_SUITE" = "true" ]; then
+            markexpr=""
+          else
+            markexpr="not slow"
+            export QUSPECT_TEST_GOLDEN_LEVELS=1,2
+          fi
+          pytest -q -o addopts="" -p no:cacheprovider -n auto --dist worksteal -m "$markexpr" \
+            tests/transpiler/test_golden_transpile.py \
+            tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent \
+            tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics
 
       # 注意：generate_report.main() 在拿到 junit.xml / coverage.json 后总是返回 0
       # （测试失败只写进报告），只有结果文件缺失时才返回 1。因此这里再检查

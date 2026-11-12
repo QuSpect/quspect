@@ -17,6 +17,18 @@ so the inputs are platform independent as well.
 If the compiler's output is changed on purpose, regenerate the digests with
 ``python tests/transpiler/test_golden_transpile.py`` and check that every
 platform agrees (the CI runs this module on all of them).
+
+Level 3 is by far the most expensive level.  The golden digests are one test
+per (level, circuit), so that ``pytest -n`` spreads them over the workers.
+The invariance checks (compile threads, ``PYTHONHASHSEED``, platform math)
+come in two versions: a quick one that compiles a few level-3 cases
+(``_QUICK_LEVEL3``) and runs on every pull request, and the exhaustive one,
+marked ``slow``, that runs nightly and in release builds.
+
+``QUSPECT_TEST_GOLDEN_LEVELS`` (comma separated, e.g. ``1,2``) restricts this
+module to the given optimization levels; the other levels are skipped.  It is
+set where level 3 is already covered by another job (the wheel tests and the
+scalar-module re-check on pull requests).  Unset, every level runs.
 """
 
 from __future__ import annotations
@@ -28,7 +40,7 @@ import os
 import random
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -202,6 +214,27 @@ BASES = {
 TOPOLOGIES = ("line", "ring", "grid", "full")
 LEVELS = (1, 2, 3)
 
+LEVELS_ENV = "QUSPECT_TEST_GOLDEN_LEVELS"
+
+
+def _enabled_levels() -> tuple[int, ...]:
+    """The levels this run compiles at: all of them unless ``LEVELS_ENV`` is set."""
+    raw = os.environ.get(LEVELS_ENV)
+    if raw is None:
+        return LEVELS
+    try:
+        chosen = {int(part) for part in raw.split(",")}
+    except ValueError:
+        chosen = set()
+    if not chosen or not chosen <= set(LEVELS):
+        raise ValueError(
+            f"{LEVELS_ENV}={raw!r}: expected a comma-separated subset of {LEVELS}"
+        )
+    return tuple(level for level in LEVELS if level in chosen)
+
+
+ENABLED_LEVELS = _enabled_levels()
+
 
 def _edges(kind: str, n: int) -> tuple[int, list[tuple[int, int]]]:
     if kind == "line":
@@ -330,10 +363,55 @@ def _clear_caches() -> None:
         cache.clear()
 
 
-@pytest.mark.parametrize("level", LEVELS)
-def test_transpile_golden_digests(level: int) -> None:
+def _require_level(level: int) -> None:
+    if level not in ENABLED_LEVELS:
+        pytest.skip(f"level {level} is excluded by {LEVELS_ENV}")
+
+
+def test_golden_table_matches_circuits() -> None:
+    """``GOLDEN`` has exactly one digest per (level, circuit)."""
+    assert tuple(GOLDEN) == LEVELS
+    for level in LEVELS:
+        assert set(GOLDEN[level]) == set(CIRCUITS)
+    assert sorted(_GOLDEN_CASES) == sorted((lv, n) for lv in LEVELS for n in CIRCUITS)
+
+
+# 按（级别, 电路）参数化：每个摘要仍覆盖该电路的全部 12 个目标（拓扑 x 门集），
+# 与 GOLDEN 的粒度一致。节点名为 test_transpile_golden_digests[<级别>-<电路>]。
+# 顺序：最慢的排在最前（第 3 级，其中最慢的几个电路在先）。并行运行时墙钟时间的下限是
+# 最慢的单个测试，它越早开始，末尾等它的时间越短；顺序不影响节点名与覆盖范围。
+_SLOWEST_FIRST = ("three_qubit_8", "three_qubit_5", "random_10", "qft_9", "adder_10")
+_GOLDEN_CASES = [
+    (level, name)
+    for level in reversed(LEVELS)
+    for name in (*_SLOWEST_FIRST, *(n for n in CIRCUITS if n not in _SLOWEST_FIRST))
+]
+
+
+@pytest.mark.parametrize(
+    ("level", "name"), _GOLDEN_CASES, ids=[f"{lv}-{n}" for lv, n in _GOLDEN_CASES]
+)
+def test_transpile_golden_digests(level: int, name: str) -> None:
     """Every platform and build produces exactly these compilations."""
-    assert digests(level) == GOLDEN[level]
+    _require_level(level)
+    assert digests(level, (name,))[name] == GOLDEN[level][name]
+
+
+# 不变性检查精简版在第 3 级编译的（电路, 拓扑, 门集）：含随机电路、Toffoli 电路与
+# 三比特块重综合。精简版在第 1、2 级仍覆盖对应全量版的全部电路与全部 12 个目标。
+_QUICK_LEVEL3 = (
+    ("random_6", "line", "cx"),
+    ("random_6", "grid", "cz"),
+    ("adder_6", "line", "cx"),
+    ("adder_6", "grid", "cz"),
+    ("three_qubit_5", "full", "cz"),
+)
+
+
+def _quick_level3_records() -> list[str]:
+    if 3 not in ENABLED_LEVELS:
+        return []
+    return [_record(name, kind, basis, 3) for name, kind, basis in _QUICK_LEVEL3]
 
 
 # 并行路径（SABRE 链、LNS 窗口投机、SU(4) 路由配置、调度、gauge 束搜索
@@ -341,16 +419,36 @@ def test_transpile_golden_digests(level: int) -> None:
 _THREAD_CASES = (("random_6", 3), ("three_qubit_5", 3), ("qaoa_6", 2))
 
 
-@pytest.mark.parametrize("threads", ["1", "4", None])
-def test_compile_threads_do_not_change_output(
-    monkeypatch: pytest.MonkeyPatch, threads: str | None
-) -> None:
+def _set_compile_threads(monkeypatch: pytest.MonkeyPatch, threads: str | None) -> None:
     if threads is None:
         monkeypatch.delenv("QUSPECT_COMPILE_THREADS", raising=False)
     else:
         monkeypatch.setenv("QUSPECT_COMPILE_THREADS", threads)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("threads", ["1", "4", None])
+def test_compile_threads_do_not_change_output(
+    monkeypatch: pytest.MonkeyPatch, threads: str | None
+) -> None:
+    _set_compile_threads(monkeypatch, threads)
     for name, level in _THREAD_CASES:
-        assert digests(level, (name,))[name] == GOLDEN[level][name]
+        if level in ENABLED_LEVELS:
+            assert digests(level, (name,))[name] == GOLDEN[level][name]
+
+
+def test_compile_threads_do_not_change_output_quick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quick version: level 2 against ``GOLDEN``, a few level-3 cases compared."""
+    names = tuple(name for name, _ in _THREAD_CASES)
+    level3 = []
+    for threads in ("1", "4", None):
+        _set_compile_threads(monkeypatch, threads)
+        if 2 in ENABLED_LEVELS:
+            assert digests(2, names) == {n: GOLDEN[2][n] for n in names}
+        level3.append(_quick_level3_records())
+    assert level3[0] == level3[1] == level3[2]
 
 
 def test_large_parallel_compilation_is_thread_independent(
@@ -390,38 +488,74 @@ def test_large_parallel_compilation_is_thread_independent(
 
 
 _HASH_CASES = ("random_6", "adder_6", "three_qubit_5")
+_HASH_SEEDS = ("0", "4242")
 
 
+def _run_with_hash_seed(seed: str, expression: str) -> str:
+    """JSON of ``expression`` (``t`` is this module) under ``PYTHONHASHSEED=seed``."""
+    script = (
+        "import sys, json\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "import test_golden_transpile as t\n"
+        f"print(json.dumps({expression}))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        env=dict(os.environ, PYTHONHASHSEED=seed),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=600,
+    )
+    return proc.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.slow
 def test_hash_seed_does_not_change_output() -> None:
     """Set/dict iteration orders that depend on ``hash()`` never reach the output.
 
     Each child process uses a different ``PYTHONHASHSEED`` (``str`` hashes,
     and with them the iteration order of sets of gate names, change).
     """
-    script = (
-        "import sys, json\n"
-        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
-        "import test_golden_transpile as t\n"
-        f"print(json.dumps({{l: t.digests(l, {_HASH_CASES!r}) for l in (2, 3)}}))\n"
+    levels = tuple(level for level in (2, 3) if level in ENABLED_LEVELS)
+    expression = f"{{l: t.digests(l, {_HASH_CASES!r}) for l in {levels!r}}}"
+    expected = json.dumps(
+        {level: {n: GOLDEN[level][n] for n in _HASH_CASES} for level in levels}
+    )
+    for seed in _HASH_SEEDS:
+        assert _run_with_hash_seed(seed, expression) == expected
+
+
+def test_hash_seed_does_not_change_output_quick() -> None:
+    """Quick version: level 2 against ``GOLDEN``, a few level-3 cases compared.
+
+    The level-3 records of each child process must equal the ones computed in
+    this process (whose hash seed is whatever pytest was started with).
+    """
+    levels = tuple(level for level in (2,) if level in ENABLED_LEVELS)
+    expression = (
+        f"[{{l: t.digests(l, {_HASH_CASES!r}) for l in {levels!r}}}, "
+        "t._quick_level3_records()]"
     )
     expected = json.dumps(
-        {level: {n: GOLDEN[level][n] for n in _HASH_CASES} for level in (2, 3)}
+        [
+            {level: {n: GOLDEN[level][n] for n in _HASH_CASES} for level in levels},
+            _quick_level3_records(),
+        ]
     )
-    for seed in ("0", "4242"):
-        env = dict(os.environ, PYTHONHASHSEED=seed)
-        proc = subprocess.run(
-            [sys.executable, "-c", script],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=600,
-        )
-        assert proc.stdout.strip().splitlines()[-1] == expected
+    for seed in _HASH_SEEDS:
+        assert _run_with_hash_seed(seed, expression) == expected
 
 
-def _platform_math_calls(names: tuple[str, ...] = tuple(CIRCUITS)) -> list[str]:
+def _platform_math_calls(
+    names: tuple[str, ...] = tuple(CIRCUITS),
+    levels: tuple[int, ...] = LEVELS,
+    extra: Callable[[], object] | None = None,
+) -> list[str]:
     """Call sites of platform math (``math``/``cmath``/numpy) while compiling.
+
+    Compiles ``names`` on every target at ``levels`` and then runs ``extra``
+    (further compilations to watch).
 
     Diagnostic for a platform whose digests differ: every such call outside
     module constants is a candidate source of the difference.
@@ -458,14 +592,25 @@ def _platform_math_calls(names: tuple[str, ...] = tuple(CIRCUITS)) -> list[str]:
     for n in ("svd", "eig", "eigh", "eigvals", "eigvalsh", "qr", "det", "inv"):
         wrap(np.linalg, n, "np.linalg." + n)
     try:
-        for level in LEVELS:
+        for level in levels:
             digests(level, names)
+        if extra is not None:
+            extra()
     finally:
         for mod, name, f in reversed(saved):
             setattr(mod, name, f)
     return [f"{v:8d} {k}" for k, v in calls.most_common()]
 
 
+_MATH_CASES = ("random_6", "adder_6", "three_qubit_5")
+
+
+def _unexpected_platform_math(calls: list[str]) -> list[str]:
+    allowed = ("_gauge.py:", "_schedule.py:", "gates/synthesis.py:")
+    return [c for c in calls if not (" np.abs " in c and any(a in c for a in allowed))]
+
+
+@pytest.mark.slow
 def test_compilation_uses_no_platform_math() -> None:
     """No platform math function or LAPACK routine runs while compiling.
 
@@ -474,10 +619,15 @@ def test_compilation_uses_no_platform_math() -> None:
     matrices), where a last-bit difference of ``hypot`` cannot change the
     decision.
     """
-    calls = _platform_math_calls(("random_6", "adder_6", "three_qubit_5"))
-    allowed = ("_gauge.py:", "_schedule.py:", "gates/synthesis.py:")
-    bad = [c for c in calls if not (" np.abs " in c and any(a in c for a in allowed))]
-    assert not bad
+    calls = _platform_math_calls(_MATH_CASES, ENABLED_LEVELS)
+    assert not _unexpected_platform_math(calls)
+
+
+def test_compilation_uses_no_platform_math_quick() -> None:
+    """Quick version: levels 1 and 2 in full, a few level-3 cases."""
+    levels = tuple(level for level in (1, 2) if level in ENABLED_LEVELS)
+    calls = _platform_math_calls(_MATH_CASES, levels, _quick_level3_records)
+    assert not _unexpected_platform_math(calls)
 
 
 if __name__ == "__main__":

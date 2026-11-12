@@ -904,6 +904,8 @@ mypy quspect/
 
 # 运行测试
 pytest
+# PR 上实际运行的方式：并行，跳过带 slow 标记的全量不变性检查
+pytest -n auto --dist worksteal -m "not slow"
 
 # 在仓库根目录构建 C++ 后端并运行 gtest
 cmake -S cpp -B cpp/build -G Ninja && cmake --build cpp/build
