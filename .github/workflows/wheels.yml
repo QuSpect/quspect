@@ -9,9 +9,15 @@ name: Wheels
 # 每个（操作系统, Python 版本）组合都是一个独立的并行作业。
 # Python 版本列表只在一处定义：pyproject.toml 的 [tool.cibuildwheel] build
 # （cp310-* … cp315-*），由 plan 作业读取后生成矩阵。
-# - pull_request 到 main：只构建最旧与最新的 Python（4 个平台 x 2 = 8 个作业）
+# - pull_request 到 main：只构建最旧与最新的 Python（4 个平台 x 2 = 8 个作业），
+#   wheel 测试只跑第 1、2 级的 transpile 金标准（第 3 级由 ci.yml 的 test 作业、每晚全量
+#   与发布构建覆盖）。PR 只改了与 wheel 无关的文件（文档、README、云平台后端子包等，
+#   清单见 tools/wheel_build_needed.py）时不构建 wheel，只跑 plan、sdist 与 wheels-ok。
 # - workflow_dispatch：默认构建全部版本（full 输入默认 true，可手动取消）
 # - workflow_call：release.yml 打 tag 发布时以 full: true 调用，构建全部 wheel
+# full 构建的 wheel 测试是全量的（全部级别；x86_64 上默认模块与 scalar 模块各一遍）。
+# 汇总作业 wheels-ok 在 wheel 被跳过时同样报成功：分支保护里若要把 wheel 设为必需检查，
+# 只列 wheels-ok，不要列 matrix 展开后的作业名（被跳过时它们不会出现）。
 on:
   pull_request:
     branches: [main]
@@ -51,6 +57,10 @@ jobs:
   # 从 pyproject.toml 读取 Python 版本列表，生成 os x python 矩阵。
   # full 为 true（发布 / 手动触发）时取全部版本，否则（PR）只取最旧与最新两个版本。
   # newest 供 no-avx2-check 选择 wheel；wheel-count 供 release.yml 校验发布物数量。
+  # build：是否需要构建 wheel。只有 pull_request 事件、且 PR 改动的每个文件都与 wheel
+  # 无关时为 false；发布（workflow_call）与 workflow_dispatch 恒为 true。
+  # test-environment：非 full 构建时传给 CIBW_TEST_ENVIRONMENT 的值（full 构建为空，
+  # 此时不覆盖 pyproject.toml，wheel 测试保持全量）。
   plan:
     name: plan build matrix
     runs-on: ubuntu-latest
@@ -59,10 +69,17 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       newest: ${{ steps.plan.outputs.newest }}
       wheel-count: ${{ steps.plan.outputs.wheel-count }}
+      test-environment: ${{ steps.plan.outputs.test-environment }}
+      build: ${{ steps.scope.outputs.build }}
     steps:
+      # fetch-depth: 2：pull_request 检出的是合并提交（refs/pull/N/merge），其第一父提交
+      # 是 base 分支的最新提交，HEAD^1..HEAD 的差异就是本 PR 相对 base 的全部改动。
       - uses: actions/checkout@v4
         with:
-          sparse-checkout: pyproject.toml
+          fetch-depth: 2
+          sparse-checkout: |
+            pyproject.toml
+            tools/wheel_build_needed.py
           sparse-checkout-cone-mode: false
 
       - uses: actions/setup-python@v5
@@ -102,16 +119,56 @@ jobs:
           pythons = tags if full else sorted({tags[0], tags[-1]}, key=tags.index)
           oses = json.loads(os.environ["OSES"])
           matrix = {"os": oses, "python": pythons}
-          print(f"full={full} matrix={matrix}")
+          # 非 full 构建：wheel 测试只跑第 1、2 级的 transpile 金标准。CIBW_TEST_ENVIRONMENT
+          # 会整体覆盖 pyproject.toml 的 test-environment，因此从该项生成并追加限制变量。
+          test_environment = ""
+          if not full:
+              variables = dict(config["tool"]["cibuildwheel"]["test-environment"])
+              variables["QUSPECT_TEST_GOLDEN_LEVELS"] = "1,2"
+              for key, value in variables.items():
+                  if not re.fullmatch(r"[A-Za-z0-9_.,:/=+-]*", value):
+                      sys.exit(f"unsupported character in test-environment {key}={value!r}")
+              test_environment = " ".join(f"{k}={v}" for k, v in variables.items())
+          print(f"full={full} matrix={matrix} test-environment={test_environment!r}")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"matrix={json.dumps(matrix)}\n")
+              out.write(f"test-environment={test_environment}\n")
               out.write(f"newest={tags[-1]}\n")
               out.write(f"wheel-count={len(oses) * len(pythons)}\n")
           EOF
 
+      # PR 只改了与 wheel 无关的文件时跳过 wheel 构建（判断规则与清单见
+      # tools/wheel_build_needed.py：只有全部改动都在“无关”清单内才跳过）。
+      # 任何一步拿不到结果（不是合并提交、git diff 失败、脚本输出异常）都照常构建。
+      - name: Decide whether the wheels are needed
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          build=true
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if ! git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+              echo "::warning::HEAD is not a merge commit; building the wheels"
+            elif decision=$(git diff -z --name-only --no-renames 'HEAD^1' HEAD | python tools/wheel_build_needed.py); then
+              case "$decision" in
+                true|false) build=$decision ;;
+                *) echo "::warning::unexpected output '$decision'; building the wheels" ;;
+              esac
+            else
+              echo "::warning::could not determine the changed files; building the wheels"
+            fi
+          fi
+          echo "build=$build"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          if [ "$build" = "false" ]; then
+            echo "Wheels skipped: this pull request only changes files that do not affect the wheels or the wheel tests." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build_wheels:
     name: wheels (${{ matrix.os }}, ${{ matrix.python }})
     needs: plan
+    if: needs.plan.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -236,6 +293,16 @@ jobs:
       # 因此写在 step 级 env 里；该变量只影响 Linux，在 macOS / Windows 上被忽略。
       # extras: uv 让 action 一并安装 uv 并放进 PATH：pyproject 中
       # build-frontend = "build[uv]" 在 macOS / Windows 上需要宿主机的 uv。
+      # 非 full 构建（PR）：把 wheel 测试限制在第 1、2 级金标准（值由 plan 作业生成）。
+      # 经 GITHUB_ENV 设置而不是写在下一步的 env 里：空的 CIBW_TEST_ENVIRONMENT 也会覆盖
+      # pyproject.toml 的 test-environment，full 构建时必须完全不设置该变量。
+      - name: Limit the wheel tests (non-full builds)
+        if: needs.plan.outputs.test-environment != ''
+        shell: bash
+        env:
+          TEST_ENVIRONMENT: ${{ needs.plan.outputs.test-environment }}
+        run: echo "CIBW_TEST_ENVIRONMENT=$TEST_ENVIRONMENT" >> "$GITHUB_ENV"
+
       - name: Build and test wheels
         uses: pypa/cibuildwheel@v4.3.5
         env:
@@ -446,6 +513,7 @@ jobs:
   # 报 "CPU does not support x86-64-v3"；因此 SDE 部分放进 manylinux_2_28 容器
   # （AlmaLinux 8，基线 x86-64 glibc 2.28）运行。JS action（setup-sde、
   # download-artifact）留在宿主执行，容器内只跑 tools/sde_manylinux_check.sh。
+  # build_wheels 被跳过时本作业随之跳过（needs 中有被跳过的作业）。
   no-avx2-check:
     name: no-AVX2 CPU (Intel SDE)
     needs: [plan, build_wheels]
@@ -491,3 +559,36 @@ jobs:
             -w / \
             "$MANYLINUX_IMAGE" \
             bash "$GITHUB_WORKSPACE/tools/sde_manylinux_check.sh"
+
+  # 汇总 job：名字稳定，wheel 构建被跳过（PR 只改了与 wheel 无关的文件）时也报成功。
+  # 不跳过时要求 build_wheels 与 no-avx2-check 全部成功；跳过时要求它们确实是 skipped。
+  # plan 与 sdist 任何情况下都必须成功。
+  wheels-ok:
+    name: wheels-ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [plan, build_wheels, build_sdist, no-avx2-check]
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        env:
+          BUILD: ${{ needs.plan.outputs.build }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          WHEELS_RESULT: ${{ needs.build_wheels.result }}
+          SDIST_RESULT: ${{ needs.build_sdist.result }}
+          SDE_RESULT: ${{ needs.no-avx2-check.result }}
+        run: |
+          echo "build wheels: $BUILD"
+          echo "plan: $PLAN_RESULT"
+          echo "build_wheels: $WHEELS_RESULT"
+          echo "build_sdist: $SDIST_RESULT"
+          echo "no-avx2-check: $SDE_RESULT"
+          expected=success
+          if [ "$BUILD" = "false" ]; then
+            expected=skipped
+          fi
+          if [ "$PLAN_RESULT" != "success" ] || [ "$SDIST_RESULT" != "success" ] \
+            || [ "$WHEELS_RESULT" != "$expected" ] || [ "$SDE_RESULT" != "$expected" ]; then
+            echo "::error::One or more required jobs did not finish as expected (wheel jobs: expected $expected)."
+            exit 1
+          fi

@@ -89,6 +89,7 @@ dev = [
     "httpx>=0.27,<1",
     "pytest>=8",
     "pytest-cov>=6",
+    "pytest-xdist>=3.6",
     "qiskit>=1.0",
     "ruff>=0.8",
     "mypy>=1.13",
@@ -175,12 +176,30 @@ test-requires = ["pytest>=8"]
 # test_transpile_golden_digests 校验完整 transpile（O1–O3）输出的跨平台金标准摘要（逐门、逐参数位）；
 # test_compile_evolution_golden_digests 校验 quspect.hamsim（Pauli 网络综合 + transpile）输出的跨平台金标准摘要。
 test-extras = ["isingq"]
+# wheels.yml 在非 full 构建（PR）时用 CIBW_TEST_ENVIRONMENT 覆盖本项：在此基础上追加
+# QUSPECT_TEST_GOLDEN_LEVELS=1,2（见下）。该值由 plan 作业从本项生成，这里新增变量时无需改 wheels.yml。
 test-environment = { QUSPECT_EXPECT_OPENMP = "1" }
+# 测试命令先用默认模块跑一遍，再以 QUSPECT_DISABLE_AVX2=1（强制 scalar 模块）跑一遍；
+# 两个模块必须给出逐位相同的结果。没有 AVX2 模块的平台（Linux aarch64、macOS arm64）
+# 上第二遍与第一遍完全相同，由下面的 overrides 去掉。
+# test_transpile_golden_digests 按（级别, 电路）参数化；这里按函数名引用，选中全部参数。
+# 默认（发布 / 手动 full 构建）跑全部级别。环境变量 QUSPECT_TEST_GOLDEN_LEVELS（逗号分隔，
+# 如 "1,2"）把 test_golden_transpile.py 限制在给定的优化级别：PR 的 wheel 测试只跑第 1、2 级，
+# 第 3 级金标准由 ci.yml 的 test 作业（默认模块）、每晚全量与发布构建覆盖。
 test-command = [
     "python tools/wheel_smoke.py --project-dir {project}",
     "python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests tests/transpiler/test_golden_transpile.py::test_compilation_uses_no_platform_math tests/hamsim/test_hamsim.py::test_compile_evolution_golden_digests -q -o addopts=\"\" -p no:cacheprovider",
     "QUSPECT_DISABLE_AVX2=1 python tools/wheel_smoke.py --project-dir {project}",
     "QUSPECT_DISABLE_AVX2=1 python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests tests/transpiler/test_golden_transpile.py::test_compilation_uses_no_platform_math tests/hamsim/test_hamsim.py::test_compile_evolution_golden_digests -q -o addopts=\"\" -p no:cacheprovider",
+]
+
+# 没有 _core_avx2 模块的平台：QUSPECT_DISABLE_AVX2=1 不改变加载的模块，只跑一遍。
+# 新增平台时默认仍是上面的两遍（多跑不会漏检）。
+[[tool.cibuildwheel.overrides]]
+select = ["*-manylinux_aarch64", "*-macosx_arm64"]
+test-command = [
+    "python tools/wheel_smoke.py --project-dir {project}",
+    "python -m pytest tests/native tests/optimization tests/pulse tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests tests/transpiler/test_golden_transpile.py::test_compilation_uses_no_platform_math tests/hamsim/test_hamsim.py::test_compile_evolution_golden_digests -q -o addopts=\"\" -p no:cacheprovider",
 ]
 
 [tool.cibuildwheel.linux]
@@ -254,4 +273,5 @@ testpaths = ["tests"]
 addopts = "-v --cov=quspect --cov-report=term-missing"
 markers = [
     "hardware: tests that may submit work to real quantum hardware and require explicit opt-in",
+    "slow: exhaustive versions of invariance checks that also have a quick variant; pull requests run -m 'not slow', the nightly CI run and release builds run everything",
 ]

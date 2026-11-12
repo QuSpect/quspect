@@ -12,8 +12,10 @@ How the release pipeline works
   CPython 3.10 -- 3.15 on Linux x86_64 and Linux aarch64 (``manylinux_2_28``),
   Windows AMD64 and macOS arm64 (deployment target 14.0), plus the sdist.
   Every wheel is installed into a clean environment and tested with
-  ``tools/wheel_smoke.py`` and the ``tests/native`` / ``tests/optimization``
-  suites, with and without ``QUSPECT_DISABLE_AVX2=1``.  Every (platform,
+  ``tools/wheel_smoke.py``, the ``tests/native`` / ``tests/optimization`` /
+  ``tests/pulse`` suites and the cross-platform golden digests; on x86_64
+  (Linux and Windows) the tests run twice, with and without
+  ``QUSPECT_DISABLE_AVX2=1``.  Every (platform,
   Python version) pair is built in its own parallel job; the version list is
   read from the ``build`` key of ``[tool.cibuildwheel]`` in
   ``pyproject.toml``.  A separate job runs the newest Python's Linux x86_64
@@ -36,10 +38,14 @@ How the release pipeline works
   workflow fails if any macOS wheel's platform tag is not
   ``macosx_14_0_arm64`` or a bundled binary requires a newer macOS.
 * On every pull request to ``main`` the workflow builds only the oldest and
-  newest supported Python (3.10 and 3.15) on all four platforms (8 wheels).
+  newest supported Python (3.10 and 3.15) on all four platforms (8 wheels),
+  and the wheel tests check the ``transpile`` golden digests at optimization
+  levels 1 and 2 only.  A pull request that only changes files that cannot
+  affect the wheels (documentation, the READMEs, the cloud provider packages;
+  the list is in ``tools/wheel_build_needed.py``) builds no wheels at all.
   Releases and manual runs (*Run workflow* in the Actions tab, with the
   ``full`` input left checked) build all 24 wheels: 6 Python versions x 4
-  platforms.
+  platforms, and run the wheel tests in full (every optimization level).
 * ``.github/workflows/release.yml`` runs on tags matching ``v*``.  It calls
   ``wheels.yml`` with ``full: true``, checks that exactly 24 wheels and one
   sdist were built and that the tag version matches the version of every

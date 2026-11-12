@@ -285,9 +285,27 @@ def _tsig(result: Any) -> tuple[Any, ...]:
     )
 
 
-@pytest.mark.parametrize("level", [2, 3])
-def test_transpile_random_corpus_identical(level: int) -> None:
-    for tname, i, qc, _ in _cases(18, 700 + level):
+# 第 3 级的两个端到端比较很慢（两种后端各编译一遍）：完整语料 / 完整基准集标记为
+# slow（每晚全量时运行），PR 上跑下面下标给出的小子集（不同拓扑、不同规模）。
+_QUICK_CORPUS = (1, 5, 11)  # grid3x4、ring8、random10
+_QUICK_BENCHMARKS = (3, 4, 5)  # grid、heavy_hex、line 各一个
+
+_LEVEL3_SPLIT = pytest.mark.parametrize(
+    ("level", "quick"),
+    [
+        pytest.param(2, False, id="2"),
+        pytest.param(3, True, id="3-quick"),
+        pytest.param(3, False, id="3", marks=pytest.mark.slow),
+    ],
+)
+
+
+@_LEVEL3_SPLIT
+def test_transpile_random_corpus_identical(level: int, quick: bool) -> None:
+    cases = _cases(18, 700 + level)
+    if quick:
+        cases = [cases[k] for k in _QUICK_CORPUS]
+    for tname, i, qc, _ in cases:
         target = _target(tname)
         kwargs: dict[str, Any] = {"optimization_level": level, "seed": i}
         if level == 3:
@@ -337,12 +355,14 @@ def _benchmark_small_qasm(max_qubits: int, limit: int) -> list[tuple[str, str]]:
     return out[:: max(1, len(out) // limit)][:limit]
 
 
-@pytest.mark.parametrize("level", [2, 3])
-def test_transpile_benchmark_identical(level: int) -> None:
+@_LEVEL3_SPLIT
+def test_transpile_benchmark_identical(level: int, quick: bool) -> None:
     """End-to-end transpile gate lists on benchmark circuits (both backends)."""
     from quspect.ir import qasm2_loads
 
     for idx, (name, qasm) in enumerate(_benchmark_small_qasm(16, 10)):
+        if quick and idx not in _QUICK_BENCHMARKS:
+            continue
         circuit = qasm2_loads(qasm)
         kind = ("grid", "heavy_hex", "line")[idx % 3]
         target = _benchmark_target(kind, circuit.num_qubits)

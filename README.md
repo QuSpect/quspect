@@ -1065,8 +1065,10 @@ ruff check quspect/ tests/ && ruff format quspect/ tests/
 # Type check
 mypy quspect/
 
-# Run tests
+# Run tests (everything, serially)
 pytest
+# What pull requests run: in parallel, without the exhaustive "slow" variants
+pytest -n auto --dist worksteal -m "not slow"
 
 # Build C++ backend & run gtest (from the repository root)
 cmake -S cpp -B cpp/build -G Ninja && cmake --build cpp/build
