@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from quspect.backends._base import Backend
 from quspect.ir.qsal import dumps
 from quspect.native import NativeExecutor
+from quspect.simulation._seeding import validate_seed
 from quspect.simulation.result import SimulationResult
 
 if TYPE_CHECKING:
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 # Warn when the state vector exceeds ~256 MB
 _LARGE_N_WARN = 25
+#: Seeds are unsigned 64-bit integers in the native executor.
+_SEED_LIMIT = 1 << 64
 
 
 class Simulator(Backend):
@@ -49,6 +52,14 @@ class Simulator(Backend):
         - **Noise channels**: Evolves one complete Monte Carlo trajectory
           per shot with a persistent random stream for that trajectory.
 
+    Random seeds:
+        A simulator created with ``seed=s`` restarts from ``s`` on every
+        :meth:`run`: the same call returns the same result, as with
+        qiskit-aer's ``seed_simulator``.  Pass ``run(..., seed=k)`` to give
+        one run its own seed, for example to draw independent samples from
+        one simulator.  Without a seed every run draws a new one from
+        system entropy.
+
     Attributes:
         seed: The random seed used, or None.
 
@@ -67,9 +78,14 @@ class Simulator(Backend):
         """Initialize the simulator.
 
         Args:
-            seed: Optional seed for the random number generator.
-                Using the same seed guarantees reproducible results
-                across runs. If None, uses system entropy.
+            seed: Optional seed for the random number generator, an
+                integer in ``[0, 2**64)``. Using the same seed guarantees
+                reproducible results across runs. If None, every run
+                uses system entropy.
+
+        Raises:
+            TypeError: If ``seed`` is not an integer or None.
+            ValueError: If ``seed`` is negative or does not fit 64 bits.
 
         Example:
             >>> sim = Simulator(seed=42)
@@ -77,8 +93,25 @@ class Simulator(Backend):
             >>> # Both produce identical results for the same circuit
         """
         self.seed = seed
-        native_seed = seed if seed is not None else secrets.randbits(32)
-        self._native = NativeExecutor(precision="double", seed=native_seed)
+        self._native = NativeExecutor(precision="double")
+
+    @property
+    def seed(self) -> int | None:
+        """The seed every run restarts from, or None for system entropy."""
+        return self._seed
+
+    @seed.setter
+    def seed(self, seed: int | None) -> None:
+        self._seed = validate_seed(seed, limit=_SEED_LIMIT)
+
+    def _run_seed(self, seed: int | None) -> int:
+        """Seed of one run: its own, the simulator's, or fresh entropy."""
+        seed = validate_seed(seed, limit=_SEED_LIMIT)
+        if seed is not None:
+            return seed
+        if self._seed is not None:
+            return self._seed
+        return secrets.randbits(64)
 
     @property
     def name(self) -> str:
@@ -90,6 +123,7 @@ class Simulator(Backend):
         *,
         shots: int = 1024,
         save_statevector: bool = False,
+        seed: int | None = None,
         **options: Any,
     ) -> SimulationResult:
         """Execute the circuit and return measurement results.
@@ -109,6 +143,10 @@ class Simulator(Backend):
                 Note: for circuits with noise or mid-circuit measurement,
                 this is the final state vector from the last trajectory,
                 not an ensemble density matrix.
+            seed: Seed of this run only, an integer in ``[0, 2**64)``.
+                ``None`` (default) uses the simulator's seed, so repeated
+                runs of a seeded simulator return the same result. The
+                simulator's own seed is not changed.
 
         Returns:
             A :class:`~quspect.simulation.SimulationResult` with
@@ -118,6 +156,8 @@ class Simulator(Backend):
             ValueError: If the circuit contains unbound symbolic
                 parameters.
             ValueError: If ``shots`` is negative.
+            TypeError: If ``seed`` is not an integer or None.
+            ValueError: If ``seed`` is negative or does not fit 64 bits.
 
         Example:
             >>> from quspect import QuantumCircuit
@@ -130,6 +170,7 @@ class Simulator(Backend):
         """
         if shots < 0:
             raise ValueError(f"shots must be >= 0, got {shots}")
+        run_seed = self._run_seed(seed)
 
         self._validate_circuit(circuit)
 
@@ -168,6 +209,7 @@ class Simulator(Backend):
             qsal_json,
             shots=cpp_shots,
             return_statevector=save_statevector,
+            seed=run_seed,
         )
 
         return SimulationResult.from_native(

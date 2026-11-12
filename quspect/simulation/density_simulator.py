@@ -15,6 +15,7 @@ import numpy as np
 
 from quspect.backends._base import Backend
 from quspect.gates._matrix_utils import gate_matrix
+from quspect.simulation._seeding import validate_seed
 from quspect.simulation.density_matrix import DensityMatrix, _outcome_mask
 from quspect.simulation.result import SimulationResult
 
@@ -49,6 +50,15 @@ class DensityMatrixSimulator(Backend):
         self.seed = seed
 
     @property
+    def seed(self) -> int | None:
+        """The seed every run restarts from, or None for system entropy."""
+        return self._seed
+
+    @seed.setter
+    def seed(self, seed: int | None) -> None:
+        self._seed = validate_seed(seed)
+
+    @property
     def name(self) -> str:
         return "density_matrix_simulator"
 
@@ -58,6 +68,7 @@ class DensityMatrixSimulator(Backend):
         *,
         shots: int = 1024,
         save_statevector: bool = False,
+        seed: int | None = None,
         **options: Any,
     ) -> SimulationResult:
         """Execute the circuit using density matrix evolution.
@@ -84,6 +95,9 @@ class DensityMatrixSimulator(Backend):
             circuit: The circuit to execute.
             shots: Number of measurement shots. Must be >= 0.
             save_statevector: Unused (density matrix has no statevector).
+            seed: Seed of this run only (a non-negative integer). ``None``
+                (default) uses the simulator's seed, so repeated runs of
+                a seeded simulator return the same counts.
             **options: Ignored extra options.
 
         Returns:
@@ -104,6 +118,7 @@ class DensityMatrixSimulator(Backend):
         """
         if shots < 0:
             raise ValueError(f"shots must be >= 0, got {shots}")
+        run_seed = validate_seed(seed)
 
         n = circuit.num_qubits
         instructions = circuit.instructions
@@ -153,7 +168,7 @@ class DensityMatrixSimulator(Backend):
             keys = list(distribution)
             pvals = np.clip(np.array([distribution[k] for k in keys]), 0.0, None)
             pvals = pvals / pvals.sum()
-            rng = np.random.default_rng(self.seed)
+            rng = np.random.default_rng(self._seed if run_seed is None else run_seed)
             sampled = rng.multinomial(shots, pvals)
             for key, cnt in zip(keys, sampled, strict=True):
                 if cnt:
