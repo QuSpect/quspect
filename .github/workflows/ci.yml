@@ -226,13 +226,14 @@ jobs:
       # -n auto：每个 CPU 一个 worker。--dist worksteal：测试逐个分发，空闲的 worker 从
       # 其他 worker 的队列里取，同一文件里的重测试（test_golden_transpile.py 的第 3 级
       # 金标准按电路参数化）会摊到不同 worker 上；不要用按文件 / 按模块分组的 loadfile / loadscope。
-      # PR 上跳过 slow 测试；-m "" 不做筛选（全量）。
+      # PR 上跳过 slow 测试；-m "" 不做筛选（全量）。--durations 在日志里列出最慢的测试，
+      # 便于发现新增的重测试（并行时墙钟时间由最慢的几个测试决定）。
       - name: pytest tests
         env:
           COVERAGE_FILE: .coverage.tests
         run: |
           if [ "$FULL_SUITE" = "true" ]; then markexpr=""; else markexpr="not slow"; fi
-          pytest tests -q -n auto --dist worksteal -m "$markexpr"
+          pytest tests -q -n auto --dist worksteal -m "$markexpr" --durations=30
 
       # 跨平台金标准（完整 transpile 输出与确定性数值层的摘要）：pytest tests 已经在默认模块上
       # 跑过；AVX2 runner 上再用 scalar 模块跑一遍，两个模块必须给出逐位相同的结果。

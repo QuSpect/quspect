@@ -102,12 +102,13 @@ bash tools/sde_chip_check.sh native-tests -nhm -- \
   python -m pytest tests/native -q -p no:cacheprovider -o addopts="" \
   || failed=1
 # 跨平台金标准（scalar 模块在无 AVX2 的 CPU 上也必须给出完全相同的编译结果）；
-# SDE 下运行很慢，完整 transpile 只跑 O1。
-bash tools/sde_chip_check.sh golden -nhm -- \
+# SDE 下运行很慢，完整 transpile 只跑 O1：test_transpile_golden_digests 按（级别, 电路）
+# 参数化，QUSPECT_TEST_GOLDEN_LEVELS=1 让其余级别的参数跳过（O1 的全部电路照常运行）。
+QUSPECT_TEST_GOLDEN_LEVELS=1 bash tools/sde_chip_check.sh golden -nhm -- \
   python -m pytest -q -p no:cacheprovider -o addopts="" \
     tests/synthesis/test_native_kak.py::test_golden_digests_are_platform_independent \
     tests/synthesis/test_native_kak.py::test_golden_digests_of_single_qubit_numerics \
-    "tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests[1]" \
+    tests/transpiler/test_golden_transpile.py::test_transpile_golden_digests \
   || failed=1
 
 exit "$failed"
