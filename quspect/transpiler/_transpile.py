@@ -467,6 +467,14 @@ def transpile(
     It is skipped when ``time_limit`` is given, and its work budget scales
     with ``work_limit``.
 
+    Measurements, barriers and noise channels are not gates and stay in
+    the circuit.  Each is put on the wires that hold its qubits at that
+    point, and no gate is merged, cancelled or moved across it on those
+    qubits: a barrier asks for exactly that, and a channel or a measurement
+    is not unitary.  The router treats each of them as a fence for the whole
+    circuit (every earlier gate is routed before it, every later gate after
+    it); a two-qubit channel needs no coupling between its qubits.
+
     At every level the pre-routing decomposition keeps ``ccx``: SABRE
     routes each Toffoli as a three-qubit unit and synthesizes it for its
     final placement (see :meth:`SABRE.solve`); the post-routing

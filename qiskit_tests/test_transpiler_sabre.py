@@ -394,12 +394,34 @@ def test_sabre_mid_circuit_measurement_fence() -> None:
     assert kinds[-1] == "m"
 
 
-def test_sabre_drops_barriers_but_keeps_semantics() -> None:
-    """Barriers are not forwarded by SABRE (observation); unitary unaffected."""
+def test_sabre_keeps_barriers_and_semantics() -> None:
+    """Barriers are routed as fences and stay in the circuit; unitary unaffected.
+
+    SABRE used to drop them, after which the later passes of ``transpile()``
+    merged gates across the place a barrier had been.
+    """
     target = target_from_edges(4, line_edges(4))
     circ = quspect.QuantumCircuit().h(0).barrier().cx(0, 3).barrier(1, 2).cx(1, 2)
     routed, initial, final = SABRE(target).solve(circ, seed=1)
-    assert not any(i.is_barrier for i in routed.instructions)
+    # Wire w starts as logical qubit w; SWAPs move the logical qubits, and a
+    # barrier sits on the wires that hold its qubits at that point.
+    wire_of = {q: q for q in range(4)}
+    seen: list[set[int]] = []
+    order: list[str] = []
+    for instr in routed.instructions:
+        if instr.is_barrier:
+            logical = {q for q, w in wire_of.items() if w in instr.qubits}
+            seen.append(logical)
+            order.append("barrier")
+            continue
+        order.append(instr.gate.name)
+        if instr.gate.name == "swap":
+            a, b = instr.qubits
+            for q, w in wire_of.items():
+                wire_of[q] = b if w == a else a if w == b else w
+    assert seen == [{0}, {1, 2}]
+    assert order.index("h") < order.index("barrier") < order.index("cx")
+    assert order[-2:] == ["barrier", "cx"]
     _assert_routed_equivalent(circ, routed, initial, final)
 
 
