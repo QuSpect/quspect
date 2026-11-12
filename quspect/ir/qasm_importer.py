@@ -208,6 +208,8 @@ _NATIVE_GATES: dict[str, _NativeGate] = {
     "cp": _NativeGate("cp", 1, 2),
     "cu1": _NativeGate("cp", 1, 2),
     "cu3": _NativeGate("cu3", 3, 2),
+    "rxx": _NativeGate("rxx", 1, 2),
+    "rzz": _NativeGate("rzz", 1, 2),
 }
 
 _BUILTIN_NAMES: frozenset[str] = frozenset({"U", "CX"})
@@ -218,8 +220,8 @@ _BUILTIN_NAMES: frozenset[str] = frozenset({"U", "CX"})
 # gate *exactly* (no global-phase difference).  Where the ``qelib1.inc`` body
 # only matches up to a global phase, an exact equivalent is used instead:
 # ``ch`` (qiskit's CHGate definition),
-# ``cu`` = p(gamma) on the control + cu3, ``csx`` via cp, and rz-based
-# ``rzz`` / ``rxx``.
+# ``cu`` = p(gamma) on the control + cu3, and ``csx`` via cp.  ``rxx`` and
+# ``rzz`` are native (see ``_NATIVE_GATES``); ``qelib1.inc`` has no ``ryy``.
 _QELIB1_DEFINITIONS = """
 gate u0(gamma) q { id q; }
 gate cy a,b { sdg b; cx a,b; s b; }
@@ -227,8 +229,6 @@ gate ch a,b { s b; h b; t b; cx a,b; tdg b; h b; sdg b; }
 gate cswap a,b,c { cx c,b; ccx a,b,c; cx c,b; }
 gate csx a,b { h b; cp(pi/2) a,b; h b; }
 gate cu(theta,phi,lambda,gamma) c,t { p(gamma) c; cu3(theta,phi,lambda) c,t; }
-gate rxx(theta) a,b { h a; h b; cx a,b; rz(theta) b; cx a,b; h b; h a; }
-gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }
 gate rccx a,b,c {
   u2(0,pi) c; u1(pi/4) c; cx b,c; u1(-pi/4) c; cx a,c; u1(pi/4) c;
   cx b,c; u1(-pi/4) c; u2(0,pi) c;
@@ -903,11 +903,11 @@ class QASM2Importer:
     * Every ``qelib1.inc`` gate and the builtins ``U`` / ``CX`` are
       available.  Gates with a native QuSpect counterpart are imported as
       that gate (``u1`` -> ``p``, ``cu1`` -> ``cp``, ``U``/``u`` -> ``u3``,
-      ``CX`` -> ``cx``, ``sx``/``sxdg`` -> themselves); all other library
-      gates (``ch``, ``cswap``,
-      ``rzz``, ``c3x``, ...) are expanded through their definitions into
-      native QuSpect gates.  Every library gate is imported with exactly
-      qiskit's matrix (no global-phase difference).
+      ``CX`` -> ``cx``, ``sx``/``sxdg``/``rxx``/``rzz`` -> themselves); all
+      other library gates (``ch``, ``cswap``, ``c3x``, ...) are expanded
+      through their definitions into native QuSpect gates.  Every library
+      gate is imported with exactly qiskit's matrix (no global-phase
+      difference).
     * User ``gate`` declarations may have formal parameters and may call
       previously declared gates; they are expanded inline.
     * Gate parameter and qubit counts are validated.

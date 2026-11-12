@@ -131,6 +131,38 @@ def test_random_circuits_match_python(seed: int) -> None:
     _assert_parity(CircuitCompiler().compile(qc))
 
 
+def _pauli_pair_circuit(seed: int, n: int, m: int) -> QuantumCircuit:
+    """Random circuits rich in rxx/ryy/rzz pairs (cancellation, commutation)."""
+    r = random.Random(seed)
+    qc = QuantumCircuit()
+    angles = [0.3, -0.3, 0.5, -0.5, math.pi]
+    for _ in range(m):
+        q = r.randrange(n)
+        q2 = (q + 1 + r.randrange(n - 1)) % n
+        a = r.choice(angles)
+        k = r.random()
+        if k < 0.45:
+            getattr(qc, r.choice(("rxx", "ryy", "rzz")))(a, q, q2)
+        elif k < 0.6:
+            qc.rz(a, q)
+        elif k < 0.7:
+            qc.cz(q, q2)
+        elif k < 0.8:
+            qc.cx(q, q2)
+        elif k < 0.9:
+            qc.h(q)
+        else:
+            qc.rx(a, q)
+    qc.measure(list(range(n)), list(range(n)))
+    return qc
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_pauli_pair_rotations_match_python(seed: int) -> None:
+    qc = _pauli_pair_circuit(seed, n=2 + seed % 3, m=30 + 5 * seed)
+    _assert_parity(CircuitCompiler().compile(qc))
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_u3_fusion_mode_unchanged(seed: int) -> None:
     # Without a basis the fusion pass keeps its Python implementation.

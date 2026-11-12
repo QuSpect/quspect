@@ -356,6 +356,73 @@ def _decompose_cu3(
     ]
 
 
+def _decompose_rzz(
+    gate: Gate, qubits: tuple[int, ...]
+) -> list[tuple[Gate, tuple[int, ...]]]:
+    """Decompose RZZ(θ) into CX + RZ(θ) + CX, exactly (no global phase).
+
+    RZZ(θ) = CX(a, b); [I ⊗ RZ(θ)]; CX(a, b) — the CX pair writes the
+    parity ``a ⊕ b`` onto ``b`` for the RZ.  This is the ``qelib1.inc``
+    definition of ``rzz``.
+    """
+    from quspect.gates.parameterized import RZ
+    from quspect.gates.standard import CX
+
+    theta = _get_param(gate, 0)
+    a, b = qubits[0], qubits[1]
+    return [
+        (CX, (a, b)),
+        (RZ.with_params(theta), (b,)),
+        (CX, (a, b)),
+    ]
+
+
+def _decompose_rxx(
+    gate: Gate, qubits: tuple[int, ...]
+) -> list[tuple[Gate, tuple[int, ...]]]:
+    """Decompose RXX(θ) into H ⊗ H + RZZ(θ) + H ⊗ H, exactly.
+
+    RXX(θ) = [H ⊗ H]; RZZ(θ); [H ⊗ H], since H Z H = X.
+    """
+    from quspect.gates.parameterized import RZZ
+    from quspect.gates.standard import H
+
+    theta = _get_param(gate, 0)
+    a, b = qubits[0], qubits[1]
+    return [
+        (H, (a,)),
+        (H, (b,)),
+        (RZZ.with_params(theta), (a, b)),
+        (H, (a,)),
+        (H, (b,)),
+    ]
+
+
+def _decompose_ryy(
+    gate: Gate, qubits: tuple[int, ...]
+) -> list[tuple[Gate, tuple[int, ...]]]:
+    """Decompose RYY(θ) into RX(π/2) ⊗ RX(π/2) + RZZ(θ) + RX(-π/2) ⊗ RX(-π/2).
+
+    RX(-π/2) Z RX(π/2) = Y, so the RX pair rotates the ZZ interaction into
+    YY exactly (qiskit's definition of ``ryy``).
+    """
+    import math
+
+    from quspect.gates.parameterized import RX, RZZ
+
+    theta = _get_param(gate, 0)
+    a, b = qubits[0], qubits[1]
+    quarter = RX.with_params(math.pi / 2)
+    back = RX.with_params(-math.pi / 2)
+    return [
+        (quarter, (a,)),
+        (quarter, (b,)),
+        (RZZ.with_params(theta), (a, b)),
+        (back, (a,)),
+        (back, (b,)),
+    ]
+
+
 def _get_param(gate: Gate, idx: int) -> Any:
     """Extract a numeric or symbolic parameter without discarding symbols."""
     return gate.params[idx] if gate.params else 0.0
@@ -458,6 +525,28 @@ BUILTIN_DECOMPOSITIONS: list[GateDecompositionRule] = [
         decompose=_decompose_cu3,
         priority=8,
         description="CU3 → U3 + CX + U3 + CX + ...",
+    ),
+    # Two-qubit Pauli rotations
+    GateDecompositionRule(
+        gate_name="rzz",
+        num_qubits=2,
+        decompose=_decompose_rzz,
+        priority=8,
+        description="RZZ(θ) → CX + RZ(θ) + CX",
+    ),
+    GateDecompositionRule(
+        gate_name="rxx",
+        num_qubits=2,
+        decompose=_decompose_rxx,
+        priority=8,
+        description="RXX(θ) → H⊗H + RZZ(θ) + H⊗H",
+    ),
+    GateDecompositionRule(
+        gate_name="ryy",
+        num_qubits=2,
+        decompose=_decompose_ryy,
+        priority=8,
+        description="RYY(θ) → RX(π/2)⊗RX(π/2) + RZZ(θ) + RX(-π/2)⊗RX(-π/2)",
     ),
     # CX → CZ + H (for CZ-native platforms)
     GateDecompositionRule(

@@ -114,6 +114,30 @@ def _cu3(q: Sequence[int], p: Sequence[float]) -> list[str]:
     ]
 
 
+def _pauli_pair(axis: str) -> _Emitter:
+    """``exp(-i·θ/2·P⊗P)`` (``rxx``/``ryy``/``rzz``) in its exact CNOT form.
+
+    ``CNOT · RZ(θ) · CNOT`` is ``rzz``; ``H`` (``rxx``) or ``RX(±π/2)``
+    (``ryy``) on both qubits rotate ``Z⊗Z`` into ``P⊗P``.  Only instructions
+    the translator already emits are used: the cloud does not reject a
+    program it cannot run, it leaves the task computing forever.
+    """
+
+    def emit(q: Sequence[int], p: Sequence[float]) -> list[str]:
+        a, b = q
+        before: list[str] = []
+        after: list[str] = []
+        if axis == "x":
+            before = after = [f"H {_q(a)}", f"H {_q(b)}"]
+        elif axis == "y":
+            before = [f"RX {_q(x)},{_args([math.pi / 2])}" for x in (a, b)]
+            after = [f"RX {_q(x)},{_args([-math.pi / 2])}" for x in (a, b)]
+        cnot = f"CNOT {_q(a)},{_q(b)}"
+        return [*before, cnot, f"RZ {_q(b)},{_args(p)}", cnot, *after]
+
+    return emit
+
+
 def _ccx(q: Sequence[int], p: Sequence[float]) -> list[str]:
     return [f"CONTROL {_q(q[0])},{_q(q[1])}", f"X {_q(q[2])}", "ENDCONTROL"]
 
@@ -148,6 +172,9 @@ _GATE_MAP: dict[str, _Emitter] = {
     # OriginIR "CR" is the controlled phase gate.
     "cp": lambda q, p: [f"CR {_q(q[0])},{_q(q[1])},{_args(p)}"],
     "cu3": _cu3,
+    "rxx": _pauli_pair("x"),
+    "ryy": _pauli_pair("y"),
+    "rzz": _pauli_pair("z"),
     "ccx": _ccx,
 }
 SUPPORTED_GATES = frozenset(_GATE_MAP)

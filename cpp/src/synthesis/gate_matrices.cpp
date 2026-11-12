@@ -115,6 +115,26 @@ void Identity(int dim, Cx* out) {
     }
 }
 
+// exp(−i·θ/2·P⊗P) = c·I − i·s·P⊗P（P = X / Y / Z，按 axis 选择）。
+void PauliPairRotation(char axis, double theta, Cx* out) {
+    const double c = dm::Cos(theta / 2);
+    const double s = dm::Sin(theta / 2);
+    std::fill(out, out + 16, kZero);
+    if (axis == 'z') {
+        // Z⊗Z = diag(1, −1, −1, 1)
+        out[0] = Cx{c, -s};
+        out[5] = Cx{c, s};
+        out[10] = Cx{c, s};
+        out[15] = Cx{c, -s};
+        return;
+    }
+    // X⊗X 与 Y⊗Y 都只翻转两个比特：反对角元为 ±1（Y⊗Y 的 |00⟩↔|11⟩ 为 −1）
+    const double corner = axis == 'x' ? -s : s;
+    out[0] = out[5] = out[10] = out[15] = Cx{c, 0.0};
+    out[3] = out[12] = Cx{0.0, corner};
+    out[6] = out[9] = Cx{0.0, -s};
+}
+
 void Controlled(const M2& u, Cx* out) {
     Identity(4, out);
     out[10] = u[0];
@@ -179,6 +199,14 @@ bool GateMatrix(std::string_view name, const double* params, int num_params, Cx*
         *dim = 4;
         Identity(4, out);
         out[15] = Cx{dm::Cos(params[0]), dm::Sin(params[0])};
+        return true;
+    }
+    if (name == "rxx" || name == "ryy" || name == "rzz") {
+        if (num_params != 1) {
+            return false;
+        }
+        *dim = 4;
+        PauliPairRotation(name[1], params[0], out);
         return true;
     }
     std::string_view inner;

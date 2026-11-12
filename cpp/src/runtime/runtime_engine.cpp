@@ -140,6 +140,26 @@ void RuntimeEngine<FP>::Run(bool execute_measurements) {
                         table.cz(state.data(), dim, gate.qubits[1], cmask, cmask, nullptr);
                     } else if (gate.name == "swap") {
                         table.swap(state.data(), dim, gate.qubits[0], gate.qubits[1]);
+                    } else if (gate.name == "rzz") {
+                        // RZZ(theta) = exp(-i*theta/2 * Z⊗Z) = diag(e^{-iθ/2}, e^{iθ/2}, e^{iθ/2}, e^{-iθ/2})
+                        const FP half = static_cast<FP>(gate.params_f64[0] * 0.5);
+                        const Complex even(std::cos(half), -std::sin(half));
+                        const Complex odd(std::cos(half), std::sin(half));
+                        const Complex diag[4] = {even, odd, odd, even};
+                        table.diagonal_k(state.data(), dim, gate.qubits.data(), 2, diag);
+                    } else if (gate.name == "rxx" || gate.name == "ryy") {
+                        // RXX / RYY(theta) = cos(theta/2) I - i sin(theta/2) P⊗P；两者都对 qubit 交换对称，
+                        // 稠密内核的局部比特序不影响结果。Y⊗Y 的 |00⟩↔|11⟩ 元为 −1。
+                        const FP half = static_cast<FP>(gate.params_f64[0] * 0.5);
+                        const FP c = std::cos(half);
+                        const FP s = std::sin(half);
+                        const Complex corner(0, gate.name == "rxx" ? -s : s);
+                        const Complex flip(0, -s);
+                        const Complex zero(0, 0);
+                        const Complex diag(c, 0);
+                        const Complex m[16] = {diag, zero, zero, corner, zero,   diag, flip, zero,
+                                               zero, flip, diag, zero,   corner, zero, zero, diag};
+                        table.dense_k(state.data(), dim, gate.qubits.data(), 2, m);
                     } else if (gate.name == "id") {
                         // id gate: no-op — does not affect state
                     }

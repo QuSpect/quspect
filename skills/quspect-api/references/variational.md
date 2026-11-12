@@ -325,9 +325,11 @@ instead of collapsing dimensions manually.
 ## Limits and cost model
 
 - Every parameterized gate of the circuit API may carry symbolic angles, with
-  both engines: `rx`, `ry`, `rz`, `p`, `u1`, `u2`, `u3` and the controlled
-  `crx`, `cry`, `crz`, `cp`, `cu3`. They are lowered to rotations before
-  differentiation. Angles may be affine expressions and share parameters.
+  both engines: `rx`, `ry`, `rz`, `p`, `u1`, `u2`, `u3`, the controlled
+  `crx`, `cry`, `crz`, `cp`, `cu3`, and the Pauli rotations `rxx`, `ryy`,
+  `rzz`. `rx`/`ry`/`rz`/`rxx`/`ryy`/`rzz` are differentiated directly; the
+  others are lowered to them first. Angles may be affine expressions and
+  share parameters.
 - Adjoint objectives require noiseless unitary state preparation, no
   measurements, and fixed real Hermitian Pauli observables.
 - Sampled objectives also reject explicit noise channels in state preparation;
@@ -336,8 +338,8 @@ instead of collapsing dimensions manually.
   first.
 - Sampling experiments per point are
   `measurement_groups * (1 + 2 * symbolic_rotation_occurrences)`, counted after
-  lowering: a symbolic `crx`, `cry` or `crz` is two occurrences, `cp` three, and
-  `cu3` up to six. Read `plan.num_experiments_per_point` for the exact number.
+  lowering: a symbolic `rxx`, `ryy` or `rzz` is one occurrence, `crx`, `cry`
+  or `crz` two, `cp` three, and `cu3` up to six. Read `plan.num_experiments_per_point` for the exact number.
 - QWC grouping reduces circuits but is not general commuting grouping.
 - Exact state-vector memory grows exponentially. Adjoint working memory is
   roughly one primal state plus one costate per observable.

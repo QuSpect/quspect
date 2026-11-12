@@ -20,6 +20,10 @@ namespace quspect::native::synthesis {
 //   u2(φ, λ) = u3(π/2, φ, λ)
 //   u3(θ, φ, λ) = [[c, −s·e^{iλ}], [s·e^{iφ}, (c·e^{iφ})·e^{iλ}]]，e^{ix} = cos x + i·sin x
 //   crx / cry / crz / cu3：右下角 2×2 块为对应的单比特门；cp(θ) = diag(1, 1, 1, e^{iθ})
+//   rxx / ryy / rzz(θ) = exp(−i·θ/2·P⊗P) = c·I − i·s·P⊗P（P = X / Y / Z），即
+//     rxx = [[c, 0, 0, −i·s], [0, c, −i·s, 0], [0, −i·s, c, 0], [−i·s, 0, 0, c]]
+//     ryy = [[c, 0, 0, i·s], [0, c, −i·s, 0], [0, −i·s, c, 0], [i·s, 0, 0, c]]
+//     rzz = diag(c − i·s, c + i·s, c + i·s, c − i·s)
 //
 // 虚部的符号零与 Python（CPython 3.13 的复数运算）的结果可能不同（只影响 −0.0 / +0.0）。
 

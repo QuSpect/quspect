@@ -48,8 +48,13 @@ enum GateNameId : std::int32_t {
     kNameCry,
     kNameCrz,
     kNameCp,
+    kNameRxx,
+    kNameRyy,
+    kNameRzz,
     kNumFixedGateNames
 };
+
+static_assert(kNumFixedGateNames <= 32, "gate families are 32-bit masks over the fixed names");
 
 std::int32_t InternGateName(std::string_view name);
 

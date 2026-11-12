@@ -10,7 +10,8 @@ Supported cancellations:
     - Single-qubit inverse pairs: S·S†, T·T†
     - Single-qubit rotation: RX(θ)·RX(-θ), RY(θ)·RY(-θ), RZ(θ)·RZ(-θ), P(θ)·P(-θ)
     - Two-qubit: CNOT², CZ², SWAP²
-    - Two-qubit rotation: CRX(θ)·CRX(-θ), CRY(θ)·CRY(-θ), CRZ(θ)·CRZ(-θ)
+    - Two-qubit rotation: CRX(θ)·CRX(-θ), CRY(θ)·CRY(-θ), CRZ(θ)·CRZ(-θ),
+      CP(θ)·CP(-θ), RXX(θ)·RXX(-θ), RYY(θ)·RYY(-θ), RZZ(θ)·RZZ(-θ)
 """
 
 from __future__ import annotations
@@ -36,7 +37,19 @@ INVERSE_PAIRS: set[tuple[str, str]] = {
 }
 
 #: Rotation gate families — gates in the same family cancel if params sum to 0.
-ROTATION_FAMILIES: set[str] = {"rx", "ry", "rz", "p", "crx", "cry", "crz", "cp"}
+ROTATION_FAMILIES: set[str] = {
+    "rx",
+    "ry",
+    "rz",
+    "p",
+    "crx",
+    "cry",
+    "crz",
+    "cp",
+    "rxx",
+    "ryy",
+    "rzz",
+}
 
 #: Tolerance for angle sum to be considered zero (in radians).
 ANGLE_TOLERANCE: float = 1e-10

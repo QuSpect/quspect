@@ -189,53 +189,56 @@ msgstr "当前伴随引擎的适用范围"
 msgid ""
 "The adjoint engine performs exact full-state-vector differentiation in "
 "C++. It is intended for noiseless expectation objectives with real "
-"Hermitian Pauli Hamiltonians.  Symbolic ``RX``, ``RY``, and ``RZ`` angles"
-" may be affine expressions and may share parameters.  Measurements and "
-"noise operations are not part of a differentiable objective.  Use the "
-"regular simulation APIs for sampling and measurement workflows."
+"Hermitian Pauli Hamiltonians.  Symbolic ``RX``, ``RY``, ``RZ``, ``RXX``, "
+"``RYY``, and ``RZZ`` angles may be affine expressions and may share "
+"parameters; other symbolic gates (controlled rotations, ``U3``, ...) are "
+"lowered to these rotations first.  Measurements and noise operations are "
+"not part of a differentiable objective.  Use the regular simulation APIs "
+"for sampling and measurement workflows."
 msgstr ""
-"伴随引擎在 C++ 中执行精确的全态矢量微分。它适用于具有实厄米 Pauli 哈密顿量的无噪声期望值目标。符号化的 ``RX``、``RY`` 和"
-" ``RZ`` 角度可以是仿射表达式，并且可以共享参数。测量和噪声操作不属于可微目标的一部分。采样和测量工作流请使用常规的模拟 API。"
+"伴随引擎在 C++ 中执行精确的全态矢量微分。它适用于具有实厄米 Pauli 哈密顿量的无噪声期望值目标。符号化的 ``RX``、``RY``、"
+"``RZ``、``RXX``、``RYY`` 和 ``RZZ`` 角度可以是仿射表达式，并且可以共享参数；其他带符号参数的门（受控旋转、``U3`` "
+"等）会先降级为这些旋转门。测量和噪声操作不属于可微目标的一部分。采样和测量工作流请使用常规的模拟 API。"
 
-#: ../../source/variational.rst:177
+#: ../../source/variational.rst:179
 msgid "The engine precision is chosen independently from the problem description:"
 msgstr "引擎精度的选择独立于问题描述："
 
-#: ../../source/variational.rst:184
+#: ../../source/variational.rst:186
 msgid ""
 "This separation lets exact and sampled engines share one objective and "
 "result contract without changing circuit construction or optimizer "
 "integration code."
 msgstr "这种分离让精确引擎和采样引擎可以共享同一个目标和结果约定，而无需更改线路构造或优化器集成代码。"
 
-#: ../../source/variational.rst:188
+#: ../../source/variational.rst:190
 msgid "Shot-based and hardware objectives"
 msgstr "基于采样次数的目标与硬件目标"
 
-#: ../../source/variational.rst:190
+#: ../../source/variational.rst:192
 msgid ""
 ":class:`~quspect.variational.SamplingEngine` lowers each Pauli observable"
 " into measurement circuits.  Qubit-wise commuting terms share a "
 "measurement basis; identity terms are exact constants.  Gradients use "
-"local parameter shifts for each symbolic ``RX``, ``RY``, or ``RZ`` "
-"occurrence, followed by the affine chain rule.  This remains correct when"
-" one parameter appears in several gates or a gate angle is an expression "
-"such as ``2 * theta - phi``."
+"local parameter shifts for each symbolic ``RX``, ``RY``, ``RZ``, "
+"``RXX``, ``RYY``, or ``RZZ`` occurrence, followed by the affine chain "
+"rule.  This remains correct when one parameter appears in several gates "
+"or a gate angle is an expression such as ``2 * theta - phi``."
 msgstr ""
 ":class:`~quspect.variational.SamplingEngine` 将每个 Pauli "
-"可观测量降级为测量线路。按量子比特对易的项共享同一测量基；单位项是精确常数。梯度对每一处符号化的 ``RX``、``RY`` 或 ``RZ`` "
-"使用局部参数平移，再应用仿射链式法则。即使一个参数出现在多个门中，或者门角度是 ``2 * theta - phi`` "
+"可观测量降级为测量线路。按量子比特对易的项共享同一测量基；单位项是精确常数。梯度对每一处符号化的 ``RX``、``RY``、``RZ``、"
+"``RXX``、``RYY`` 或 ``RZZ`` 使用局部参数平移，再应用仿射链式法则。即使一个参数出现在多个门中，或者门角度是 ``2 * theta - phi`` "
 "这样的表达式，结果依然正确。"
 
-#: ../../source/variational.rst:197
+#: ../../source/variational.rst:200
 msgid "The same H2-style objective can be evaluated through the local sampler:"
 msgstr "同一个 H2 风格目标可以通过本地采样器求值："
 
-#: ../../source/variational.rst:206
+#: ../../source/variational.rst:209
 msgid "Or submitted to a LogicalQubit device without changing the objective:"
 msgstr "也可以在不修改目标的情况下提交到 LogicalQubit 设备："
 
-#: ../../source/variational.rst:229
+#: ../../source/variational.rst:232
 msgid ""
 "The execution request carries stable labels for every base, shift, and "
 "Pauli group circuit.  LogicalQubit native batches are limited to 64 "
@@ -256,7 +259,7 @@ msgstr ""
 "是它的阻塞式快捷方式。因此，优化器扫描不会为每个点创建一个云端任务。``auto`` 结果格式允许 lqcloud "
 "根据读出宽度在计数（counts）和逐次采样记录（memory）之间进行选择。"
 
-#: ../../source/variational.rst:239
+#: ../../source/variational.rst:242
 msgid ""
 "Each native batch is one asynchronous provider task.  To have QuSpect "
 "submit and track every circuit as its own task instead, pass "
@@ -268,14 +271,14 @@ msgstr ""
 "``execution_options`` 中传入 ``provider_batching=\"individual\"``；这样能够完整报告 "
 "``PartialSubmissionError`` 并尽力取消，代价是产生额外的提供方任务。"
 
-#: ../../source/variational.rst:245
+#: ../../source/variational.rst:248
 msgid ""
 "After a process restart, reconstruct the provider job and attach the "
 "compiled decoder.  A job reference intentionally contains no API key or "
 "token:"
 msgstr "进程重启后，重建提供方作业并附加已编译的解码器。作业引用有意不包含任何 API 密钥或令牌："
 
-#: ../../source/variational.rst:254
+#: ../../source/variational.rst:257
 msgid ""
 "``attach`` validates a stable plan fingerprint together with the backend,"
 " labels, experiment shapes, shots, and result format.  A reference from a"
@@ -287,7 +290,7 @@ msgstr ""
 "会校验稳定的计划指纹，以及后端、标签、实验形状、采样次数和结果格式。因此，即使另一个目标的线路批次恰好大小相同，其引用也会被拒绝。多点作业通过 "
 "``sampled.attach_many(execution_job)`` 恢复。"
 
-#: ../../source/variational.rst:260
+#: ../../source/variational.rst:263
 msgid ""
 "A job reference is a credential-free manifest rather than a signed "
 "platform receipt.  Store it in a trusted location: the fingerprint "
@@ -297,13 +300,14 @@ msgstr ""
 "作业引用是一份不含凭据的清单，而不是经过签名的平台回执。请将其存放在可信的位置：指纹可以防止意外的错误附加，但并不用于验证被不可信方修改过的 "
 "JSON。"
 
-#: ../../source/variational.rst:265
+#: ../../source/variational.rst:268
 msgid ""
-"The current sampled gradient rules cover symbolic ``RX``, ``RY``, and "
-"``RZ``. Symbolic controlled rotations and symbolic observable "
+"The current sampled gradient rules cover symbolic ``RX``, ``RY``, "
+"``RZ``, ``RXX``, ``RYY``, and ``RZZ``; other symbolic gates such as "
+"controlled rotations are lowered to them first.  Symbolic observable "
 "coefficients are rejected explicitly rather than evaluated with an "
 "invalid two-point rule."
 msgstr ""
-"当前的采样梯度规则覆盖符号化的 ``RX``、``RY`` 和 "
-"``RZ``。符号化的受控旋转门和符号化的可观测量系数会被显式拒绝，而不是用无效的两点规则求值。"
+"当前的采样梯度规则覆盖符号化的 ``RX``、``RY``、``RZ``、``RXX``、``RYY`` 和 "
+"``RZZ``；受控旋转等其他带符号参数的门会先降级为这些旋转门。符号化的可观测量系数会被显式拒绝，而不是用无效的两点规则求值。"
 

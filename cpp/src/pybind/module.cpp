@@ -169,7 +169,7 @@ py::dict get_runtime_capabilities() {
     caps["phase"] = "state-vector objective plans";
     caps["objective_plans"] = true;
     caps["differentiation_methods"] = py::make_tuple("adjoint");
-    caps["differentiable_gates"] = py::make_tuple("rx", "ry", "rz");
+    caps["differentiable_gates"] = py::make_tuple("rx", "ry", "rz", "rxx", "ryy", "rzz");
     caps["noise_channels"] = true;
     caps["noisy_trajectories"] = true;
     caps["openmp"] = common::OpenMPEnabled();

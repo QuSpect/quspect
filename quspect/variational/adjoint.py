@@ -78,6 +78,9 @@ class AdjointEngine:
                 "rx",
                 "ry",
                 "rz",
+                "rxx",
+                "ryy",
+                "rzz",
             },
         )
         objective = ObservableObjective(circuit, objective.observables)
@@ -290,8 +293,11 @@ def _validate_objective(objective: ObservableObjective) -> None:
         "rx",
         "ry",
         "rz",
+        "rxx",
+        "ryy",
+        "rzz",
     }
-    differentiable_gates = {"rx", "ry", "rz"}
+    differentiable_gates = {"rx", "ry", "rz", "rxx", "ryy", "rzz"}
     for instruction in circuit.instructions:
         if instruction.is_measure:
             raise ValueError("Adjoint objectives cannot contain measurements.")
@@ -303,15 +309,16 @@ def _validate_objective(objective: ObservableObjective) -> None:
             if name not in supported_gates:
                 raise ValueError(
                     "The adjoint engine supports fixed native unitary gates plus "
-                    f"parameterized RX, RY, and RZ; got {gate.name!r}."
+                    "parameterized RX, RY, RZ, RXX, RYY, and RZZ; got "
+                    f"{gate.name!r}."
                 )
             if name not in differentiable_gates and any(
                 isinstance(parameter, (Parameter, ParameterExpression))
                 for parameter in gate.params
             ):
                 raise ValueError(
-                    "Only RX, RY, and RZ may contain symbolic parameters in an "
-                    "adjoint objective."
+                    "Only RX, RY, RZ, RXX, RYY, and RZZ may contain symbolic "
+                    "parameters in an adjoint objective."
                 )
             for value in gate.params:
                 _validate_finite_gate_parameter(gate.name, value)

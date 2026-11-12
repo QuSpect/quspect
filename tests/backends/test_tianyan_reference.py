@@ -118,6 +118,17 @@ def _cases() -> dict[str, QuantumCircuit]:
             .measure([0, 1, 2, 3], [2, 0, 3, 1])
         ),
     )
+    add(
+        "pauli_rotations",
+        lambda c: (
+            c.h(0)
+            .ry(0.9, 1)
+            .rxx(0.4, 0, 1)
+            .ryy(-0.7, 1, 2)
+            .rzz(1.1, 2, 0)
+            .measure([0, 1, 2], [0, 1, 2])
+        ),
+    )
     return cases
 
 

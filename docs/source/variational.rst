@@ -169,10 +169,12 @@ Current adjoint engine scope
 
 The adjoint engine performs exact full-state-vector differentiation in C++.
 It is intended for noiseless expectation objectives with real Hermitian Pauli
-Hamiltonians.  Symbolic ``RX``, ``RY``, and ``RZ`` angles may be affine
-expressions and may share parameters.  Measurements and noise operations are
-not part of a differentiable objective.  Use the regular simulation APIs for
-sampling and measurement workflows.
+Hamiltonians.  Symbolic ``RX``, ``RY``, ``RZ``, ``RXX``, ``RYY``, and ``RZZ``
+angles may be affine expressions and may share parameters; other symbolic
+gates (controlled rotations, ``U3``, ...) are lowered to these rotations
+first.  Measurements and noise operations are not part of a differentiable
+objective.  Use the regular simulation APIs for sampling and measurement
+workflows.
 
 The engine precision is chosen independently from the problem description:
 
@@ -190,9 +192,10 @@ Shot-based and hardware objectives
 :class:`~quspect.variational.SamplingEngine` lowers each Pauli observable into
 measurement circuits.  Qubit-wise commuting terms share a measurement basis;
 identity terms are exact constants.  Gradients use local parameter shifts for
-each symbolic ``RX``, ``RY``, or ``RZ`` occurrence, followed by the affine
-chain rule.  This remains correct when one parameter appears in several gates
-or a gate angle is an expression such as ``2 * theta - phi``.
+each symbolic ``RX``, ``RY``, ``RZ``, ``RXX``, ``RYY``, or ``RZZ`` occurrence,
+followed by the affine chain rule.  This remains correct when one parameter
+appears in several gates or a gate angle is an expression such as
+``2 * theta - phi``.
 
 The same H2-style objective can be evaluated through the local sampler:
 
@@ -262,6 +265,7 @@ receipt.  Store it in a trusted location: the fingerprint prevents accidental
 misattachment, but it is not intended to authenticate JSON modified by an
 untrusted party.
 
-The current sampled gradient rules cover symbolic ``RX``, ``RY``, and ``RZ``.
-Symbolic controlled rotations and symbolic observable coefficients are
+The current sampled gradient rules cover symbolic ``RX``, ``RY``, ``RZ``,
+``RXX``, ``RYY``, and ``RZZ``; other symbolic gates such as controlled
+rotations are lowered to them first.  Symbolic observable coefficients are
 rejected explicitly rather than evaluated with an invalid two-point rule.

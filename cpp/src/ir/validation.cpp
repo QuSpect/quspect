@@ -20,15 +20,15 @@ namespace {
 /// 已知的 named gate 名称（与 decoder 保持一致）
 bool IsKnownGate(const std::string& name) {
     static const std::vector<std::string> known = {
-        "x",  "y",  "z",    "h",  "s",    "sdg", "t",   "tdg",   "rx",      "ry",
-        "rz", "cx", "cnot", "cz", "swap", "id",  "ccx", "ccnot", "barrier",
+        "x",  "y",    "z",  "h",    "s",  "sdg", "t",     "tdg", "rx",  "ry",  "rz",
+        "cx", "cnot", "cz", "swap", "id", "ccx", "ccnot", "rxx", "ryy", "rzz", "barrier",
     };
     return std::find(known.begin(), known.end(), name) != known.end();
 }
 
 /// 参数化门所需的参数个数
 int ExpectedParamCount(const std::string& name) {
-    if (name == "rx" || name == "ry" || name == "rz")
+    if (name == "rx" || name == "ry" || name == "rz" || name == "rxx" || name == "ryy" || name == "rzz")
         return 1;
     return 0;
 }
@@ -37,7 +37,8 @@ int ExpectedParamCount(const std::string& name) {
 int ExpectedQubitCount(const std::string& name) {
     if (name == "ccx" || name == "ccnot")
         return 3;
-    if (name == "cx" || name == "cnot" || name == "cz" || name == "swap")
+    if (name == "cx" || name == "cnot" || name == "cz" || name == "swap" || name == "rxx" || name == "ryy"
+        || name == "rzz")
         return 2;
     return 1;
 }

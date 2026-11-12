@@ -333,7 +333,7 @@ constexpr NativeGate kNativeGates[] = {
     {"u1", OpKind::kP, 1, 1},     {"u2", OpKind::kU2, 2, 1},     {"u3", OpKind::kU3, 3, 1},
     {"u", OpKind::kU3, 3, 1},     {"crx", OpKind::kCRX, 1, 2},   {"cry", OpKind::kCRY, 1, 2},
     {"crz", OpKind::kCRZ, 1, 2},  {"cp", OpKind::kCP, 1, 2},     {"cu1", OpKind::kCP, 1, 2},
-    {"cu3", OpKind::kCU3, 3, 2},
+    {"cu3", OpKind::kCU3, 3, 2},  {"rxx", OpKind::kRXX, 1, 2},   {"rzz", OpKind::kRZZ, 1, 2},
 };
 
 struct Register {

@@ -26,8 +26,11 @@ from quspect.gates.parameterized import (
     CRZ,
     CU3,
     RX,
+    RXX,
     RY,
+    RYY,
     RZ,
+    RZZ,
     U1,
     U2,
     U3,
@@ -553,6 +556,54 @@ class QuantumCircuit:
             "cu3", 2, _coerce_param(theta), _coerce_param(phi), _coerce_param(lam)
         )
         return self.append(gate, (control, target))
+
+    def rxx(self, theta: ParamValue, qubit1: int, qubit2: int) -> QuantumCircuit:
+        """Apply an XX rotation ``exp(-i * theta/2 * X⊗X)``.
+
+        The gate is symmetric in its two qubits.
+
+        Args:
+            theta: Rotation angle in radians (float or Parameter).
+            qubit1: First qubit index.
+            qubit2: Second qubit index.
+
+        Returns:
+            Self, for method chaining.
+        """
+        gate = _make_param_gate("rxx", 2, _coerce_param(theta))
+        return self.append(gate, (qubit1, qubit2))
+
+    def ryy(self, theta: ParamValue, qubit1: int, qubit2: int) -> QuantumCircuit:
+        """Apply a YY rotation ``exp(-i * theta/2 * Y⊗Y)``.
+
+        The gate is symmetric in its two qubits.
+
+        Args:
+            theta: Rotation angle in radians (float or Parameter).
+            qubit1: First qubit index.
+            qubit2: Second qubit index.
+
+        Returns:
+            Self, for method chaining.
+        """
+        gate = _make_param_gate("ryy", 2, _coerce_param(theta))
+        return self.append(gate, (qubit1, qubit2))
+
+    def rzz(self, theta: ParamValue, qubit1: int, qubit2: int) -> QuantumCircuit:
+        """Apply a ZZ rotation ``exp(-i * theta/2 * Z⊗Z)``.
+
+        The gate is diagonal and symmetric in its two qubits.
+
+        Args:
+            theta: Rotation angle in radians (float or Parameter).
+            qubit1: First qubit index.
+            qubit2: Second qubit index.
+
+        Returns:
+            Self, for method chaining.
+        """
+        gate = _make_param_gate("rzz", 2, _coerce_param(theta))
+        return self.append(gate, (qubit1, qubit2))
 
     # ------------------------------------------------------------------
     # Three-qubit gates
@@ -1388,7 +1439,8 @@ _CHANNEL_BASE_FIELDS = frozenset({"name", "num_qubits", "params", "label"})
 
 #: Parameterized gate templates by name (used to keep display labels).
 _PARAM_TEMPLATES: dict[str, Gate] = {
-    gate.name: gate for gate in (RX, RY, RZ, P, U1, U2, U3, CRX, CRY, CRZ, CP, CU3)
+    gate.name: gate
+    for gate in (RX, RY, RZ, P, U1, U2, U3, CRX, CRY, CRZ, CP, CU3, RXX, RYY, RZZ)
 }
 
 

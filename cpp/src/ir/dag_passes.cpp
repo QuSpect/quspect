@@ -20,8 +20,8 @@ struct NameTable {
     std::unordered_map<std::string, std::int32_t> ids;
     NameTable() {
         static const char* const kFixed[kNumFixedGateNames] = {
-            "id", "h",  "x",  "y",  "z",  "s",  "sdg", "t",    "tdg", "rx",  "ry", "rz",
-            "p",  "u1", "u2", "u3", "cx", "cz", "swap", "crx", "cry", "crz", "cp"};
+            "id", "h",  "x",  "y",  "z",  "s",    "sdg", "t",   "tdg", "rx", "ry",  "rz",  "p",
+            "u1", "u2", "u3", "cx", "cz", "swap", "crx", "cry", "crz", "cp", "rxx", "ryy", "rzz"};
         for (std::int32_t i = 0; i < kNumFixedGateNames; ++i) {
             ids.emplace(kFixed[i], i);
         }
@@ -65,10 +65,11 @@ constexpr std::uint32_t kSelfInverse =
     Bit(kNameH) | Bit(kNameX) | Bit(kNameY) | Bit(kNameZ) | Bit(kNameCx) | Bit(kNameCz) | Bit(kNameSwap) | Bit(kNameId);
 // gate_cancellation.ROTATION_FAMILIES
 constexpr std::uint32_t kCancelRotations = Bit(kNameRx) | Bit(kNameRy) | Bit(kNameRz) | Bit(kNameP) | Bit(kNameCrx)
-                                           | Bit(kNameCry) | Bit(kNameCrz) | Bit(kNameCp);
+                                           | Bit(kNameCry) | Bit(kNameCrz) | Bit(kNameCp) | Bit(kNameRxx)
+                                           | Bit(kNameRyy) | Bit(kNameRzz);
 // commutation.Z_FAMILY / X_FAMILY / CNOT_LIKE
 constexpr std::uint32_t kZFamily = Bit(kNameZ) | Bit(kNameS) | Bit(kNameSdg) | Bit(kNameT) | Bit(kNameTdg)
-                                   | Bit(kNameRz) | Bit(kNameP) | Bit(kNameCz);
+                                   | Bit(kNameRz) | Bit(kNameP) | Bit(kNameCz) | Bit(kNameRzz);
 constexpr std::uint32_t kXFamily = Bit(kNameX) | Bit(kNameRx);
 constexpr std::uint32_t kCnotLike = Bit(kNameCx) | Bit(kNameCz);
 // single_qubit_fusion.SINGLE_QUBIT_GATES

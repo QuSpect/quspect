@@ -448,3 +448,40 @@ def _sampling_result() -> SimulationResult:
         num_qubits=1,
         num_clbits=1,
     )
+
+
+def test_symbolic_pauli_pair_rotations_are_one_shift_occurrence_each() -> None:
+    theta = Parameter("theta")
+    phi = Parameter("phi")
+    circuit = QuantumCircuit().h(0).h(1).ry(0.4, 2)
+    circuit.rxx(theta, 0, 1).ryy(phi - theta, 1, 2).rzz(2 * phi, 2, 0)
+    objective = ObservableObjective(
+        circuit, {"z": QubitOperator.from_pauli_string("ZZZ")}
+    )
+    plan = _compile_plan(objective, grouping="qwc")
+    assert [o.gate_name for o in plan.occurrences] == ["rxx", "ryy", "rzz"]
+    prepared = SamplingEngine(Simulator()).compile(objective)
+    assert prepared.num_experiments_per_point == 1 + 2 * 3
+
+
+def test_sampled_pauli_pair_gradient_agrees_with_adjoint_engine() -> None:
+    theta = Parameter("theta")
+    phi = Parameter("phi")
+    circuit = QuantumCircuit().h(0).ry(0.9, 1).rx(-0.4, 2)
+    circuit.rxx(theta, 0, 1).ryy(0.5 * phi + theta, 1, 2).rzz(phi, 2, 0)
+    objective = ObservableObjective(
+        circuit,
+        {
+            "zz": QubitOperator.from_pauli_string("ZZI"),
+            "x": QubitOperator.from_pauli_string("IIX"),
+        },
+    )
+    point = {theta: 0.71, phi: -0.38}
+    exact = AdjointEngine().compile(objective).evaluate(point)
+    observed = (
+        SamplingEngine(Simulator(seed=29), shots=16384)
+        .compile(objective)
+        .evaluate(point)
+    )
+    assert observed.values == pytest.approx(exact.values, abs=0.035)
+    assert observed.jacobian == pytest.approx(exact.jacobian, abs=0.045)

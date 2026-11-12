@@ -48,13 +48,17 @@ enum class GateKind {
     kCz,
     kSwap,
     kCcnot,
+    // exp(−i·θ/2·P⊗P)，P = X / Y / Z
+    kRxx,
+    kRyy,
+    kRzz,
 };
 
 struct CompiledGate {
     GateKind kind = GateKind::kId;
     std::array<uint32_t, 3> qubits{};
     uint32_t num_qubits = 0;
-    // For rotations: intrinsic angle = angle_constant + sum(coeff * value[index]).
+    // For rotations (one-qubit and P⊗P): intrinsic angle = angle_constant + sum(coeff * value[index]).
     double angle_constant = 0.0;
     std::vector<std::pair<std::size_t, double>> jacobian;
 };
@@ -82,6 +86,15 @@ struct PreparedData {
 
 bool IsRotation(GateKind kind) {
     return kind == GateKind::kRx || kind == GateKind::kRy || kind == GateKind::kRz;
+}
+
+bool IsPauliPairRotation(GateKind kind) {
+    return kind == GateKind::kRxx || kind == GateKind::kRyy || kind == GateKind::kRzz;
+}
+
+// 带一个角度参数的门（单比特旋转与 P⊗P 旋转）
+bool HasAngle(GateKind kind) {
+    return IsRotation(kind) || IsPauliPairRotation(kind);
 }
 
 GateKind ParseGateKind(const std::string& name) {
@@ -133,6 +146,15 @@ GateKind ParseGateKind(const std::string& name) {
     if (name == "ccx" || name == "ccnot") {
         return GateKind::kCcnot;
     }
+    if (name == "rxx") {
+        return GateKind::kRxx;
+    }
+    if (name == "ryy") {
+        return GateKind::kRyy;
+    }
+    if (name == "rzz") {
+        return GateKind::kRzz;
+    }
     throw std::invalid_argument("AdjointGradientExecutor: unsupported named gate '" + name + "'");
 }
 
@@ -141,6 +163,9 @@ uint32_t ExpectedQubitCount(GateKind kind) {
         case GateKind::kCnot:
         case GateKind::kCz:
         case GateKind::kSwap:
+        case GateKind::kRxx:
+        case GateKind::kRyy:
+        case GateKind::kRzz:
             return 2;
         case GateKind::kCcnot:
             return 3;
@@ -214,7 +239,7 @@ CompiledGate CompileNamedGate(const runtime::GateOperation& gate, uint32_t num_q
     compiled.num_qubits = static_cast<uint32_t>(gate.qubits.size());
     std::copy(gate.qubits.begin(), gate.qubits.end(), compiled.qubits.begin());
 
-    if (!IsRotation(compiled.kind)) {
+    if (!HasAngle(compiled.kind)) {
         if (!gate.parameter_expressions.empty() || !gate.params_f64.empty() || !gate.params_f32.empty()) {
             throw std::invalid_argument("AdjointGradientExecutor: fixed gate '" + gate.name
                                         + "' cannot have parameters");
@@ -430,6 +455,31 @@ void ApplyRotation(runtime::StateVector<FP>& state, const kernels::KernelDispatc
     }
 }
 
+// exp(−i·angle/2·P⊗P)：rzz 用对角内核，rxx / ryy 用两比特稠密内核（矩阵对两个比特对称，
+// 内核的局部比特序不影响结果；Y⊗Y 的 |00⟩↔|11⟩ 元为 −1）。
+template <typename FP>
+void ApplyPauliPairRotation(runtime::StateVector<FP>& state, const kernels::KernelDispatchTable<FP>& table,
+                            GateKind kind, const std::array<uint32_t, 3>& qubits, double angle) {
+    using Complex = std::complex<FP>;
+    const FP half_angle = static_cast<FP>(angle * 0.5);
+    const FP cosine = std::cos(half_angle);
+    const FP sine = std::sin(half_angle);
+    if (kind == GateKind::kRzz) {
+        const Complex even(cosine, -sine);
+        const Complex odd(cosine, sine);
+        const Complex diag[4] = {even, odd, odd, even};
+        table.diagonal_k(state.data(), state.dim(), qubits.data(), 2, diag);
+        return;
+    }
+    const Complex zero(0, 0);
+    const Complex on(cosine, 0);
+    const Complex flip(0, -sine);
+    const Complex corner(0, kind == GateKind::kRxx ? -sine : sine);
+    const Complex matrix[16] = {on,   zero, zero, corner, zero,   on,   flip, zero,
+                                zero, flip, on,   zero,   corner, zero, zero, on};
+    table.dense_k(state.data(), state.dim(), qubits.data(), 2, matrix);
+}
+
 template <typename FP>
 void ApplyGate(runtime::StateVector<FP>& state, const kernels::KernelDispatchTable<FP>& table, const CompiledGate& gate,
                double angle, bool dagger) {
@@ -483,6 +533,11 @@ void ApplyGate(runtime::StateVector<FP>& state, const kernels::KernelDispatchTab
             table.cnot(state.data(), state.dim(), gate.qubits[2], control_mask, control_mask, nullptr);
             break;
         }
+        case GateKind::kRxx:
+        case GateKind::kRyy:
+        case GateKind::kRzz:
+            ApplyPauliPairRotation(state, table, gate.kind, gate.qubits, dagger ? -angle : angle);
+            break;
     }
 }
 
@@ -603,11 +658,40 @@ std::complex<double> ExpectRotationDaggerDerivative(const runtime::StateVector<F
     return {acc[0], acc[1]};
 }
 
+// P⊗P 旋转 U = exp(−i·θ/2·P⊗P) 的导数为 dU/dθ = −i/2·P⊗P·U，故
+// 2·Re⟨λ_k|dU|φ_{k−1}⟩ = Im⟨λ_k|P⊗P|φ_k⟩（φ_k、λ_k 为该门之后的原态与伴随态）。
+// P⊗P|b⟩ = sign·(±1)^{parity(b & phase)}|b ^ flip⟩，系数都是实数（Y⊗Y 的 i² = −1）。
+template <typename FP>
+double PauliPairGradient(const runtime::StateVector<FP>& primal, const runtime::StateVector<FP>& costate,
+                         const CompiledGate& gate) {
+    const uint64_t pair = (1ULL << gate.qubits[0]) | (1ULL << gate.qubits[1]);
+    const uint64_t flip_mask = gate.kind == GateKind::kRzz ? 0 : pair;
+    const uint64_t phase_mask = gate.kind == GateKind::kRxx ? 0 : pair;
+    const double sign = gate.kind == GateKind::kRyy ? -1.0 : 1.0;
+    const auto* primal_data = primal.data();
+    const auto* costate_data = costate.data();
+    const auto acc = common::BlockedReduce<1>(
+        static_cast<int64_t>(primal.dim()), common::ThreadsForDim(primal.dim()),
+        [&](int64_t begin, int64_t end, double* partial) {
+            double im = 0.0;
+            for (uint64_t basis = static_cast<uint64_t>(begin); basis < static_cast<uint64_t>(end); ++basis) {
+                const auto& lambda = costate_data[basis ^ flip_mask];
+                const auto& phi = primal_data[basis];
+                // Im(conj(λ) · φ)
+                const double term = static_cast<double>(lambda.real()) * static_cast<double>(phi.imag())
+                                    - static_cast<double>(lambda.imag()) * static_cast<double>(phi.real());
+                im += common::Parity64(basis & phase_mask) ? -term : term;
+            }
+            partial[0] += im;
+        });
+    return sign * acc[0];
+}
+
 std::vector<double> BindAngles(const PreparedData& prepared, const std::vector<double>& parameter_values) {
     std::vector<double> angles(prepared.tape.size(), 0.0);
     for (std::size_t gate_index = 0; gate_index < prepared.tape.size(); ++gate_index) {
         const auto& gate = prepared.tape[gate_index];
-        if (!IsRotation(gate.kind)) {
+        if (!HasAngle(gate.kind)) {
             continue;
         }
         double angle = gate.angle_constant;
@@ -649,6 +733,15 @@ GradientResult RunPreparedTyped(const PreparedData& prepared,
     for (std::size_t reverse_index = prepared.tape.size(); reverse_index-- > 0;) {
         const auto& gate = prepared.tape[reverse_index];
         const double angle = angles[reverse_index];
+        if (IsPauliPairRotation(gate.kind) && !gate.jacobian.empty()) {
+            // 在原态退回之前求导：此时 primal = φ_k，costates = λ_k
+            for (std::size_t hamiltonian_index = 0; hamiltonian_index < costates.size(); ++hamiltonian_index) {
+                const double intrinsic_gradient = PauliPairGradient(primal, costates[hamiltonian_index], gate);
+                for (const auto& [parameter_index, coefficient] : gate.jacobian) {
+                    result.gradients[hamiltonian_index][parameter_index] += coefficient * intrinsic_gradient;
+                }
+            }
+        }
         ApplyGate(primal, table, gate, angle, true);
 
         if (IsRotation(gate.kind) && !gate.jacobian.empty()) {

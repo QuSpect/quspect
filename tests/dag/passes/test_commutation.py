@@ -241,3 +241,18 @@ class TestCommutationPreservesCorrectness:
         actual = Simulator().statevector(optimized)
 
         np.testing.assert_allclose(actual, expected, atol=1e-12)
+
+    def test_rzz_commutes_with_z_rotations_and_cz(self) -> None:
+        """RZZ is diagonal: an RZ pair around it (and a CZ) cancels."""
+        from quspect.dag.passes import PassManager
+
+        circ = QuantumCircuit().h(0).h(1)
+        circ.rz(0.3, 0).rzz(0.5, 0, 1).cz(1, 0).rz(-0.3, 0)
+        expected = Simulator().statevector(circ)
+        pm = PassManager([CommutationAnalysis(), GateCancellation()])
+        optimized = DAGToCircuitCompiler.compile(pm.run(circ.to_dag()))
+        names = [i.gate.name for i in optimized if i.gate is not None]
+        assert names.count("rz") == 0 and names.count("rzz") == 1
+        np.testing.assert_allclose(
+            Simulator().statevector(optimized), expected, atol=1e-12
+        )

@@ -27,8 +27,11 @@ from quspect.gates.parameterized import (
     CRZ,
     CU3,
     RX,
+    RXX,
     RY,
+    RYY,
     RZ,
+    RZZ,
     U1,
     U2,
     U3,
@@ -100,6 +103,9 @@ class TestTemplateMetadata:
             (CRZ, "crz", 2),
             (CP, "cp", 2),
             (CU3, "cu3", 2),
+            (RXX, "rxx", 2),
+            (RYY, "ryy", 2),
+            (RZZ, "rzz", 2),
         ],
     )
     def test_template_metadata(
@@ -115,7 +121,7 @@ class TestTemplateMetadata:
         )
 
     def test_all_templates_count(self) -> None:
-        assert len(ALL_PARAMETERIZED) == 12
+        assert len(ALL_PARAMETERIZED) == 15
 
 
 # =============================================================================
@@ -540,6 +546,75 @@ class TestUnitarityParameterized:
 
 
 # =============================================================================
+# Two-qubit Pauli rotations
+# =============================================================================
+
+_PAULI = {
+    "x": np.array([[0, 1], [1, 0]], dtype=complex),
+    "y": np.array([[0, -1j], [1j, 0]], dtype=complex),
+    "z": np.array([[1, 0], [0, -1]], dtype=complex),
+}
+_SWAP_MATRIX = np.eye(4, dtype=complex)[[0, 2, 1, 3]]
+
+
+class TestPauliPairRotations:
+    """``rxx`` / ``ryy`` / ``rzz`` are ``exp(-i θ/2 P⊗P)`` (qiskit's convention)."""
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    @pytest.mark.parametrize("theta", THETA_VALUES)
+    def test_matches_the_exponential(self, template: Gate, theta: float) -> None:
+        from scipy.linalg import expm
+
+        pauli = _PAULI[template.name[1]]
+        expected = expm(-0.5j * theta * np.kron(pauli, pauli))
+        m = gate_matrix(template.with_params(theta))
+        np.testing.assert_allclose(m, expected, atol=1e-14)
+        assert is_unitary(m)
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    def test_symmetric_in_its_qubits(self, template: Gate) -> None:
+        m = gate_matrix(template.with_params(0.71))
+        np.testing.assert_array_equal(_SWAP_MATRIX @ m @ _SWAP_MATRIX, m)
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    def test_pi_is_minus_i_times_the_pauli_pair(self, template: Gate) -> None:
+        pauli = _PAULI[template.name[1]]
+        m = gate_matrix(template.with_params(math.pi))
+        np.testing.assert_allclose(m, -1j * np.kron(pauli, pauli), atol=1e-15)
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    def test_negative_angle_is_the_inverse(self, template: Gate) -> None:
+        a = gate_matrix(template.with_params(0.4))
+        b = gate_matrix(template.with_params(-0.4))
+        np.testing.assert_allclose(a @ b, np.eye(4), atol=1e-15)
+
+    def test_rzz_is_diagonal_with_parity_phases(self) -> None:
+        theta = 0.9
+        m = gate_matrix(RZZ.with_params(theta))
+        even, odd = np.exp(-0.5j * theta), np.exp(0.5j * theta)
+        np.testing.assert_allclose(m, np.diag([even, odd, odd, even]), atol=1e-15)
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    @pytest.mark.parametrize("theta", [0.3, -2.25, 7.5])
+    def test_native_and_python_formulas_agree_bitwise(
+        self, template: Gate, theta: float
+    ) -> None:
+        from quspect.gates._matrix_utils import _native_gate_matrix, _pauli_pair_matrix
+
+        native = _native_gate_matrix()
+        if native is None:
+            pytest.skip("extension module not built")
+        got = native(template.name, [theta])
+        ref = _pauli_pair_matrix(template.name[1], theta)
+        np.testing.assert_array_equal(got, ref)
+
+    @pytest.mark.parametrize("template", [RXX, RYY, RZZ])
+    def test_without_params_raises(self, template: Gate) -> None:
+        with pytest.raises(ValueError, match="requires parameters"):
+            gate_matrix(template)
+
+
+# =============================================================================
 # Matrix dimensions
 # =============================================================================
 
@@ -563,6 +638,9 @@ class TestParameterizedMatrixDimensions:
             "crz": 1,
             "cp": 1,
             "cu3": 3,
+            "rxx": 1,
+            "ryy": 1,
+            "rzz": 1,
         }[template.name]
         params = tuple(float(i + 1) for i in range(num_params))
         g = template.with_params(*params)
@@ -720,6 +798,9 @@ class TestParamValidationRegression:
             ("crz", 2, 2),
             ("cp", 2, 2),
             ("cu3", 2, 4),
+            ("rxx", 2, 2),
+            ("ryy", 2, 2),
+            ("rzz", 2, 2),
         ],
     )
     def test_gate_matrix_rejects_extra_params(

@@ -189,6 +189,9 @@ GATE_SPECS: dict[str, GateSpec] = {
         _spec("crz", 2, 1, qlib.CRZGate),
         _spec("cp", 2, 1, qlib.CPhaseGate),
         _spec("cu3", 2, 3, lambda th, phi, lam: qlib.CUGate(th, phi, lam, 0.0)),
+        _spec("rxx", 2, 1, qlib.RXXGate),
+        _spec("ryy", 2, 1, qlib.RYYGate),
+        _spec("rzz", 2, 1, qlib.RZZGate),
     ]
 }
 """All gates quspect supports, keyed by quspect gate name.

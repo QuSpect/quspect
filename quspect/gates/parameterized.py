@@ -61,6 +61,15 @@ CP = Gate(name="cp", num_qubits=2, label="CP")
 CU3 = Gate(name="cu3", num_qubits=2, label="CU3")
 """Controlled-U3 gate template. Requires 3 params: ``theta``, ``phi``, ``lambda``."""
 
+RXX = Gate(name="rxx", num_qubits=2, label="RXX")
+"""XX rotation ``exp(-i * theta/2 * X⊗X)``. Requires 1 parameter: ``theta``."""
+
+RYY = Gate(name="ryy", num_qubits=2, label="RYY")
+"""YY rotation ``exp(-i * theta/2 * Y⊗Y)``. Requires 1 parameter: ``theta``."""
+
+RZZ = Gate(name="rzz", num_qubits=2, label="RZZ")
+"""ZZ rotation ``exp(-i * theta/2 * Z⊗Z)``. Requires 1 parameter: ``theta``."""
+
 # =============================================================================
 # Convenience
 # =============================================================================
@@ -78,5 +87,8 @@ ALL_PARAMETERIZED: list[Gate] = [
     CRZ,
     CP,
     CU3,
+    RXX,
+    RYY,
+    RZZ,
 ]
 """All pre-defined parameterized gate template instances."""
