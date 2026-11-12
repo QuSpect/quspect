@@ -147,3 +147,109 @@ def test_synthesis_drops_rotations_below_angle_tolerance() -> None:
     """Rotations far below the 1e-9 angle tolerance are still removed."""
     m = _seq_matrix([H, RZ.with_params(1e-13), H])
     assert synthesize_one_qubit(m, BASIS) == []
+
+
+# --- Bases without a Z rotation, and the tolerance boundary ------------------
+
+
+def _haar_unitary(rng: np.random.Generator) -> np.ndarray:
+    raw = rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2))
+    q, r = np.linalg.qr(raw)
+    return np.asarray(q * (np.diag(r) / np.abs(np.diag(r))), dtype=complex)
+
+
+def _special_unitaries() -> list[np.ndarray]:
+    out = [gate_matrix(g) for g in (H, S, T, X)]
+    for angle in (0.3, -2.0, math.pi / 4, math.pi, 1e-9, -1e-9, 1e-8, 3e-10):
+        out.append(gate_matrix(RZ.with_params(angle)))
+        out.append(gate_matrix(RX.with_params(angle)))
+        out.append(gate_matrix(X) @ gate_matrix(RZ.with_params(angle)))
+        out.append(gate_matrix(U3.with_params(math.pi / 2, angle, 0.4)))
+        out.append(gate_matrix(U3.with_params(angle, 0.0, 0.0)))
+    return [np.asarray(m, dtype=complex) for m in out]
+
+
+@pytest.mark.parametrize(
+    ("basis", "longest"),
+    [
+        ({"u3"}, 1),
+        ({"u3", "h"}, 1),
+        ({"rx", "ry"}, 3),
+        ({"rx", "ry", "x"}, 3),
+        ({"u2", "u1"}, 2),
+        ({"u2"}, 2),
+    ],
+    ids=lambda v: "-".join(sorted(v)) if isinstance(v, set) else str(v),
+)
+def test_bases_without_z_rotation_express_every_unitary(
+    basis: set[str], longest: int
+) -> None:
+    """``{u3}``, ``{rx, ry}`` and ``{u2}`` are universal, diagonal runs included."""
+    rng = np.random.default_rng(11)
+    for m in [*_special_unitaries(), *(_haar_unitary(rng) for _ in range(200))]:
+        seq = synthesize_one_qubit(m, basis)
+        assert seq is not None
+        assert len(seq) <= longest
+        assert all(g.name in basis for g in seq)
+        _assert_equiv(_seq_matrix(seq), m)
+
+
+@pytest.mark.parametrize("gate", [S, T, RZ.with_params(0.3)])
+def test_u3_only_basis_expresses_diagonal_gates(gate: object) -> None:
+    seq = synthesize_one_qubit(gate_matrix(gate), {"u3"})  # type: ignore[arg-type]
+    assert seq is not None and [g.name for g in seq] == ["u3"]
+    _assert_equiv(_seq_matrix(seq), gate_matrix(gate))  # type: ignore[arg-type]
+
+
+def test_xyx_form_is_short_for_axis_rotations() -> None:
+    basis = {"rx", "ry"}
+    for gate in (RX.with_params(0.7), U3.with_params(0.7, 0.0, 0.0)):
+        seq = synthesize_one_qubit(gate_matrix(gate), basis)
+        assert seq is not None and len(seq) == 1
+    seq = synthesize_one_qubit(gate_matrix(H), basis)
+    assert seq is not None and len(seq) == 2  # H ∝ RY(π/2)·RX(π)
+
+
+@pytest.mark.parametrize("eps", [1e-9, -1e-9, 9.5e-10, 1.05e-9])
+@pytest.mark.parametrize(
+    "basis", [{"rz", "sx", "x"}, {"ry", "rz"}, {"p", "u3"}, {"h", "rz"}, {"u1", "sx"}]
+)
+def test_rotation_at_the_tolerance_boundary_is_expressible(
+    eps: float, basis: set[str]
+) -> None:
+    """A diagonal run of exactly the tolerance is neither identity nor
+    droppable: the identity test, the angle test and the verification must
+    not disagree (``h; h; rz(1e-9)`` used to be "not expressible")."""
+    m = _seq_matrix([H, H, RZ.with_params(eps)])
+    seq = synthesize_one_qubit(m, basis)
+    assert seq is not None
+    assert len(seq) <= 1
+    _assert_equiv(_seq_matrix(seq), m)
+
+
+@pytest.mark.parametrize(
+    "gates",
+    [
+        # anti-diagonal, the only form of {ry, rz} drops the boundary rotation
+        [RZ.with_params(1e-9), U3.with_params(math.pi, 0.0, 0.0)],
+        # two rotations below the tolerance that add up to more than it
+        [RZ.with_params(6e-10), U3.with_params(0.2, 0.0, 0.0), RZ.with_params(6e-10)],
+        [RZ.with_params(-1e-9), H],
+    ],
+)
+@pytest.mark.parametrize("basis", [{"ry", "rz"}, {"rx", "rz"}, {"rz", "sx", "x"}])
+def test_rotations_near_the_tolerance_never_make_a_run_inexpressible(
+    gates: list,
+    basis: set[str],  # type: ignore[type-arg]
+) -> None:
+    m = _seq_matrix(gates)
+    seq = synthesize_one_qubit(m, basis)
+    assert seq is not None
+    assert all(g.name in basis for g in seq)
+    _assert_equiv(_seq_matrix(seq), m)
+
+
+def test_non_universal_bases_still_return_none() -> None:
+    m = gate_matrix(U3.with_params(0.4, 0.5, 0.6))
+    for basis in ({"h", "t"}, {"rx"}, {"ry", "x"}, {"h", "s", "x"}, {"u1", "x"}):
+        assert synthesize_one_qubit(m, basis) is None

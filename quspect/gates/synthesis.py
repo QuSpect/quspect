@@ -20,6 +20,23 @@ Supported synthesis forms (the shortest valid one is returned):
   (``U3(θ, φ, λ) ∝ RZ(φ+π)·SX·RZ(θ+π)·SX·RZ(λ)``).
 
 Identity rotations are dropped, so every form can come out shorter.
+
+When none of these forms verifies, the *fallback forms* are tried, so that
+every basis with ``u3``, with ``rx`` and ``ry``, or with ``u2`` expresses
+every unitary and a rotation at the tolerance is never "not expressible":
+
+* the forms above with the rotations below the ``1e-9`` angle tolerance
+  kept (down to ``1e-12``): a rotation is dropped by its angle and the
+  result verified entry by entry, and for a net rotation of exactly the
+  tolerance (``h · h · rz(1e-9)``), or several rotations just below it, the
+  two tests disagree;
+* ``u3`` for a diagonal unitary of a basis without a Z rotation (``{u3}``);
+* XYX with ``rx`` and ``ry`` (``rx · ry · rx``, three gates at most);
+* ``u2`` for a half rotation and ``u2 · u2`` in general
+  (``U3(θ, φ, λ) ∝ U2(φ+π/2, θ+π)·U2(0, λ+π/2)``).
+
+The fallback forms never replace a result of the forms above, so the
+output for every unitary those forms already express is unchanged.
 """
 
 from __future__ import annotations
@@ -38,6 +55,11 @@ if TYPE_CHECKING:
 
 #: Absolute tolerance on angles / matrix entries.
 _ATOL: float = 1e-9
+
+#: Angle below which a rotation is dropped by the fallback forms (see the
+#: module docstring): far enough below ``_ATOL`` that the dropped rotations
+#: of one sequence cannot add up to it.
+_KEEP_ATOL: float = 1e-12
 
 _TWO_PI = 2.0 * math.pi
 
@@ -126,7 +148,7 @@ class _Emitter:
     """Emit basis gates for primitive rotations."""
 
     def __init__(self, basis: frozenset[str]) -> None:
-        from quspect.gates.parameterized import RX, RY, RZ, U1, U3, P
+        from quspect.gates.parameterized import RX, RY, RZ, U1, U2, U3, P
         from quspect.gates.standard import SDG, SX, SXDG, TDG, H, S, T, X, Z
 
         self.basis = basis
@@ -160,6 +182,7 @@ class _Emitter:
         self.rx = RX.with_params if "rx" in basis else None
         self.ry = RY.with_params if "ry" in basis else None
         self.u3 = U3.with_params if "u3" in basis else None
+        self.u2 = U2.with_params if "u2" in basis else None
         # Named basis gates in candidate order with their matrices and entry
         # magnitudes (for the exact pre-filter of :func:`_named_match`).
         from quspect.gates._matrix_utils import gate_matrix
@@ -171,10 +194,13 @@ class _Emitter:
                 gm = np.asarray(gate_matrix(g), dtype=complex)
                 self.named.append((g, gm, np.abs(gm).ravel()))
 
-    def rz(self, theta: float) -> list[Gate] | None:
-        """Return gates for ``RZ(theta)`` up to phase, or None."""
+    def rz(self, theta: float, atol: float = _ATOL) -> list[Gate] | None:
+        """Return gates for ``RZ(theta)`` up to phase, or None.
+
+        A rotation by less than ``atol`` is dropped.
+        """
         t = _normalize_angle(theta)
-        if abs(t) < _ATOL or abs(abs(t) - _TWO_PI) < _ATOL:
+        if abs(t) < atol or abs(abs(t) - _TWO_PI) < atol:
             return []
         if self._rz_maker is not None:
             return [self._rz_maker(t)]
@@ -221,11 +247,22 @@ def _named_match(m: np.ndarray, em: _Emitter) -> Gate | None:
     return None
 
 
-def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
-    """Generate candidate gate sequences (circuit order) for ``m``."""
+def _candidates(
+    m: np.ndarray, em: _Emitter, atol: float = _ATOL
+) -> list[list[Gate] | None]:
+    """Generate candidate gate sequences (circuit order) for ``m``.
+
+    Rotations by less than ``atol`` are dropped.  With the default the
+    identity is returned as the only candidate; with a smaller ``atol`` (the
+    fallback, after the empty sequence failed the verification) the other
+    forms are generated for it as well.
+    """
     cands: list[list[Gate] | None] = []
-    if is_identity_up_to_phase(m, 1e-9):
+    if is_identity_up_to_phase(m, 1e-9) and atol == _ATOL:
         return [[]]
+
+    def rz(theta: float) -> list[Gate] | None:
+        return em.rz(theta, atol)
 
     # Single named gate.
     g = _named_match(m, em)
@@ -236,7 +273,7 @@ def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
     u00, u01, u10, u11 = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
     # Diagonal: RZ(arg(u11/u00)).
     if abs(u01) < _ATOL and abs(u10) < _ATOL:
-        cands.append(em.rz(float(np.angle(u11 / u00))))
+        cands.append(rz(float(np.angle(u11 / u00))))
         return cands
 
     if em.u3 is not None:
@@ -246,13 +283,13 @@ def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
     # Anti-diagonal: X then RZ(arg(u10/u01)).
     if abs(u00) < _ATOL and abs(u11) < _ATOL:
         a = float(np.angle(u10 / u01))
-        tail = em.rz(a)
+        tail = rz(a)
         if em.x is not None and tail is not None:
             cands.append([em.x, *tail])
         if em.sx is not None and tail is not None:
             cands.append([em.sx, em.sx, *tail])
         if em.h is not None:
-            mid = em.rz(math.pi)
+            mid = rz(math.pi)
             if mid is not None and tail is not None:
                 cands.append([em.h, *mid, em.h, *tail])
 
@@ -260,14 +297,14 @@ def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
     if em.h is not None and abs(abs(u00) - math.sqrt(0.5)) < 1e-9:
         a = float(np.angle(u10 / u00))
         c = float(np.angle(u01 / u00))
-        first, last = em.rz(c), em.rz(a)
+        first, last = rz(c), rz(a)
         if first is not None and last is not None:
             cands.append([*first, em.h, *last])
 
     theta, phi, lam = _zyz_angles(m)
     # ZYZ: circuit rz(lam), ry(theta), rz(phi).
     if em.ry is not None:
-        first, last = em.rz(lam), em.rz(phi)
+        first, last = rz(lam), rz(phi)
         if first is not None and last is not None:
             cands.append([*first, em.ry(theta), *last])
     # ZXZ: U ∝ RZ(phi + π/2)·RX(theta)·RZ(lam - π/2), and the equivalent
@@ -277,13 +314,13 @@ def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
         (lam + math.pi / 2.0, -theta, phi - math.pi / 2.0),
     ]
     for c, b, a in zxz:
-        first, last = em.rz(c), em.rz(a)
+        first, last = rz(c), rz(a)
         if first is None or last is None:
             continue
         if em.rx is not None:
             cands.append([*first, em.rx(b), *last])
         if em.h is not None:
-            mid = em.rz(b)
+            mid = rz(b)
             if mid is not None:
                 cands.append([*first, em.h, *mid, em.h, *last])
         # Half rotation with a native √X: RX(±π/2) ∝ SX / SXdg.
@@ -294,9 +331,58 @@ def _candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
     # ZSX: U ∝ RZ(phi + π)·SX·RZ(theta + π)·SX·RZ(lam) (circuit order
     # rz(lam), sx, rz(theta + π), sx, rz(phi + π)).
     if em.sx is not None:
-        first, mid, last = em.rz(lam), em.rz(theta + math.pi), em.rz(phi + math.pi)
+        first, mid, last = rz(lam), rz(theta + math.pi), rz(phi + math.pi)
         if first is not None and mid is not None and last is not None:
             cands.append([*first, em.sx, *mid, em.sx, *last])
+    return cands
+
+
+def _is_zero_rotation(theta: float) -> bool:
+    """Whether a rotation by ``theta`` is dropped by the fallback forms."""
+    t = _normalize_angle(theta)
+    return abs(t) < _KEEP_ATOL or abs(abs(t) - _TWO_PI) < _KEEP_ATOL
+
+
+def _fallback_candidates(m: np.ndarray, em: _Emitter) -> list[list[Gate] | None]:
+    """Candidates for a unitary that none of the candidates of
+    :func:`_candidates` implements (circuit order; see the module docstring)."""
+    # The regular forms with the rotations below the tolerance kept.
+    cands = _candidates(m, em, _KEEP_ATOL)
+
+    theta, phi, lam = _zyz_angles(m)
+    # U3 (the diagonal branch of the regular forms returns before it).
+    if em.u3 is not None:
+        cands.append([em.u3(theta, phi, lam)])
+    # A half rotation is one U2.
+    if em.u2 is not None and abs(theta - math.pi / 2.0) < 1e-9:
+        cands.append([em.u2(phi, lam)])
+    # XYX: with W = H·U·H ∝ RZ(a)·RY(t)·RZ(c) and H·Z·H = X, H·Y·H = -Y:
+    # U ∝ RX(a)·RY(-t)·RX(c) (circuit order rx(c), ry(-t), rx(a)).
+    if em.rx is not None and em.ry is not None:
+        u00, u01, u10, u11 = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
+        s0, d0, s1, d1 = u00 + u01, u00 - u01, u10 + u11, u10 - u11
+        w = 0.5 * np.array([[s0 + s1, d0 + d1], [s0 - s1, d0 - d1]], dtype=complex)
+        t, a, c = _zyz_angles(w)
+        xyx = [em.rx(_normalize_angle(c)), em.ry(-t), em.rx(_normalize_angle(a))]
+        cands.append(
+            [
+                g
+                for g, angle in zip(xyx, (c, t, a), strict=True)
+                if not _is_zero_rotation(angle)
+            ]
+        )
+    # U2·U2: U ∝ RZ(φ+π/2)·RY(π/2)·RZ(θ+π)·RY(π/2)·RZ(λ+π/2), the ZSX form
+    # with SX ∝ RZ(-π/2)·RY(π/2)·RZ(π/2).
+    if em.u2 is not None:
+        cands.append(
+            [
+                em.u2(0.0, _normalize_angle(lam + math.pi / 2.0)),
+                em.u2(
+                    _normalize_angle(phi + math.pi / 2.0),
+                    _normalize_angle(theta + math.pi),
+                ),
+            ]
+        )
     return cands
 
 
@@ -377,8 +463,16 @@ def _native_backend() -> NativeKak | None:
 
 def _synthesize_one_qubit_reference(m: np.ndarray, em: _Emitter) -> list[Gate] | None:
     """Python reference of :func:`_synthesize_one_qubit` for the emitter ``em``."""
+    best = _shortest_valid(_candidates(m, em), m)
+    if best is None:
+        best = _shortest_valid(_fallback_candidates(m, em), m)
+    return best
+
+
+def _shortest_valid(cands: list[list[Gate] | None], m: np.ndarray) -> list[Gate] | None:
+    """The shortest candidate that implements ``m`` (the first one on a tie)."""
     best: list[Gate] | None = None
-    for cand in _candidates(m, em):
+    for cand in cands:
         if cand is None:
             continue
         if best is not None and len(cand) >= len(best):

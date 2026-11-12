@@ -219,6 +219,63 @@ def test_plan_basis_rejects_non_universal_single_qubit_sets(native: set[str]) ->
         plan_basis(native)
 
 
+#: Universal single-qubit sets without a Z rotation (``rz`` / ``p`` / ``u1``),
+#: and ``{u2, u1}``: each used to be refused or to fail on some runs.
+_NO_RZ_BASES: dict[str, frozenset[str]] = {
+    "u3": frozenset({"u3"}),
+    "rx_ry": frozenset({"rx", "ry"}),
+    "u2_u1": frozenset({"u2", "u1"}),
+    "u2": frozenset({"u2"}),
+}
+
+
+@pytest.mark.parametrize("one_qubit", sorted(_NO_RZ_BASES))
+def test_plan_basis_accepts_universal_sets_without_rz(one_qubit: str) -> None:
+    native = _NO_RZ_BASES[one_qubit] | {"cz"}
+    plan = plan_basis(native)
+    assert plan.one_qubit == _NO_RZ_BASES[one_qubit]
+
+
+@pytest.mark.parametrize("gate", ["t", "s", "z", "h", "sx"])
+def test_u3_only_target_compiles_single_gates(gate: str) -> None:
+    """``{u3}`` is universal: a diagonal run is ``u3(0, 0, λ)``."""
+    target = CompilationTarget.from_coupling_map(1, [], native_gates={"u3"})
+    circ = getattr(QuantumCircuit(), gate)(0)
+    for level in range(4):
+        result = transpile(circ, target, optimization_level=level)
+        assert [i.gate.name for i in result.circuit if i.gate] == ["u3"]
+        _assert_valid(circ, result, target)
+
+
+def _qft(n: int) -> QuantumCircuit:
+    qc = QuantumCircuit()
+    for t in range(n):
+        qc.h(t)
+        for c in range(t + 1, n):
+            qc.cp(math.pi / 2 ** (c - t), c, t)
+    return qc
+
+
+@pytest.mark.parametrize("one_qubit", sorted(_NO_RZ_BASES))
+@pytest.mark.parametrize("entangler", ["cz", "cx"])
+@pytest.mark.parametrize("level", [0, 1, 2, 3])
+def test_transpile_equivalent_without_rz(
+    one_qubit: str, entangler: str, level: int
+) -> None:
+    native = set(_NO_RZ_BASES[one_qubit]) | {entangler}
+    line = CompilationTarget.from_coupling_map(
+        4, [(0, 1), (1, 2), (2, 3)], native_gates=native
+    )
+    for circ in (
+        QuantumCircuit().cp(0.3, 0, 1),
+        QuantumCircuit().h(0).cx(0, 1),
+        _qft(4),
+        _mixed_circuit(4, 20, level),
+    ):
+        result = transpile(circ, line, optimization_level=level, seed=0)
+        _assert_valid(circ, result, line)
+
+
 def test_transpile_rejects_target_without_entangler() -> None:
     target = CompilationTarget.from_coupling_map(
         2, [(0, 1)], native_gates={"h", "rz", "x"}

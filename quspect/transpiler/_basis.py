@@ -127,7 +127,7 @@ def plan_basis(
         raise ValueError(
             "Target basis cannot express arbitrary single-qubit gates: native "
             f"single-qubit gates {sorted(one_q)}; need e.g. {{rz, h}}, {{rz, sx}}, "
-            "{rz, rx}, {rz, ry} or {u3}."
+            "{rz, rx}, {rz, ry}, {rx, ry}, {u2} or {u3}."
         )
     ent: str | None
     if "cz" in native:

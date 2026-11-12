@@ -20,6 +20,7 @@ namespace {
 constexpr double kPi = 3.141592653589793;  // math.pi / np.pi
 constexpr double kTwoPi = 2.0 * kPi;       // _TWO_PI
 constexpr double kAtol = 1e-9;              // _ATOL
+constexpr double kKeepAtol = 1e-12;         // _KEEP_ATOL
 
 using dm::Abs;
 
@@ -82,10 +83,11 @@ double OneQubitSynthesizer::AngleOfQuotient(const Cx& num, const Cx& den) {
     return Angle(dm::Div(num, den));
 }
 
-std::optional<std::vector<Gate1>> OneQubitSynthesizer::Rz(double theta, const OneQubitBasis& basis) const {
+std::optional<std::vector<Gate1>> OneQubitSynthesizer::Rz(double theta, const OneQubitBasis& basis,
+                                                          double atol) const {
     // _Emitter.rz
     const double t = NormalizeAngle(theta);
-    if (std::fabs(t) < kAtol || std::fabs(std::fabs(t) - kTwoPi) < kAtol) {
+    if (std::fabs(t) < atol || std::fabs(std::fabs(t) - kTwoPi) < atol) {
         return std::vector<Gate1>{};
     }
     if (basis.rz) {
@@ -215,6 +217,11 @@ M2 OneQubitSynthesizer::SequenceMatrix(const std::vector<Gate1>& gates) const {
             case 3:
                 GateMatrix2("ry", &g.p0, 1, &u);
                 break;
+            case 5: {
+                const double p[2] = {g.p0, g.p1};
+                GateMatrix2("u2", p, 2, &u);
+                break;
+            }
             default: {
                 const double p[3] = {g.p0, g.p1, g.p2};
                 GateMatrix2("u3", p, 3, &u);
@@ -227,14 +234,15 @@ M2 OneQubitSynthesizer::SequenceMatrix(const std::vector<Gate1>& gates) const {
 }
 
 std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(const M2& m,
-                                                                               const OneQubitBasis& basis) const {
+                                                                               const OneQubitBasis& basis,
+                                                                               double atol) const {
     std::vector<std::optional<std::vector<Gate1>>> cands;
     const Cx& u00 = m[0];
     const Cx& u01 = m[1];
     const Cx& u10 = m[2];
     const Cx& u11 = m[3];
-    // is_identity_up_to_phase(m, 1e-9)
-    if (Abs(u01) < 1e-9 && Abs(u10) < 1e-9 && Abs(Cx{u00.re - u11.re, u00.im - u11.im}) < 1e-9
+    // is_identity_up_to_phase(m, 1e-9)；atol 小于默认容差时（空序列已验证失败）继续生成其余形式
+    if (atol == kAtol && Abs(u01) < 1e-9 && Abs(u10) < 1e-9 && Abs(Cx{u00.re - u11.re, u00.im - u11.im}) < 1e-9
         && std::fabs(Abs(u00) - 1.0) < 1e-9) {
         cands.emplace_back(std::vector<Gate1>{});
         return cands;
@@ -252,7 +260,7 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     }
     // 对角：RZ(arg(u11/u00))
     if (Abs(u01) < kAtol && Abs(u10) < kAtol) {
-        cands.push_back(Rz(AngleOfQuotient(u11, u00), basis));
+        cands.push_back(Rz(AngleOfQuotient(u11, u00), basis, atol));
         return cands;
     }
     const std::array<double, 3> zyz = ZyzAngles(m);
@@ -265,7 +273,7 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     // 反对角：X 后接 RZ(arg(u10/u01))
     if (Abs(u00) < kAtol && Abs(u11) < kAtol) {
         const double a = AngleOfQuotient(u10, u01);
-        const auto tail = Rz(a, basis);
+        const auto tail = Rz(a, basis, atol);
         if (basis.x && tail) {
             std::vector<Gate1> c{Fixed(kGateX)};
             Append(&c, *tail);
@@ -277,7 +285,7 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
             cands.emplace_back(std::move(c));
         }
         if (basis.h) {
-            const auto mid = Rz(kPi, basis);
+            const auto mid = Rz(kPi, basis, atol);
             if (mid && tail) {
                 std::vector<Gate1> c{Fixed(kGateH)};
                 Append(&c, *mid);
@@ -291,8 +299,8 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     if (basis.h && std::fabs(Abs(u00) - dm::Sqrt(0.5)) < 1e-9) {
         const double a = AngleOfQuotient(u10, u00);
         const double c = AngleOfQuotient(u01, u00);
-        const auto first = Rz(c, basis);
-        const auto last = Rz(a, basis);
+        const auto first = Rz(c, basis, atol);
+        const auto last = Rz(a, basis, atol);
         if (first && last) {
             std::vector<Gate1> cand = *first;
             cand.push_back(Fixed(kGateH));
@@ -302,8 +310,8 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     }
     // ZYZ
     if (basis.ry) {
-        const auto first = Rz(lam, basis);
-        const auto last = Rz(phi, basis);
+        const auto first = Rz(lam, basis, atol);
+        const auto last = Rz(phi, basis, atol);
         if (first && last) {
             std::vector<Gate1> cand = *first;
             cand.push_back(Gate1{3, 0, theta, 0.0, 0.0});
@@ -317,8 +325,8 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
         const double c = row[0];
         const double b = row[1];
         const double a = row[2];
-        const auto first = Rz(c, basis);
-        const auto last = Rz(a, basis);
+        const auto first = Rz(c, basis, atol);
+        const auto last = Rz(a, basis, atol);
         if (!first || !last) {
             continue;
         }
@@ -329,7 +337,7 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
             cands.emplace_back(std::move(cand));
         }
         if (basis.h) {
-            const auto mid = Rz(b, basis);
+            const auto mid = Rz(b, basis, atol);
             if (mid) {
                 std::vector<Gate1> cand = *first;
                 cand.push_back(Fixed(kGateH));
@@ -354,9 +362,9 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     }
     // ZSX：rz(lam), sx, rz(theta + π), sx, rz(phi + π)
     if (basis.sx) {
-        const auto first = Rz(lam, basis);
-        const auto mid = Rz(theta + kPi, basis);
-        const auto last = Rz(phi + kPi, basis);
+        const auto first = Rz(lam, basis, atol);
+        const auto mid = Rz(theta + kPi, basis, atol);
+        const auto last = Rz(phi + kPi, basis, atol);
         if (first && mid && last) {
             std::vector<Gate1> cand = *first;
             cand.push_back(Fixed(kGateSX));
@@ -369,14 +377,65 @@ std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::Candidates(c
     return cands;
 }
 
-std::optional<std::vector<Gate1>> OneQubitSynthesizer::Synthesize(const M2& m, const OneQubitBasis& basis) const {
-    for (const Cx& z : m) {
-        if (!std::isfinite(z.re) || !std::isfinite(z.im)) {
-            throw std::domain_error("non-finite single-qubit matrix");
-        }
+std::vector<std::optional<std::vector<Gate1>>> OneQubitSynthesizer::FallbackCandidates(
+    const M2& m, const OneQubitBasis& basis) const {
+    // _fallback_candidates：先是保留容差以下旋转的常规形式
+    std::vector<std::optional<std::vector<Gate1>>> cands = Candidates(m, basis, kKeepAtol);
+    const Cx& u00 = m[0];
+    const Cx& u01 = m[1];
+    const Cx& u10 = m[2];
+    const Cx& u11 = m[3];
+    const std::array<double, 3> zyz = ZyzAngles(m);
+    const double theta = zyz[0];
+    const double phi = zyz[1];
+    const double lam = zyz[2];
+    // U3（Candidates 的对角分支在它之前返回）
+    if (basis.u3) {
+        cands.emplace_back(std::vector<Gate1>{Gate1{4, 0, theta, phi, lam}});
     }
+    // 半旋转是一个 U2
+    if (basis.u2 && std::fabs(theta - kPi / 2.0) < 1e-9) {
+        cands.emplace_back(std::vector<Gate1>{Gate1{5, 0, phi, lam, 0.0}});
+    }
+    // XYX：W = H·U·H ∝ RZ(a)·RY(t)·RZ(c)，U ∝ RX(a)·RY(−t)·RX(c)（线路顺序 rx(c), ry(−t), rx(a)）
+    if (basis.rx && basis.ry) {
+        const Cx sum0 = dm::Add(u00, u01);
+        const Cx dif0 = dm::Sub(u00, u01);
+        const Cx sum1 = dm::Add(u10, u11);
+        const Cx dif1 = dm::Sub(u10, u11);
+        const auto half = [](const Cx& z) { return Cx{0.5 * z.re, 0.5 * z.im}; };
+        const M2 w{half(dm::Add(sum0, sum1)), half(dm::Add(dif0, dif1)), half(dm::Sub(sum0, sum1)),
+                   half(dm::Sub(dif0, dif1))};
+        const std::array<double, 3> xyx = ZyzAngles(w);
+        const double t = xyx[0];
+        const double a = xyx[1];
+        const double c = xyx[2];
+        const Gate1 gates[3] = {Gate1{2, 0, NormalizeAngle(c), 0.0, 0.0}, Gate1{3, 0, -t, 0.0, 0.0},
+                                Gate1{2, 0, NormalizeAngle(a), 0.0, 0.0}};
+        const double angles[3] = {c, t, a};
+        std::vector<Gate1> cand;
+        for (int i = 0; i < 3; ++i) {
+            // _is_zero_rotation
+            const double n = NormalizeAngle(angles[i]);
+            if (!(std::fabs(n) < kKeepAtol || std::fabs(std::fabs(n) - kTwoPi) < kKeepAtol)) {
+                cand.push_back(gates[i]);
+            }
+        }
+        cands.emplace_back(std::move(cand));
+    }
+    // U2·U2：U ∝ RZ(φ+π/2)·RY(π/2)·RZ(θ+π)·RY(π/2)·RZ(λ+π/2)
+    if (basis.u2) {
+        cands.emplace_back(std::vector<Gate1>{
+            Gate1{5, 0, 0.0, NormalizeAngle(lam + kPi / 2.0), 0.0},
+            Gate1{5, 0, NormalizeAngle(phi + kPi / 2.0), NormalizeAngle(theta + kPi), 0.0}});
+    }
+    return cands;
+}
+
+std::optional<std::vector<Gate1>> OneQubitSynthesizer::ShortestValid(
+    const std::vector<std::optional<std::vector<Gate1>>>& cands, const M2& m) const {
     std::optional<std::vector<Gate1>> best;
-    for (const auto& cand : Candidates(m, basis)) {
+    for (const auto& cand : cands) {
         if (!cand) {
             continue;
         }
@@ -386,6 +445,19 @@ std::optional<std::vector<Gate1>> OneQubitSynthesizer::Synthesize(const M2& m, c
         if (EqualUpToPhase(SequenceMatrix(*cand), m)) {
             best = cand;
         }
+    }
+    return best;
+}
+
+std::optional<std::vector<Gate1>> OneQubitSynthesizer::Synthesize(const M2& m, const OneQubitBasis& basis) const {
+    for (const Cx& z : m) {
+        if (!std::isfinite(z.re) || !std::isfinite(z.im)) {
+            throw std::domain_error("non-finite single-qubit matrix");
+        }
+    }
+    std::optional<std::vector<Gate1>> best = ShortestValid(Candidates(m, basis, kAtol), m);
+    if (!best) {
+        best = ShortestValid(FallbackCandidates(m, basis), m);
     }
     return best;
 }
