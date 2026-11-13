@@ -21,29 +21,36 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
     ``pyqpanda3.qcloud.QCloudJob.cancel()`` sends to a stand-in server, and
     the answer is read the way the SDK reads it.
 
-    Checked against the live service on 12 November 2026, on WK_C180:
+    Checked against the live service on 13 November 2026 (UTC), on WK_C180:
 
-    * Sent 1 to 9 s after submitting a QPU task (three tasks: 0.96 s,
-      1.05 s and 8.9 s): accepted, HTTP 200 with ``success: true``,
-      ``code: 10000``, ``message: "success"``.  Each task reported
-      ``taskState`` ``"35"`` at the next read; the first still did
-      17 minutes later, with no result and no run time.  The third was read
-      before the cancel and reported ``"2"`` until then, so ``"35"`` follows
-      from the cancel.
-    * Sent again to that cancelled task: declined, HTTP 200 with
-      ``success: false``, ``code: 10096`` and the message "Unable to cancel
-      this task. Please refresh and try again.".
+    * Sent to four QPU tasks that were still waiting in the queue (0.96 s,
+      1.05 s, 8.9 s and 47 minutes after submission): accepted every time,
+      HTTP 200 with ``success: true``, ``code: 10000``, ``message:
+      "success"``.  Each task reported ``taskState`` ``"35"`` at the next
+      read; the first still did 17 minutes later, with no result and no run
+      time.  Two were read before the cancel and reported ``"2"`` until
+      then, so ``"35"`` follows from the cancel.
+    * Sent again to a cancelled task: declined, HTTP 200 with ``success:
+      false``, ``code: 10096`` and the message "Unable to cancel this task.
+      Please refresh and try again.".
     * The same request sent by another client 3.4 s after submitting a QPU
       task was declined with that message (its HTTP status was not
-      recorded), and the task completed normally 209 s later.
+      recorded), and the task completed normally about 210 s later.
 
-    So a refused task keeps running, and a task submitted seconds earlier
-    can already be refused.  Not known: which tasks the cloud accepts a
-    cancel for (state ``"2"`` alone does not decide: see above), and whether
-    ``"35"`` is reported in any other situation.  pyqpanda3's documentation
-    (0.5.1) says only that ``cancel()`` returns whether the service accepted
-    the request; it names no cancelled state and no rule for when a cancel
-    is allowed.
+    So a refused task keeps running.  A waiting task reports ``"2"`` (the
+    SDK's COMPUTING) for as long as it queues, 47 minutes in one case, so
+    ``"2"`` does not mean the task is running on the chip.
+
+    Not known: why that one cancel was declined.  A guess, not checked: the
+    cloud declines once it has started the task.  The declined task's
+    ``taskDetail`` carries ``startTime`` and ``pilotTaskId``; the four
+    cancelled ones never had them.  The queue was short then (that task
+    started within seconds of submission) and long later, so no task could
+    be cancelled after its start to check.  Also not known: whether ``"35"``
+    is reported in any other situation.  pyqpanda3's documentation (0.5.1)
+    says only that ``cancel()`` returns whether the service accepted the
+    request; it names no cancelled state and no rule for when a cancel is
+    allowed.
 
 Every request is authenticated with ``Authorization: oqcs_auth=<api key>``.
 Responses wrap their payload as ``{"success", "code", "message", "obj"}``

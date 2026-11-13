@@ -14,7 +14,7 @@ server behaviour recorded on the real cloud (November 2026):
 
 Cancellation (``/oqcs/task/cancelTask.json``): the fake expects the request
 pyqpanda3 0.5.1 sends (``task_mode: 0``, ``{"taskId": id}``) and answers as
-the real cloud did on 12 November 2026 (WK_C180):
+the real cloud did on 13 November 2026 UTC (WK_C180):
 
 * accepted: HTTP 200, ``success: true``, code 10000; the task then reports
   ``taskState`` :data:`LIVE_CANCELLED_STATE` (``FakeCloud.cancelled_state``);

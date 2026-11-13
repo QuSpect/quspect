@@ -30,9 +30,9 @@ _STATUS_MAP: dict[str, JobStatus] = {
 }
 
 # The SDK has no cancelled member, and its documentation names none.  Observed
-# on the live service (12 November 2026, three QPU tasks on WK_C180): after an
-# accepted cancel each task reported "35" at the next read; the first still
-# did 17 minutes later, with no result and no run time.  One task was read
+# on the live service (13 November 2026 UTC, four QPU tasks on WK_C180): after
+# an accepted cancel each task reported "35" at the next read; the first still
+# did 17 minutes later, with no result and no run time.  Two tasks were read
 # before the cancel and reported "2" until then.  Whether "35" is reported in
 # any other situation is not known.
 _CANCELLED_STATE = "35"
@@ -101,21 +101,21 @@ class OriginQJob(CloudJob):
         request and ``False`` when it declined; its answer, with the reason
         for a refusal, is then in :attr:`cancel_response`.
 
-        ``False`` means the task keeps running, so keep tracking it.  The
-        cloud can decline a task submitted seconds earlier: on the live
-        service (12 November 2026, WK_C180) a cancel sent 3.4 s after
-        submission was declined and the task completed normally, while
-        three sent 1 to 9 s after submission were accepted (one of them
-        while the task reported ``taskState`` ``"2"``).  Which tasks the
-        cloud accepts a cancel for is not known, and Origin Quantum's
-        documentation does not say.
+        ``False`` means the task keeps running, so keep tracking it.  On
+        the live service (13 November 2026 UTC, WK_C180) a cancel was
+        accepted for all four tasks that were still waiting in the queue,
+        from 1 s to 47 minutes after submission.  One cancel, sent 3.4 s
+        after submission when the queue was short, was declined and that
+        task completed normally: probably because the cloud had already
+        started it, which has not been checked.  Origin Quantum's
+        documentation does not say when a cancel is allowed.
 
-        ``True`` does not mean the task has stopped.  The three tasks
+        ``True`` does not mean the task has stopped.  The four tasks
         accepted on the live service then reported ``taskState`` ``"35"``,
         which :meth:`status` maps to ``CANCELLED`` and :meth:`result` turns
-        into a ``JobError`` (``error_type="cancelled"``).  Three
-        observations are not a guarantee, so still pass a ``timeout`` to
-        :meth:`result` after cancelling.
+        into a ``JobError`` (``error_type="cancelled"``).  Four observations
+        are not a guarantee, so still pass a ``timeout`` to :meth:`result`
+        after cancelling.
 
         Raises:
             JobError: The request failed (network, HTTP error, rejected key

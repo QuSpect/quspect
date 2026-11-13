@@ -113,7 +113,7 @@ def test_qpu_bit_order_quspect_and_provider_mapping(provider) -> None:
 def test_qpu_cancel_right_after_submission_records_the_clouds_answer(provider) -> None:
     """Submit one small QPU task, cancel it at once, and record what follows.
 
-    On 12 November 2026 (WK_C180) this cancel, sent 0.96 s after submission,
+    On 13 November 2026 UTC (WK_C180) this cancel, sent 0.96 s after submission,
     was accepted (HTTP 200, code 10000) and the task reported ``taskState``
     35 from then on; a cancel another client sent 3.4 s after submission was
     declined and that task completed.  Which tasks the cloud accepts a
