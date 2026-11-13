@@ -7,8 +7,14 @@ directly with the standard library; pyqpanda3 is not required.
 """
 
 from quspect.backends.originq._backend import OriginQBackend
-from quspect.backends.originq._client import OriginQClient
+from quspect.backends.originq._client import CancelResponse, OriginQClient
 from quspect.backends.originq._job import OriginQJob
 from quspect.backends.originq._provider import OriginQProvider
 
-__all__ = ["OriginQProvider", "OriginQBackend", "OriginQJob", "OriginQClient"]
+__all__ = [
+    "OriginQProvider",
+    "OriginQBackend",
+    "OriginQJob",
+    "OriginQClient",
+    "CancelResponse",
+]

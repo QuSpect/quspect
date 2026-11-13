@@ -5,6 +5,8 @@
 * Real QPU: additionally ``QUSPECT_RUN_HARDWARE_TESTS=1`` (and optionally
   ``QUSPECT_ORIGINQ_QPU``, default ``WK_C180_2``).  QPU jobs may queue for
   tens of minutes.
+* Cancellation on a real QPU: additionally ``QUSPECT_RUN_CANCEL_TESTS=1``.
+  Run with ``-s`` to see the record it prints.
 
 The circuits are asymmetric on purpose: a Bell state cannot reveal a
 reversed or permuted bit order.
@@ -12,12 +14,16 @@ reversed or permuted bit order.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 
 import pytest
 
 from quspect import QuantumCircuit
-from quspect.backends import ExecutionRequest
+from quspect.backends import ExecutionRequest, JobStatus
+from quspect.backends._exceptions import JobError
+from quspect.backends.originq._job import map_status
 from tests.backends._originq_fakes import quspect_exact_distribution
 
 _HAS_KEY = bool(os.environ.get("QPANDA_QCLOUD_API_KEY"))
@@ -28,6 +34,10 @@ needs_cloud = pytest.mark.skipif(
 needs_hardware = pytest.mark.skipif(
     not (_HAS_KEY and os.environ.get("QUSPECT_RUN_HARDWARE_TESTS") == "1"),
     reason="set QPANDA_QCLOUD_API_KEY and QUSPECT_RUN_HARDWARE_TESTS=1",
+)
+needs_cancel = pytest.mark.skipif(
+    os.environ.get("QUSPECT_RUN_CANCEL_TESTS") != "1",
+    reason="set QUSPECT_RUN_CANCEL_TESTS=1",
 )
 
 
@@ -95,3 +105,59 @@ def test_qpu_bit_order_quspect_and_provider_mapping(provider) -> None:
             expected = quspect_exact_distribution(circuit)
             actual = batch.by_label(name).probabilities
             assert _tv_distance(actual, expected) < 0.2, (transpile, name, actual)
+
+
+@pytest.mark.hardware
+@needs_hardware
+@needs_cancel
+def test_qpu_cancel_right_after_submission_records_the_clouds_answer(provider) -> None:
+    """Submit one small QPU task, cancel it at once, and record what follows.
+
+    The one cancel the live service has been sent (12 November 2026) was
+    declined and the task completed.  Still unknown, and printed here: the
+    HTTP status and ``code`` of a refusal, whether a cancel is ever
+    accepted, and the ``taskState`` values a task reports afterwards.  The
+    assertions only cover what QuSpect promises either way.
+    """
+    backend = provider.get_backend(os.environ.get("QUSPECT_ORIGINQ_QPU", "WK_C180_2"))
+    circuit = QuantumCircuit(name="cancel_probe")
+    circuit.x(0).measure([0], [0])
+    watch = float(os.environ.get("QUSPECT_ORIGINQ_CANCEL_WATCH", "600"))
+
+    job = backend.submit(circuit, shots=100)
+    submitted = time.monotonic()
+    record: dict[str, object] = {"task_id": job.job_id}
+    try:
+        accepted = job.cancel()
+    except JobError as exc:  # no readable answer: itself a finding
+        record.update(error=str(exc), cause=type(exc.__cause__).__name__)
+        print("\noriginq cancel record:", json.dumps(record, ensure_ascii=False))
+        raise
+    response = job.cancel_response
+    record.update(
+        cancel_sent_after_s=round(time.monotonic() - submitted, 2),
+        accepted=accepted,
+        http_status=response.http_status,
+        code=response.code,
+        provider_message=response.provider_message,
+    )
+
+    states: list[tuple[float, object]] = []  # (seconds since submission, taskState)
+    status = JobStatus.UNKNOWN
+    while time.monotonic() - submitted < watch:
+        detail = job._client.task_detail(job.job_id)
+        state = detail.get("taskState")
+        if not states or states[-1][1] != state:
+            states.append((round(time.monotonic() - submitted, 1), state))
+        status = map_status(state)
+        if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            break
+        time.sleep(5)
+    record.update(task_states=states, final_status=status.value)
+    print("\noriginq cancel record:", json.dumps(record, ensure_ascii=False))
+
+    assert response.accepted is accepted
+    if not accepted:
+        # A declined task keeps running; the cloud says why.
+        assert response.provider_message
+        assert status != JobStatus.CANCELLED

@@ -16,11 +16,21 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
 ``POST /oqcs/task/cancelTask.json``  ``{"taskId": id}``
     Ask the cloud to cancel a task, with header ``task_mode: 0`` however the
     task was submitted.  The answer carries no payload: ``success`` is
-    ``true`` when the request was accepted and ``false`` when the task
-    cannot be cancelled.  Unlike the endpoints above this one was not
-    recorded from live traffic: the request is the one
+    ``true`` when the request was accepted and ``false`` when the cloud
+    declines, with its reason in ``message``.  The request is the one
     ``pyqpanda3.qcloud.QCloudJob.cancel()`` sends to a stand-in server, and
     the answer is read the way the SDK reads it.
+
+    Checked against the live service once (12 November 2026): the same
+    request, sent by another client 3.4 s after submitting one QPU task on
+    WK_C180.  The cloud declined with "Unable to cancel this task. Please
+    refresh and try again.", and the task ran on and completed normally
+    209 s later.  So a task submitted seconds earlier can be refused, and a
+    refused task keeps running.  Not checked: the HTTP status of that
+    refusal (it was not recorded, so it is either HTTP 200 or a 4xx; both
+    are read as a refusal when the body carries ``success: false``), whether
+    the cloud ever accepts a cancel, and which ``taskState`` an accepted one
+    leads to.
 
 Every request is authenticated with ``Authorization: oqcs_auth=<api key>``.
 Responses wrap their payload as ``{"success", "code", "message", "obj"}``
@@ -31,10 +41,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from quspect.backends._exceptions import AuthenticationError, BackendError
@@ -50,6 +62,43 @@ _CHIP_INFO = "/oqcs/task/origin/chipInfo.json"
 _SUBMIT = "/oqcs/task/origin/submit.json"
 _TASK_DETAIL = "/oqcs/task/origin/taskDetail.json"
 _CANCEL = "/oqcs/task/cancelTask.json"
+
+_MAX_PROVIDER_MESSAGE_CHARS = 500
+# Control characters and bidirectional overrides: a provider message is shown
+# to people as one line of plain text.
+_UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+@dataclass(frozen=True)
+class CancelResponse:
+    """Origin Quantum's answer to one cancel request.
+
+    Attributes:
+        accepted: The answer's ``success``.  ``True`` means the cloud
+            accepted the request, not that the task has stopped; ``False``
+            means it declined, and the task keeps running.
+        http_status: HTTP status of the answer.
+        code: The answer's ``code`` field as sent, ``None`` when absent.
+        provider_message: The answer's ``message`` field: on a refusal, the
+            cloud's own reason (for example "Unable to cancel this task.
+            Please refresh and try again.").  One line of at most 500
+            characters with the API key removed; ``None`` when the cloud
+            sent no text.
+    """
+
+    accepted: bool
+    http_status: int
+    code: Any = None
+    provider_message: str | None = None
+
+
+def _provider_message(value: object, api_key: str) -> str | None:
+    """Reduce a provider-supplied message to one bounded line without the key."""
+    if not isinstance(value, str):
+        return None
+    text = value.replace(api_key, "[REDACTED]")
+    text = " ".join(_UNSAFE_TEXT.sub(" ", text).split())
+    return text[:_MAX_PROVIDER_MESSAGE_CHARS] or None
 
 
 def urllib_transport(timeout: float = 30.0) -> Transport:
@@ -170,42 +219,62 @@ class OriginQClient:
             raise BackendError(f"Origin Quantum returned no detail for task {task_id}.")
         return dict(obj)
 
-    def cancel_task(self, task_id: str) -> bool:
-        """Ask the cloud to cancel a task and return whether it accepted.
+    def request_cancel(self, task_id: str) -> CancelResponse:
+        """Ask the cloud to cancel a task and return its answer.
 
-        One request, never retried.  ``True`` means Origin Quantum accepted
-        the request, not that the task has already stopped; ``False`` means it
-        answered ``success: false``, which pyqpanda3 documents as "the task
-        cannot be cancelled".  As in the SDK, ``success`` alone decides.
+        One request, never retried.  The answer's boolean ``success``
+        decides, as in pyqpanda3: ``accepted`` is ``True`` when Origin
+        Quantum accepted the request (not when the task has stopped) and
+        ``False`` when it declined, with the cloud's reason in
+        ``provider_message``.  A declined task keeps running.
+
+        A refusal is read from the body at HTTP 200 and at HTTP 4xx alike:
+        which of the two the live service uses has not been checked, and
+        ``http_status`` records what it sent.
 
         Raises:
             AuthenticationError: The API key was rejected (HTTP 401/403).
-            BackendError: Network failure, any other HTTP error, or an
-                answer without a boolean ``success``: whether the task was
-                cancelled is then unknown.
+            BackendError: Network failure, HTTP 5xx, any other HTTP error
+                whose body is not a refusal, or an answer without a boolean
+                ``success``: whether the task was cancelled is then unknown.
         """
-        data = self._call(
-            "POST",
-            _CANCEL,
-            {"taskId": task_id},
-            idempotent=False,
-            task_mode="0",
-            wrapped=False,
+        status, raw = self._send(
+            "POST", _CANCEL, {"taskId": task_id}, idempotent=False, task_mode="0"
         )
+        data = self._decode(_CANCEL, status, raw)
         success = data.get("success") if isinstance(data, Mapping) else None
+        if status >= 400 and success is not False:
+            message = data.get("message") if isinstance(data, Mapping) else None
+            raise BackendError(f"Origin Quantum {_CANCEL} HTTP {status}: {message}")
         if not isinstance(success, bool):
             raise BackendError(
                 f"Origin Quantum {_CANCEL} returned no boolean 'success' "
                 f"for task {task_id}."
             )
+        response = CancelResponse(
+            accepted=success,
+            http_status=status,
+            code=data.get("code"),
+            provider_message=_provider_message(data.get("message"), self._api_key),
+        )
         if not success:
             _logger.info(
-                "Origin Quantum declined to cancel task %s (code %s): %s",
+                "Origin Quantum declined to cancel task %s (HTTP %s, code %s): %s",
                 task_id,
-                data.get("code"),
-                data.get("message"),
+                status,
+                response.code,
+                response.provider_message,
             )
-        return success
+        return response
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Ask the cloud to cancel a task and return whether it accepted.
+
+        ``request_cancel(task_id).accepted``: see :meth:`request_cancel`
+        for the answer's meaning, the cloud's reason for a refusal, and the
+        errors raised.
+        """
+        return self.request_cancel(task_id).accepted
 
     # ------------------------------------------------------------------
 
@@ -219,6 +288,21 @@ class OriginQClient:
         task_mode: str | None = None,
         wrapped: bool = True,
     ) -> Any:
+        status, raw = self._send(
+            method, path, payload, idempotent=idempotent, task_mode=task_mode
+        )
+        return self._unwrap(path, status, raw, wrapped=wrapped)
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        payload: Any,
+        *,
+        idempotent: bool,
+        task_mode: str | None = None,
+    ) -> tuple[int, bytes]:
+        """Send one request (retried when idempotent); HTTP 5xx is an error."""
         headers = {
             "Accept": "*/*",
             "Authorization": f"oqcs_auth={self._api_key}",
@@ -242,7 +326,7 @@ class OriginQClient:
                 if status >= 500:
                     last_error = BackendError(f"HTTP {status} from {path}")
                 else:
-                    return self._unwrap(path, status, raw, wrapped=wrapped)
+                    return status, raw
             if attempt + 1 < attempts:
                 time.sleep(delay)
                 delay *= 2
@@ -251,17 +335,22 @@ class OriginQClient:
         ) from last_error
 
     @staticmethod
-    def _unwrap(path: str, status: int, raw: bytes, *, wrapped: bool) -> Any:
+    def _decode(path: str, status: int, raw: bytes) -> Any:
+        """Return the JSON body; a rejected key or a non-JSON body raises."""
         if status in (401, 403):
             raise AuthenticationError(
                 f"Origin Quantum rejected the API key ({status})."
             )
         try:
-            data = json.loads(raw.decode("utf-8"))
+            return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise BackendError(
                 f"Origin Quantum {path} returned non-JSON (HTTP {status})."
             ) from exc
+
+    @classmethod
+    def _unwrap(cls, path: str, status: int, raw: bytes, *, wrapped: bool) -> Any:
+        data = cls._decode(path, status, raw)
         if status >= 400:
             message = data.get("message") if isinstance(data, Mapping) else None
             raise BackendError(f"Origin Quantum {path} HTTP {status}: {message}")

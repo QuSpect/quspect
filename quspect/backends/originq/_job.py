@@ -11,7 +11,7 @@ from typing import Any
 from quspect.backends._base import CloudJob, JobStatus
 from quspect.backends._exceptions import JobError, JobTimeoutError, TranslationError
 from quspect.backends._execution import ExecutionBatch, JobReference
-from quspect.backends.originq._client import OriginQClient
+from quspect.backends.originq._client import CancelResponse, OriginQClient
 from quspect.backends.originq._translator import decode_distribution
 from quspect.simulation.result import SimulationResult
 
@@ -20,9 +20,10 @@ PLATFORM = "originq"
 # ``taskState`` values (pyqpanda3 JobStatus: WAITING=1, COMPUTING=2,
 # FINISHED=3, FAILED=4, QUEUING=5).  The SDK has no cancelled member, and
 # which ``taskState`` the cloud reports for a cancelled task has not been
-# observed, so none is mapped to ``JobStatus.CANCELLED``: any other value
-# stays ``UNKNOWN``.  (pyqpanda3 0.5.1 itself reports every value outside
-# 1-5 as FAILED with "returned unsupported taskState".)
+# observed (the one cancel sent to the live service was declined), so none
+# is mapped to ``JobStatus.CANCELLED``: any other value stays ``UNKNOWN``.
+# (pyqpanda3 0.5.1 itself reports every value outside 1-5 as FAILED with
+# "returned unsupported taskState".)
 _STATUS_MAP: dict[str, JobStatus] = {
     "1": JobStatus.PENDING,
     "2": JobStatus.RUNNING,
@@ -72,6 +73,7 @@ class OriginQJob(CloudJob):
         self._task_id = task_id
         self._reference = reference
         self._return_batch = return_batch or reference.is_batch
+        self._cancel_response: CancelResponse | None = None
 
     def _detail(self) -> dict[str, Any]:
         try:
@@ -87,23 +89,43 @@ class OriginQJob(CloudJob):
 
         Sends a single request, without querying the status first and
         without retrying.  Returns ``True`` when the cloud accepted the
-        request and ``False`` when it answered that the task cannot be
-        cancelled.  ``True`` does not mean the task has stopped.
+        request and ``False`` when it declined; its answer, with the reason
+        for a refusal, is then in :attr:`cancel_response`.
 
-        Which ``taskState`` a cancelled task reports is not known: afterwards
-        :meth:`status` returns whatever the cloud reports, ``UNKNOWN`` for a
-        value outside pyqpanda3's five states, and :meth:`result` keeps
-        polling while it does, so pass a ``timeout``.
+        ``False`` means the task keeps running, so keep tracking it.  The
+        cloud can decline a task submitted seconds earlier: the one cancel
+        sent to the live service (12 November 2026, 3.4 s after submitting a
+        QPU task) was declined, and the task completed normally.  Whether
+        the cloud ever accepts a cancel has not been observed.
+
+        ``True`` does not mean the task has stopped, and which ``taskState``
+        a cancelled task reports is not known: afterwards :meth:`status`
+        returns whatever the cloud reports, ``UNKNOWN`` for a value outside
+        pyqpanda3's five states, and :meth:`result` keeps polling while it
+        does, so pass a ``timeout``.
 
         Raises:
             JobError: The request failed (network, HTTP error, rejected key
                 or an unreadable answer); whether the task was cancelled is
                 then unknown.
         """
+        self._cancel_response = None
         try:
-            return self._client.cancel_task(self._task_id)
+            response = self._client.request_cancel(self._task_id)
         except Exception as exc:
             raise JobError(str(exc), job_id=self._task_id) from exc
+        self._cancel_response = response
+        return response.accepted
+
+    @property
+    def cancel_response(self) -> CancelResponse | None:
+        """Origin Quantum's answer to the most recent :meth:`cancel` call.
+
+        ``None`` before the first call and after a call that raised.  On a
+        refusal, ``cancel_response.provider_message`` is the cloud's own
+        reason.
+        """
+        return self._cancel_response
 
     def result(
         self,

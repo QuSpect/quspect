@@ -21,7 +21,7 @@ from quspect.backends._exceptions import (
     PartialSubmissionError,
     TranslationError,
 )
-from quspect.backends.originq import OriginQClient, OriginQJob
+from quspect.backends.originq import CancelResponse, OriginQClient, OriginQJob
 from quspect.backends.originq import _provider as provider_module
 from quspect.backends.originq._backend import OriginQBackend
 from quspect.backends.originq._job import map_status, parse_task_result
@@ -34,6 +34,7 @@ from tests.backends._measurement_cases import (
 )
 from tests.backends._originq_fakes import (
     KEY,
+    LIVE_CANCEL_REFUSAL,
     WK_C180_2_AVAILABLE,
     FakeCloud,
     assert_same_distribution,
@@ -294,8 +295,10 @@ def test_timeout_and_failure() -> None:
 #
 # The request is the one pyqpanda3 0.5.1 sends (compared with the SDK in
 # ``test_originq_reference.py``).  The answers follow the SDK's handling:
-# ``success`` alone decides, any HTTP error is an error.  Nothing here was
-# recorded on the real cloud.
+# ``success`` alone decides.  The real cloud was asked once and refused (see
+# ``_originq_fakes.LIVE_CANCEL_REFUSAL``); the HTTP status of that refusal was
+# not recorded, so a refusal is read from the body at HTTP 200 and 4xx alike.
+# Any other HTTP error is an error.
 
 _ACCEPTED = {"success": True, "code": 10000, "message": "success", "obj": None}
 _REFUSED = {"success": False, "code": 10001, "message": "task finished", "obj": None}
@@ -344,9 +347,79 @@ def test_client_cancel_returns_the_clouds_decision(answer, accepted) -> None:
     assert len(transport.calls) == 1
 
 
+def test_client_request_cancel_returns_the_clouds_answer() -> None:
+    live = {"success": False, "code": 10001, "message": LIVE_CANCEL_REFUSAL}
+    transport = _Recorder(_answer(_ACCEPTED), _answer(live), _answer({"success": True}))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    assert client.request_cancel("T1") == CancelResponse(
+        accepted=True, http_status=200, code=10000, provider_message="success"
+    )
+    assert client.request_cancel("T1") == CancelResponse(
+        accepted=False,
+        http_status=200,
+        code=10001,
+        provider_message=LIVE_CANCEL_REFUSAL,
+    )
+    assert client.request_cancel("T1") == CancelResponse(
+        accepted=True, http_status=200, code=None, provider_message=None
+    )
+
+
+@pytest.mark.parametrize("status", [400, 404, 409, 422])
+def test_client_cancel_refusal_with_an_http_error_status_is_a_refusal(status) -> None:
+    """Which status the real cloud's refusal carries was not recorded."""
+    answer = {"success": False, "code": 10001, "message": LIVE_CANCEL_REFUSAL}
+    transport = _Recorder(_answer(answer, status), _answer(answer, status))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    assert client.cancel_task("T1") is False
+    assert client.request_cancel("T1") == CancelResponse(
+        accepted=False,
+        http_status=status,
+        code=10001,
+        provider_message=LIVE_CANCEL_REFUSAL,
+    )
+    assert len(transport.calls) == 2  # one request per call
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (f"bad key {KEY} for task", "bad key [REDACTED] for task"),
+        ("line one\r\n\tline two\x00\u202e", "line one line two"),
+        ("x" * 600, "x" * 500),
+        ("", None),
+        ("  \n ", None),
+        (None, None),
+        (12, None),
+        ({"detail": "no"}, None),
+    ],
+)
+def test_client_cancel_provider_message_is_one_bounded_line_without_the_key(
+    message, expected
+) -> None:
+    transport = _Recorder(_answer({"success": False, "message": message}))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    assert client.request_cancel("T1").provider_message == expected
+
+
+def test_client_cancel_refusal_is_logged_without_the_key(caplog) -> None:
+    answer = {"success": False, "code": 10001, "message": f"no: {KEY}"}
+    client = OriginQClient(KEY, URL, transport=_Recorder(_answer(answer)), backoff=0)
+    with caplog.at_level("INFO", logger="quspect.backends.originq._client"):
+        assert client.cancel_task("T1") is False
+    assert "declined to cancel task T1 (HTTP 200, code 10001)" in caplog.text
+    assert KEY not in caplog.text
+
+
 @pytest.mark.parametrize(
     "failure",
-    [ConnectionResetError("reset"), (502, b""), _answer(_ACCEPTED, status=500)],
+    [
+        ConnectionResetError("reset"),
+        (502, b""),
+        _answer(_ACCEPTED, status=500),
+        _answer(_REFUSED, status=500),
+        _answer(_REFUSED, status=503),
+    ],
 )
 def test_client_cancel_is_sent_once_and_never_retried(failure) -> None:
     transport = _Recorder(failure, _answer(_ACCEPTED))
@@ -363,6 +436,10 @@ def test_client_cancel_is_sent_once_and_never_retried(failure) -> None:
         ((403, b"{}"), AuthenticationError, "API key"),
         (_answer({"message": "no such task"}, 404), BackendError, "404: no such task"),
         (_answer({"message": "bad request"}, 400), BackendError, "400: bad request"),
+        (_answer({"success": True, "message": "odd"}, 400), BackendError, "400: odd"),
+        (_answer({"success": "false", "message": "m"}, 409), BackendError, "409: m"),
+        (_answer([], 400), BackendError, "400: None"),
+        ((400, b"<html>"), BackendError, "non-JSON"),
         ((200, b"<html>"), BackendError, "non-JSON"),
         (_answer({"code": 10000, "message": "x"}), BackendError, "success"),
         (_answer({"success": "true", "code": 10000}), BackendError, "success"),
@@ -402,6 +479,53 @@ def test_job_cancel_refused_for_a_finished_task() -> None:
     assert job.result(poll_interval=1e-3).probabilities == {"1": 1.0}
 
 
+def test_job_cancel_refused_like_the_live_cloud_and_the_task_runs_on() -> None:
+    """The one live observation: refused seconds after submission, then done."""
+    cloud = FakeCloud()
+    cloud.refuse_cancel = LIVE_CANCEL_REFUSAL
+    job = _fake_job(cloud, states=("5", "2"))
+    assert job.cancel_response is None
+    assert job.cancel() is False
+    assert job.cancel_response == CancelResponse(
+        accepted=False,
+        http_status=200,
+        code=10001,
+        provider_message=LIVE_CANCEL_REFUSAL,
+    )
+    assert "cancelled" not in cloud.tasks["T1"]
+    assert job.status() == JobStatus.QUEUED
+    assert job.result(timeout=5, poll_interval=1e-3).probabilities == {"1": 1.0}
+
+
+def test_job_cancel_response_is_the_most_recent_answer() -> None:
+    cloud = FakeCloud()
+    job = _fake_job(cloud)
+    cloud.refuse_cancel = "busy"
+    assert job.cancel() is False
+    assert job.cancel_response.provider_message == "busy"
+
+    cloud.fail_next_cancel = 1  # no answer: nothing is known about this call
+    with pytest.raises(JobError):
+        job.cancel()
+    assert job.cancel_response is None
+
+    cloud.refuse_cancel = None
+    assert job.cancel() is True
+    assert job.cancel_response == CancelResponse(
+        accepted=True, http_status=200, code=10000, provider_message="success"
+    )
+
+
+def test_job_cancel_refusal_with_an_http_error_status_returns_false() -> None:
+    answer = {"success": False, "code": 10001, "message": LIVE_CANCEL_REFUSAL}
+    transport = _Recorder(_answer(answer, 400))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    job = OriginQJob(client, "T", reference=_reference("T"))
+    assert job.cancel() is False
+    assert job.cancel_response.http_status == 400
+    assert job.cancel_response.provider_message == LIVE_CANCEL_REFUSAL
+
+
 def test_job_cancel_refused_for_an_unknown_task() -> None:
     cloud = FakeCloud()
     client = OriginQClient(cloud.key, URL, transport=cloud, backoff=0)
@@ -429,7 +553,7 @@ def test_job_cancel_network_failure_is_a_job_error_and_not_retried() -> None:
         ((401, b"{}"), AuthenticationError),
     ],
 )
-def test_job_cancel_http_refusal_is_a_job_error(response, cause) -> None:
+def test_job_cancel_http_error_is_a_job_error(response, cause) -> None:
     transport = _Recorder(response)
     client = OriginQClient(KEY, URL, transport=transport, backoff=0)
     job = OriginQJob(client, "T", reference=_reference("T"))

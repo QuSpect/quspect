@@ -800,12 +800,21 @@ result = backend.run(qc, shots=2000)
 - `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务。
   真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
 - **取消**：`job.cancel()` 只发送一次请求（与 pyqpanda3 的 `QCloudJob.cancel()`
-  所发请求一致，不会重试）；本源接受时返回 `True`，本源答复任务无法取消时返回
-  `False`，网络或 HTTP 错误抛出 `JobError`。真机的原生批量是一个任务，取消请求
-  针对的是整个批量。该请求只与 SDK 发出的请求做过比对，没有在真实云服务上验证；任务取消后
-  云端报告什么状态尚不清楚（pyqpanda3 也没有“已取消”状态）：`job.status()`
-  如实返回云端状态，五种已知状态之外的值为 `unknown`，因此取消之后调用
-  `result()` 请传 `timeout`。
+  所发请求一致，不会重试）；本源接受时返回 `True`，本源拒绝时返回 `False`。
+  返回 `False` 后任务仍在运行，调用方必须继续跟踪它；本源给出的原话在
+  `job.cancel_response.provider_message` 中。网络或 HTTP 错误抛出 `JobError`，
+  此时任务是否被取消未知。真机的原生批量是一个任务，取消请求针对的是整个批量。
+  `capabilities.supports_cancel` 表示可以发出取消请求，不表示云端一定会取消。
+  - *在真实云服务上核对过一次*（2026 年 11 月 12 日）：在 WK_C180 上提交一个真机
+    任务 3.4 秒后发出同样的请求，本源拒绝，原话是 "Unable to cancel this task.
+    Please refresh and try again."；任务在 209 秒后正常完成。也就是说，刚提交
+    几秒的任务也可能被拒。
+  - *尚未核对*：拒绝时的 HTTP 状态码（当时没有记录；只要回答正文是
+    `success: false`，HTTP 200 和 4xx 都按拒绝处理，
+    `cancel_response.http_status` 给出实际的状态码）；本源是否会接受取消；
+    任务取消后云端报告什么状态（pyqpanda3 也没有“已取消”状态）。`job.status()`
+    如实返回云端状态，五种已知状态之外的值为 `unknown`，因此取消之后调用
+    `result()` 请传 `timeout`。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
   请务必传 `timeout`。
 
