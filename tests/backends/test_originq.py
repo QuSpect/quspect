@@ -18,12 +18,13 @@ from quspect.backends._exceptions import (
     BackendError,
     JobError,
     JobTimeoutError,
+    PartialSubmissionError,
     TranslationError,
 )
 from quspect.backends.originq import OriginQClient, OriginQJob
 from quspect.backends.originq import _provider as provider_module
 from quspect.backends.originq._backend import OriginQBackend
-from quspect.backends.originq._job import parse_task_result
+from quspect.backends.originq._job import map_status, parse_task_result
 from quspect.backends.originq._translator import decode_distribution, translate
 from tests.backends._measurement_cases import (
     FULL_SPELLINGS,
@@ -277,7 +278,6 @@ def test_status_mapping_polling_and_counts() -> None:
     assert result.probabilities == {"1": 1.0}
     assert result.counts == {"1": 100}
     assert result.metadata["counts_source"] == "probabilities"
-    assert job.cancel() is False
 
 
 def test_timeout_and_failure() -> None:
@@ -288,6 +288,211 @@ def test_timeout_and_failure() -> None:
     job = OriginQJob(_StubClient([failed]), "T", reference=_reference("T"))
     with pytest.raises(JobError, match="chip offline"):
         job.result(poll_interval=1e-3)
+
+
+# ------------------------------------------------------------- cancellation
+#
+# The request is the one pyqpanda3 0.5.1 sends (compared with the SDK in
+# ``test_originq_reference.py``).  The answers follow the SDK's handling:
+# ``success`` alone decides, any HTTP error is an error.  Nothing here was
+# recorded on the real cloud.
+
+_ACCEPTED = {"success": True, "code": 10000, "message": "success", "obj": None}
+_REFUSED = {"success": False, "code": 10001, "message": "task finished", "obj": None}
+
+
+def _answer(payload, status: int = 200) -> tuple[int, bytes]:
+    return status, json.dumps(payload).encode()
+
+
+def _fake_job(cloud: FakeCloud, task_id: str = "T1", states=("1", "2")) -> OriginQJob:
+    """A job for a task registered directly on the fake (no pyqpanda3 needed)."""
+    cloud.tasks[task_id] = {"results": [{"0x1": 1.0}], "states": list(states)}
+    client = OriginQClient(cloud.key, URL, transport=cloud, backoff=0)
+    return OriginQJob(client, task_id, reference=_reference(task_id))
+
+
+def test_client_cancel_sends_the_request_pyqpanda3_sends() -> None:
+    transport = _Recorder(_answer(_ACCEPTED))
+    assert OriginQClient(KEY, URL, transport=transport).cancel_task("T1") is True
+    ((method, url, headers, body),) = transport.calls
+    assert (method, url) == ("POST", URL + "/oqcs/task/cancelTask.json")
+    assert headers == {
+        "Accept": "*/*",
+        "Authorization": f"oqcs_auth={KEY}",
+        "Content-Type": "application/json",
+        "origin-language": "en",
+        "task_mode": "0",
+    }
+    assert json.loads(body) == {"taskId": "T1"}
+
+
+@pytest.mark.parametrize(
+    ("answer", "accepted"),
+    [
+        (_ACCEPTED, True),
+        ({"success": True}, True),  # pyqpanda3 reads ``success`` only
+        ({"success": True, "code": 10001, "message": "odd"}, True),
+        (_REFUSED, False),
+        ({"success": False}, False),
+    ],
+)
+def test_client_cancel_returns_the_clouds_decision(answer, accepted) -> None:
+    transport = _Recorder(_answer(answer))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    assert client.cancel_task("T1") is accepted
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [ConnectionResetError("reset"), (502, b""), _answer(_ACCEPTED, status=500)],
+)
+def test_client_cancel_is_sent_once_and_never_retried(failure) -> None:
+    transport = _Recorder(failure, _answer(_ACCEPTED))
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    with pytest.raises(BackendError, match="cancelTask"):
+        client.cancel_task("T1")
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("response", "error", "message"),
+    [
+        ((401, b"{}"), AuthenticationError, "API key"),
+        ((403, b"{}"), AuthenticationError, "API key"),
+        (_answer({"message": "no such task"}, 404), BackendError, "404: no such task"),
+        (_answer({"message": "bad request"}, 400), BackendError, "400: bad request"),
+        ((200, b"<html>"), BackendError, "non-JSON"),
+        (_answer({"code": 10000, "message": "x"}), BackendError, "success"),
+        (_answer({"success": "true", "code": 10000}), BackendError, "success"),
+        (_answer([]), BackendError, "success"),
+    ],
+)
+def test_client_cancel_raises_unless_the_cloud_decided(
+    response, error, message
+) -> None:
+    client = OriginQClient(KEY, URL, transport=_Recorder(response), backoff=0)
+    with pytest.raises(error, match=message):
+        client.cancel_task("T1")
+
+
+def test_backends_declare_cancellation() -> None:
+    cloud = FakeCloud()
+    assert _backend(cloud, "WK_C180_2").capabilities.supports_cancel is True
+    assert _backend(cloud, "full_amplitude").capabilities.supports_cancel is True
+
+
+def test_job_cancel_accepted_with_a_single_request() -> None:
+    cloud = FakeCloud()
+    job = _fake_job(cloud)
+    assert job.cancel() is True
+    assert cloud.tasks["T1"]["cancelled"] is True
+    ((method, path, headers),) = cloud.requests  # no status query first
+    assert (method, path) == ("POST", "/oqcs/task/cancelTask.json")
+    assert headers["task_mode"] == "0"
+
+
+def test_job_cancel_refused_for_a_finished_task() -> None:
+    cloud = FakeCloud()
+    job = _fake_job(cloud, states=())
+    assert job.cancel() is False
+    assert "cancelled" not in cloud.tasks["T1"]
+    assert job.status() == JobStatus.COMPLETED
+    assert job.result(poll_interval=1e-3).probabilities == {"1": 1.0}
+
+
+def test_job_cancel_refused_for_an_unknown_task() -> None:
+    cloud = FakeCloud()
+    client = OriginQClient(cloud.key, URL, transport=cloud, backoff=0)
+    job = OriginQJob(client, "NOPE", reference=_reference("NOPE"))
+    assert job.cancel() is False
+    assert len(cloud.requests) == 1
+
+
+def test_job_cancel_network_failure_is_a_job_error_and_not_retried() -> None:
+    cloud = FakeCloud()
+    job = _fake_job(cloud)
+    cloud.fail_next_cancel = 1
+    with pytest.raises(JobError, match="cancelTask") as info:
+        job.cancel()
+    assert info.value.job_id == "T1"
+    assert len(cloud.requests) == 1
+    assert "cancelled" not in cloud.tasks["T1"]
+
+
+@pytest.mark.parametrize(
+    ("response", "cause"),
+    [
+        ((500, b""), BackendError),
+        (_answer({"message": "bad request"}, 400), BackendError),
+        ((401, b"{}"), AuthenticationError),
+    ],
+)
+def test_job_cancel_http_refusal_is_a_job_error(response, cause) -> None:
+    transport = _Recorder(response)
+    client = OriginQClient(KEY, URL, transport=transport, backoff=0)
+    job = OriginQJob(client, "T", reference=_reference("T"))
+    with pytest.raises(JobError) as info:
+        job.cancel()
+    assert info.value.job_id == "T"
+    assert type(info.value.__cause__) is cause
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("state", ["0", "6", "7", "-1", "cancelled", "", None])
+def test_task_states_outside_the_sdk_enum_stay_unknown(state) -> None:
+    """pyqpanda3's JobStatus stops at 5 and names no cancelled state."""
+    assert map_status(state) == JobStatus.UNKNOWN
+
+
+def test_state_after_cancel_is_whatever_the_cloud_reports() -> None:
+    """No cancelled ``taskState`` is known, so nothing maps to CANCELLED."""
+    cloud = FakeCloud()
+    job = _fake_job(cloud)
+    assert job.cancel() is True
+    assert job.status() == JobStatus.PENDING  # the fake invents no state
+
+    cloud.cancelled_state = "6"  # stand-in for a value outside the SDK enum
+    assert job.status() == JobStatus.UNKNOWN
+    assert not job.done()
+    with pytest.raises(JobTimeoutError, match="status: unknown"):
+        job.result(timeout=0.01, poll_interval=1e-3)
+
+    cloud.cancelled_state = "4"
+    assert job.status() == JobStatus.FAILED
+    with pytest.raises(JobError, match="failed"):
+        job.result(poll_interval=1e-3)
+
+
+def test_partial_submission_cancels_the_tasks_already_created() -> None:
+    transport = _Recorder(
+        _ok({"taskId": "T1"}),
+        _ok({"taskId": "T2"}),
+        _ok({"taskId": "T3"}),
+        ConnectionResetError("reset"),  # fourth submission
+        _answer(_ACCEPTED),
+        _answer(_REFUSED),
+        ConnectionResetError("reset"),  # third cancel
+    )
+    resource = next(
+        r for r in FakeCloud().resources() if r["pyqpandaChipId"] == "full_amplitude"
+    )
+    backend = OriginQBackend(
+        OriginQClient(KEY, URL, transport=transport, backoff=0), resource
+    )
+    circuit = QuantumCircuit()
+    circuit.h(0).measure([0], [0])
+    request = ExecutionRequest.batch([circuit] * 4, labels=list("abcd"), shots=10)
+    with pytest.raises(PartialSubmissionError, match="after 3 experiment") as info:
+        backend.submit_request(request)
+    assert info.value.submitted_job_ids == ("T1", "T2", "T3")
+    assert info.value.cancellation_failures == ("T2", "T3")
+    cancels = [(url, json.loads(body)) for _, url, _, body in transport.calls[4:]]
+    assert cancels == [
+        (URL + "/oqcs/task/cancelTask.json", {"taskId": task})
+        for task in ("T1", "T2", "T3")
+    ]
 
 
 @pytest.mark.parametrize(

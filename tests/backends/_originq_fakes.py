@@ -12,6 +12,14 @@ server behaviour recorded on the real cloud (November 2026):
   must only use coupling edges between available qubits;
 * results are probabilities with hex keys.
 
+Cancellation (``/oqcs/task/cancelTask.json``) was **not** recorded on the real
+cloud.  The fake expects the request pyqpanda3 0.5.1 sends (``task_mode: 0``,
+``{"taskId": id}``) and answers in the form the SDK reads: ``success: true``
+to accept, ``success: false`` to refuse.  Which tasks the real cloud refuses
+is an assumption here (unknown and finished ones), and the ``taskState`` a
+cancelled task reports is not known, so the fake invents none (see
+``FakeCloud.cancelled_state``).
+
 Programs are parsed by pyqpanda3's own OriginIR parser and evaluated exactly
 on its CPUQVM, so QuSpect's emitter is checked by an independent
 implementation.
@@ -148,6 +156,11 @@ class FakeCloud:
         #: taskState sequence handed out by taskDetail before "3".
         self.pending_states: list[str] = ["1", "2"]
         self.fail_next_detail = 0
+        self.fail_next_cancel = 0
+        #: ``taskState`` reported once a cancel was accepted.  The real value
+        #: is unknown and pyqpanda3 names none: ``None`` leaves the task's
+        #: own state sequence untouched, and a test picks a value explicitly.
+        self.cancelled_state: str | None = None
 
     def resources(self) -> list[dict]:
         out = [
@@ -190,6 +203,12 @@ class FakeCloud:
                 self.fail_next_detail -= 1
                 raise ConnectionResetError("Remote end closed connection")
             return 200, self._detail(payload["taskId"])
+        if path.endswith("cancelTask.json"):
+            assert headers.get("task_mode") == "0", headers
+            if self.fail_next_cancel:
+                self.fail_next_cancel -= 1
+                raise ConnectionResetError("Remote end closed connection")
+            return 200, self._cancel(payload["taskId"])
         return 404, b"{}"
 
     @staticmethod
@@ -237,10 +256,21 @@ class FakeCloud:
         self.tasks[task_id] = {"results": results, "states": list(self.pending_states)}
         return self._ok({"taskId": task_id})
 
+    def _cancel(self, task_id) -> bytes:
+        task = self.tasks.get(task_id)
+        if task is None:
+            return self._fail("unknown task")
+        if not task["states"]:  # the next taskDetail is final
+            return self._fail("task cannot be cancelled")
+        task["cancelled"] = True
+        return self._ok(None)
+
     def _detail(self, task_id) -> bytes:
         task = self.tasks.get(task_id)
         if task is None:
             return self._fail("unknown task")
+        if task.get("cancelled") and self.cancelled_state is not None:
+            return self._ok({"taskId": task_id, "taskState": self.cancelled_state})
         if task["states"]:
             return self._ok({"taskId": task_id, "taskState": task["states"].pop(0)})
         if task.get("error"):

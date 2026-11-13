@@ -7,6 +7,10 @@ the GIL, so an in-process server thread would never get to answer.
 The config JSON holds ``log_path``, ``port_path``, ``chip`` and
 ``resources``.  Every POST is appended to ``log_path`` as one JSON line; the
 bound port is written to ``port_path`` once the server is listening.
+
+The task ID steers the two answers a test needs to vary: ``cancelTask``
+refuses IDs starting with ``REFUSE``, and ``taskDetail`` reports the text
+after ``STATE-`` as ``taskState`` (``1`` otherwise).
 """
 
 import http.server
@@ -34,15 +38,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
-        entry = {"path": self.path, "headers": dict(self.headers), "body": body}
+        entry = {
+            "method": self.command,
+            "path": self.path,
+            "headers": dict(self.headers),
+            "body": body,
+        }
         with open(CONFIG["log_path"], "a") as handle:
             handle.write(json.dumps(entry) + "\n")
+        task_id = str(body.get("taskId") or "CONTRACT")
         if self.path.endswith("chipInfo.json"):
             self._reply({**OK, "obj": CONFIG["chip"]})
         elif self.path.endswith("submit.json"):
             self._reply({**OK, "obj": {"taskId": "CONTRACT"}})
+        elif self.path.endswith("cancelTask.json"):
+            if task_id.startswith("REFUSE"):
+                refusal = {"success": False, "code": 10001, "message": "refused"}
+                self._reply({**refusal, "obj": None})
+            else:
+                self._reply({**OK, "obj": None})
         else:
-            self._reply({**OK, "obj": {"taskId": "CONTRACT", "taskState": "1"}})
+            state = task_id.partition("STATE-")[2] or "1"
+            self._reply({**OK, "obj": {"taskId": task_id, "taskState": state}})
 
     def log_message(self, *args):
         pass
