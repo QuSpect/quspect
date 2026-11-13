@@ -21,8 +21,15 @@ from pyqpanda3.intermediate_compiler import (  # noqa: E402
 )
 
 from quspect import QuantumCircuit  # noqa: E402
-from quspect.backends import CompositeJob, ExecutionRequest, JobReference  # noqa: E402
+from quspect.backends import (  # noqa: E402
+    CompositeJob,
+    ExecutionRequest,
+    JobReference,
+    JobStatus,
+)
+from quspect.backends._exceptions import JobError  # noqa: E402
 from quspect.backends.originq import _provider as provider_module  # noqa: E402
+from quspect.backends.originq._job import _STATUS_MAP  # noqa: E402
 from quspect.backends.originq._translator import translate  # noqa: E402
 from quspect.simulation import Simulator  # noqa: E402
 from tests.backends._originq_fakes import (  # noqa: E402
@@ -285,6 +292,31 @@ def test_reference_round_trip_recovers_and_decodes() -> None:
         other.retrieve_job(restored)
 
 
+def test_cancel_end_to_end_on_the_fake_cloud() -> None:
+    cloud = FakeCloud()
+    job = _backend(cloud, "WK_C180_2").submit(CASES["asymmetric"], shots=100)
+    assert job.cancel() is True
+    assert cloud.tasks[job.job_id]["cancelled"] is True
+
+    names = ["asymmetric", "permuted_clbits"]
+    request = ExecutionRequest.batch([CASES[n] for n in names], labels=names, shots=10)
+    composite = _backend(cloud, "full_amplitude").submit_request(request)
+    assert isinstance(composite, CompositeJob)
+    assert composite.cancel() is True
+    assert all(cloud.tasks[task]["cancelled"] for task in composite.job_ids)
+    assert composite.status() == JobStatus.CANCELLED
+
+    # The cloud refuses a task it has already cancelled, so the logical job
+    # reports False.
+    assert composite.cancel() is False
+
+    # One child of a fresh job finishes first: refused, so False again.
+    composite = _backend(cloud, "full_amplitude").submit_request(request)
+    cloud.tasks[composite.job_ids[0]]["states"].clear()
+    assert composite.cancel() is False
+    assert cloud.tasks[composite.job_ids[1]]["cancelled"] is True
+
+
 # --------------------------------------------- protocol contract vs the SDK
 
 
@@ -368,3 +400,158 @@ def test_chip_info_parsing_matches_pyqpanda3(sdk_capture_server) -> None:
     assert backend.config["topology"]["coupling_map"] == sorted(
         sorted(edge) for edge in info.get_chip_topology()
     )
+
+
+#: Headers set by the HTTP library rather than by the protocol.
+_TRANSPORT_HEADERS = {
+    "host",
+    "content-length",
+    "connection",
+    "user-agent",
+    "accept-encoding",
+}
+
+
+def _protocol_request(entry: dict) -> dict:
+    headers = {
+        name.lower(): value
+        for name, value in entry["headers"].items()
+        if name.lower() not in _TRANSPORT_HEADERS
+    }
+    return {
+        "method": entry["method"],
+        "path": entry["path"],
+        "headers": headers,
+        "body": entry["body"],
+    }
+
+
+def test_cancel_request_and_answer_match_pyqpanda3(sdk_capture_server) -> None:
+    """QuSpect cancels with the request ``QCloudJob.cancel()`` sends.
+
+    Compared against the SDK talking to the stand-in server, not against
+    the real cloud: path, method, protocol headers and body must be equal,
+    and both must read the answer the same way.
+    """
+    from pyqpanda3.qcloud import QCloudJob, QCloudOptions, QCloudService
+
+    url, recorded = sdk_capture_server
+    service = QCloudService(KEY, url)
+    prog = pq.QProg()
+    prog << pq.RY(57, 0.3) << pq.CZ(57, 66) << pq.measure(57, 0) << pq.measure(66, 1)
+    options = QCloudOptions()
+    options.set_mapping(False)
+    small = pq.QProg()
+    small << pq.RY(0, 0.3) << pq.CZ(0, 1) << pq.measure(0, 0) << pq.measure(1, 1)
+    sdk_answers = [
+        service.backend("WK_C180_2").run(prog, 1000, options).cancel(),
+        service.backend("WK_C180_2").run([prog, prog], 500, options).cancel(),
+        service.backend("full_amplitude").run(small, 100).cancel(),
+        QCloudJob("RECOVERED").cancel(),
+        QCloudJob("REFUSE-1").cancel(),
+        QCloudJob.cancel_task("REFUSE-2"),
+    ]
+    sdk = [r for r in recorded() if r["path"].endswith("cancelTask.json")]
+
+    provider = provider_module.OriginQProvider(api_key=KEY, url=url)
+    circuit = QuantumCircuit()
+    circuit.ry(0.3, 57).cz(57, 66).measure([57, 66], [0, 1])
+    small_circuit = QuantumCircuit()
+    small_circuit.ry(0.3, 0).cz(0, 1).measure([0, 1], [0, 1])
+    qpu = provider.get_backend("WK_C180_2")
+    simulator = provider.get_backend("full_amplitude")
+    direct = {"transpile": False, "provider_mapping": False}
+    start = len(recorded())
+    our_answers = [
+        qpu.submit(circuit, shots=1000, **direct).cancel(),
+        qpu.submit_request(
+            ExecutionRequest.batch([circuit, circuit], shots=500, options=direct)
+        ).cancel(),
+        simulator.submit(small_circuit, shots=100).cancel(),
+    ]
+    for task_id in ("RECOVERED", "REFUSE-1", "REFUSE-2"):
+        recovered = provider.retrieve_job(
+            task_id, backend_name="WK_C180_2", measurement_maps=(((0,),),)
+        )
+        our_answers.append(recovered.cancel())
+    ours = [r for r in recorded()[start:] if r["path"].endswith("cancelTask.json")]
+
+    assert sdk_answers == our_answers == [True, True, True, True, False, False]
+    assert len(sdk) == len(ours) == 6
+    for theirs, mine in zip(sdk, ours, strict=True):
+        assert _protocol_request(mine) == _protocol_request(theirs)
+    # The comparison is not vacuous: this is what both sent.
+    assert _protocol_request(ours[3]) == {
+        "method": "POST",
+        "path": "/oqcs/task/cancelTask.json",
+        "headers": {
+            "accept": "*/*",
+            "authorization": f"oqcs_auth={KEY}",
+            "content-type": "application/json",
+            "origin-language": "en",
+            "task_mode": "0",
+        },
+        "body": {"taskId": "RECOVERED"},
+    }
+
+
+def test_status_map_is_exactly_the_sdk_job_status_enum() -> None:
+    """Fails when pyqpanda3 gains a state (for example a cancelled one)."""
+    from pyqpanda3.qcloud import JobStatus as SdkStatus
+
+    expected = {
+        "WAITING": JobStatus.PENDING,
+        "COMPUTING": JobStatus.RUNNING,
+        "FINISHED": JobStatus.COMPLETED,
+        "FAILED": JobStatus.FAILED,
+        "QUEUING": JobStatus.QUEUED,
+    }
+    members = SdkStatus.__members__
+    assert set(members) == set(expected)
+    sdk_states = {str(member.value): expected[name] for name, member in members.items()}
+    assert sdk_states == _STATUS_MAP
+
+
+def test_task_state_outside_the_enum_sdk_fails_quspect_reports_unknown(
+    sdk_capture_server,
+) -> None:
+    """What a status query after a cancel can show, as far as it is known.
+
+    pyqpanda3 has no cancelled state: it turns every ``taskState`` outside
+    its enum into FAILED ("unsupported taskState").  The real cloud reported
+    35 after it accepted a cancel, which QuSpect maps to CANCELLED; any
+    other value outside the enum stays UNKNOWN.
+    """
+    from pyqpanda3.qcloud import JobStatus as SdkStatus
+    from pyqpanda3.qcloud import QCloudJob, QCloudService
+
+    url, _ = sdk_capture_server
+    QCloudService(KEY, url)
+    provider = provider_module.OriginQProvider(api_key=KEY, url=url)
+
+    def ours(task_id: str):
+        return provider.retrieve_job(
+            task_id, backend_name="WK_C180_2", measurement_maps=(((0,),),)
+        )
+
+    for state, mapped in _STATUS_MAP.items():
+        sdk_status = QCloudJob(f"STATE-{state}").status()
+        assert str(sdk_status.value) == state
+        assert ours(f"STATE-{state}").status() == mapped
+
+    result = QCloudJob("STATE-6").query()
+    assert result.job_status() == SdkStatus.FAILED
+    assert "unsupported taskState 6" in result.error_message()
+    assert ours("STATE-6").status() == JobStatus.UNKNOWN
+
+    result = QCloudJob("STATE-35").query()
+    assert result.job_status() == SdkStatus.FAILED
+    assert "unsupported taskState 35" in result.error_message()
+    assert ours("STATE-35").status() == JobStatus.CANCELLED
+    with pytest.raises(JobError, match="was cancelled") as info:
+        ours("STATE-35").result(poll_interval=1e-3)
+    assert info.value.error_type == "cancelled"
+
+    assert ours("STATE-4").status() == JobStatus.FAILED
+    with pytest.raises(JobError, match="failed"):
+        ours("STATE-4").result(poll_interval=1e-3)

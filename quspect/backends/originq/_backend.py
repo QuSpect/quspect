@@ -292,7 +292,9 @@ class OriginQBackend(CloudBackend):
             supports_batch=True,
             supports_statevector=False,
             supports_job_recovery=True,
-            supports_cancel=False,
+            # A cancel request can be sent; the cloud accepts some and declines
+            # others (both seen on the live service), see OriginQJob.cancel().
+            supports_cancel=True,
             max_circuits_per_job=1 if self.is_simulator else _MAX_BATCH_CIRCUITS,
             max_shots=None if self.is_simulator else self._chip().get("max_shots"),
             supported_modes=frozenset({"circuit"}),
@@ -455,13 +457,20 @@ class OriginQBackend(CloudBackend):
                 submitted += len(group)
         except Exception as exc:
             if jobs:
+                failures: list[str] = []
+                for created in jobs:
+                    try:
+                        if not created.cancel():
+                            failures.append(created.job_id)
+                    except Exception:
+                        failures.append(created.job_id)
                 raise PartialSubmissionError(
                     "Origin Quantum submission failed after "
-                    f"{submitted} experiment(s); Origin Quantum tasks cannot be "
-                    "cancelled, the submitted task IDs are on the exception: "
+                    f"{submitted} experiment(s); the tasks already created "
+                    "were asked to cancel, their IDs are on the exception: "
                     f"{exc}",
                     submitted_references=tuple(job.reference for job in jobs),
-                    cancellation_failures=[job.job_id for job in jobs],
+                    cancellation_failures=failures,
                 ) from exc
             if isinstance(exc, (BackendError, TranslationError)):
                 raise

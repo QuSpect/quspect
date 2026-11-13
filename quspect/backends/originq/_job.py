@@ -11,14 +11,16 @@ from typing import Any
 from quspect.backends._base import CloudJob, JobStatus
 from quspect.backends._exceptions import JobError, JobTimeoutError, TranslationError
 from quspect.backends._execution import ExecutionBatch, JobReference
-from quspect.backends.originq._client import OriginQClient
+from quspect.backends.originq._client import CancelResponse, OriginQClient
 from quspect.backends.originq._translator import decode_distribution
 from quspect.simulation.result import SimulationResult
 
 PLATFORM = "originq"
 
 # ``taskState`` values (pyqpanda3 JobStatus: WAITING=1, COMPUTING=2,
-# FINISHED=3, FAILED=4, QUEUING=5).
+# FINISHED=3, FAILED=4, QUEUING=5).  Any value not listed here or below
+# stays ``UNKNOWN``.  (pyqpanda3 0.5.1 itself reports every value outside
+# 1-5 as FAILED with "returned unsupported taskState".)
 _STATUS_MAP: dict[str, JobStatus] = {
     "1": JobStatus.PENDING,
     "2": JobStatus.RUNNING,
@@ -27,10 +29,21 @@ _STATUS_MAP: dict[str, JobStatus] = {
     "5": JobStatus.QUEUED,
 }
 
+# The SDK has no cancelled member, and its documentation names none.  Observed
+# on the live service (13 November 2026 UTC, four QPU tasks on WK_C180): after
+# an accepted cancel each task reported "35" at the next read; the first still
+# did 17 minutes later, with no result and no run time.  Two tasks were read
+# before the cancel and reported "2" until then.  Whether "35" is reported in
+# any other situation is not known.
+_CANCELLED_STATE = "35"
+
 
 def map_status(task_state: Any) -> JobStatus:
     """Map a provider ``taskState`` to :class:`JobStatus`."""
-    return _STATUS_MAP.get(str(task_state).strip(), JobStatus.UNKNOWN)
+    state = str(task_state).strip()
+    if state == _CANCELLED_STATE:
+        return JobStatus.CANCELLED
+    return _STATUS_MAP.get(state, JobStatus.UNKNOWN)
 
 
 class OriginQJob(CloudJob):
@@ -51,7 +64,8 @@ class OriginQJob(CloudJob):
     ``quasi_probabilities``.
 
     A completed task whose result cannot be decoded raises
-    :class:`~quspect.backends.JobError` chained to the decoding error.
+    :class:`~quspect.backends.JobError` chained to the decoding error.  A
+    cancelled task raises ``JobError`` with ``error_type="cancelled"``.
     """
 
     def __init__(
@@ -68,6 +82,7 @@ class OriginQJob(CloudJob):
         self._task_id = task_id
         self._reference = reference
         self._return_batch = return_batch or reference.is_batch
+        self._cancel_response: CancelResponse | None = None
 
     def _detail(self) -> dict[str, Any]:
         try:
@@ -79,8 +94,51 @@ class OriginQJob(CloudJob):
         return map_status(self._detail().get("taskState"))
 
     def cancel(self) -> bool:
-        """Origin Quantum exposes no cancellation; always returns ``False``."""
-        return False
+        """Ask Origin Quantum to cancel the task (a batch is one task).
+
+        Sends a single request, without querying the status first and
+        without retrying.  Returns ``True`` when the cloud accepted the
+        request and ``False`` when it declined; its answer, with the reason
+        for a refusal, is then in :attr:`cancel_response`.
+
+        ``False`` means the task keeps running, so keep tracking it.  On
+        the live service (13 November 2026 UTC, WK_C180) a cancel was
+        accepted for all four tasks that were still waiting in the queue,
+        from 1 s to 47 minutes after submission.  One cancel, sent 3.4 s
+        after submission when the queue was short, was declined and that
+        task completed normally: probably because the cloud had already
+        started it, which has not been checked.  Origin Quantum's
+        documentation does not say when a cancel is allowed.
+
+        ``True`` does not mean the task has stopped.  The four tasks
+        accepted on the live service then reported ``taskState`` ``"35"``,
+        which :meth:`status` maps to ``CANCELLED`` and :meth:`result` turns
+        into a ``JobError`` (``error_type="cancelled"``).  Four observations
+        are not a guarantee, so still pass a ``timeout`` to :meth:`result`
+        after cancelling.
+
+        Raises:
+            JobError: The request failed (network, HTTP error, rejected key
+                or an unreadable answer); whether the task was cancelled is
+                then unknown.
+        """
+        self._cancel_response = None
+        try:
+            response = self._client.request_cancel(self._task_id)
+        except Exception as exc:
+            raise JobError(str(exc), job_id=self._task_id) from exc
+        self._cancel_response = response
+        return response.accepted
+
+    @property
+    def cancel_response(self) -> CancelResponse | None:
+        """Origin Quantum's answer to the most recent :meth:`cancel` call.
+
+        ``None`` before the first call and after a call that raised.  On a
+        refusal, ``cancel_response.provider_message`` is the cloud's own
+        reason.
+        """
+        return self._cancel_response
 
     def result(
         self,
@@ -97,7 +155,11 @@ class OriginQJob(CloudJob):
         while True:
             detail = self._detail()
             status = map_status(detail.get("taskState"))
-            if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            if status in {
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }:
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 raise JobTimeoutError(
@@ -110,6 +172,12 @@ class OriginQJob(CloudJob):
                 sleep_for = max(0.0, min(poll_interval, deadline - time.monotonic()))
             time.sleep(sleep_for)
 
+        if status == JobStatus.CANCELLED:
+            raise JobError(
+                f"Origin Quantum job {self._task_id} was cancelled.",
+                error_type="cancelled",
+                job_id=self._task_id,
+            )
         if status == JobStatus.FAILED:
             message = detail.get("errInfo") or detail.get("errCode") or "job failed"
             raise JobError(

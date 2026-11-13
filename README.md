@@ -951,8 +951,36 @@ result = backend.run(qc, shots=2000)
   readout-corrected values are clipped and the rest renormalized; the
   provider's unmodified values are then in `metadata["quasi_probabilities"]`.
 - The `full_amplitude` simulator takes no options and no native batches;
-  requests become one job per circuit. Jobs cannot be cancelled. QPU shots are
-  limited by the chip's `MaxShots` (49 600 on `WK_C180_2`).
+  requests become one job per circuit. QPU shots are limited by the chip's
+  `MaxShots` (49 600 on `WK_C180_2`).
+- **Cancellation** — `job.cancel()` sends one request (the one pyqpanda3's
+  `QCloudJob.cancel()` sends; it is never retried) and returns `True` when
+  Origin Quantum accepted it, or `False` when it declined. After `False` the
+  task keeps running, so keep tracking it; the cloud's own reason is in
+  `job.cancel_response.provider_message`. A network or HTTP error raises
+  `JobError`: whether the task was cancelled is then unknown. A native QPU
+  batch is one task, so the request names the batch.
+  `capabilities.supports_cancel` means a cancel request can be sent, not that
+  the cloud will carry it out.
+  - *Checked on the live service* (13 November 2026 UTC, WK_C180). A cancel
+    was accepted (HTTP 200) for all four QPU tasks that were still waiting
+    in the queue, from 1 s to 47 minutes after submission; each then
+    reported `taskState` `35`, the first unchanged 17 minutes later, with no
+    result. QuSpect maps `35` to `cancelled`: `job.status()` returns it and
+    `job.result()` raises `JobError` (`error_type="cancelled"`). A waiting
+    task reports `running` (`taskState` `2`) for as long as it queues. A
+    second cancel of a cancelled task was declined (HTTP 200,
+    `success: false`, code 10096) with "Unable to cancel this task. Please
+    refresh and try again.". One cancel, sent by another client 3.4 s after
+    submission when the queue was short, was declined with the same message,
+    and that task completed normally.
+  - *Not known*: why that one cancel was declined. A guess, not checked: the
+    cloud declines once it has started the task. Also not known: whether
+    `35` is reported in any other situation. Origin Quantum's documentation
+    does not say: it describes `cancel()` only as returning whether the
+    request was accepted, and pyqpanda3 has no cancelled status (it reports
+    `35` as failed). So still pass a `timeout` to `result()` after
+    cancelling.
 - A malformed program is not rejected by the cloud — the task simply never
   finishes — so always pass a `timeout` to `result()`.
 

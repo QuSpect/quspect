@@ -797,8 +797,27 @@ result = backend.run(qc, shots=2000)
   按最大余数法把 shots 分配到各结果，计数之和等于 shots
   （`metadata["counts_source"] == "probabilities"`）。读出纠错产生的负值会被截断
   并重新归一化，云端的原始值保留在 `metadata["quasi_probabilities"]`。
-- `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务；
-  任务不可取消。真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
+- `full_amplitude` 模拟器不接受选项也不支持原生批量，请求会拆成每个线路一个任务。
+  真机 shots 上限由芯片的 `MaxShots` 决定（`WK_C180_2` 为 49600）。
+- **取消**：`job.cancel()` 只发送一次请求（与 pyqpanda3 的 `QCloudJob.cancel()`
+  所发请求一致，不会重试）；本源接受时返回 `True`，本源拒绝时返回 `False`。
+  返回 `False` 后任务仍在运行，调用方必须继续跟踪它；本源给出的原话在
+  `job.cancel_response.provider_message` 中。网络或 HTTP 错误抛出 `JobError`，
+  此时任务是否被取消未知。真机的原生批量是一个任务，取消请求针对的是整个批量。
+  `capabilities.supports_cancel` 表示可以发出取消请求，不表示云端一定会取消。
+  - *在真实云服务上核对过*（2026 年 11 月 13 日 UTC，WK_C180）。对仍在排队的真机
+    任务发出的取消都被接受（HTTP 200），共四个任务，取消时距提交 1 秒到 47 分钟
+    不等；此后任务报告 `taskState` 为 `35`，其中第一个 17 分钟后仍未变化，也没有
+    结果。QuSpect 把 `35` 映射为 `cancelled`：`job.status()` 返回该状态，
+    `job.result()` 抛出 `JobError`（`error_type="cancelled"`）。任务在排队期间
+    报告的一直是 `running`（`taskState` 为 `2`）。对已取消的任务再发一次取消则
+    被拒绝（HTTP 200，`success: false`，code 10096），原话是 "Unable to cancel
+    this task. Please refresh and try again."。另有一次取消被以同一句话拒绝：
+    由另一个客户端在提交 3.4 秒后发出，当时队列很短，那个任务随后正常完成。
+  - *尚不清楚*：那一次为什么被拒。一个未经验证的推测是：任务一旦被云端开始执行，
+    取消就会被拒。`35` 是否还会在其他情况下出现也不清楚。本源的文档没有说明：
+    它只写 `cancel()` 返回请求是否被接受，pyqpanda3 也没有“已取消”状态（会把
+    `35` 报成失败）。因此取消之后调用 `result()` 仍请传 `timeout`。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
   请务必传 `timeout`。
 
