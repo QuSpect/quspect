@@ -292,8 +292,8 @@ class OriginQBackend(CloudBackend):
             supports_batch=True,
             supports_statevector=False,
             supports_job_recovery=True,
-            # A cancel request can be sent; the cloud may decline it (the one
-            # sent to the live service was declined), see OriginQJob.cancel().
+            # A cancel request can be sent; the cloud accepts some and declines
+            # others (both seen on the live service), see OriginQJob.cancel().
             supports_cancel=True,
             max_circuits_per_job=1 if self.is_simulator else _MAX_BATCH_CIRCUITS,
             max_shots=None if self.is_simulator else self._chip().get("max_shots"),

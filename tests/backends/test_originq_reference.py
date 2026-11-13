@@ -304,10 +304,17 @@ def test_cancel_end_to_end_on_the_fake_cloud() -> None:
     assert isinstance(composite, CompositeJob)
     assert composite.cancel() is True
     assert all(cloud.tasks[task]["cancelled"] for task in composite.job_ids)
+    assert composite.status() == JobStatus.CANCELLED
 
-    # One child finishes: the cloud refuses it, so the logical job reports False.
+    # The cloud refuses a task it has already cancelled, so the logical job
+    # reports False.
+    assert composite.cancel() is False
+
+    # One child of a fresh job finishes first: refused, so False again.
+    composite = _backend(cloud, "full_amplitude").submit_request(request)
     cloud.tasks[composite.job_ids[0]]["states"].clear()
     assert composite.cancel() is False
+    assert cloud.tasks[composite.job_ids[1]]["cancelled"] is True
 
 
 # --------------------------------------------- protocol contract vs the SDK
@@ -511,9 +518,9 @@ def test_task_state_outside_the_enum_sdk_fails_quspect_reports_unknown(
     """What a status query after a cancel can show, as far as it is known.
 
     pyqpanda3 has no cancelled state: it turns every ``taskState`` outside
-    its enum into FAILED ("unsupported taskState").  Which value the cloud
-    reports for a cancelled task has not been observed, so QuSpect maps none
-    to CANCELLED and keeps such a value UNKNOWN.
+    its enum into FAILED ("unsupported taskState").  The real cloud reported
+    35 after it accepted a cancel, which QuSpect maps to CANCELLED; any
+    other value outside the enum stays UNKNOWN.
     """
     from pyqpanda3.qcloud import JobStatus as SdkStatus
     from pyqpanda3.qcloud import QCloudJob, QCloudService
@@ -536,6 +543,15 @@ def test_task_state_outside_the_enum_sdk_fails_quspect_reports_unknown(
     assert result.job_status() == SdkStatus.FAILED
     assert "unsupported taskState 6" in result.error_message()
     assert ours("STATE-6").status() == JobStatus.UNKNOWN
+
+    result = QCloudJob("STATE-35").query()
+    assert result.job_status() == SdkStatus.FAILED
+    assert "unsupported taskState 35" in result.error_message()
+    assert ours("STATE-35").status() == JobStatus.CANCELLED
+    with pytest.raises(JobError, match="was cancelled") as info:
+        ours("STATE-35").result(poll_interval=1e-3)
+    assert info.value.error_type == "cancelled"
+
     assert ours("STATE-4").status() == JobStatus.FAILED
     with pytest.raises(JobError, match="failed"):
         ours("STATE-4").result(poll_interval=1e-3)

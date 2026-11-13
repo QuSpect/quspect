@@ -12,18 +12,19 @@ server behaviour recorded on the real cloud (November 2026):
   must only use coupling edges between available qubits;
 * results are probabilities with hex keys.
 
-Cancellation (``/oqcs/task/cancelTask.json``) was not recorded like the
-endpoints above.  The fake expects the request pyqpanda3 0.5.1 sends
-(``task_mode: 0``, ``{"taskId": id}``) and answers in the form the SDK reads:
-``success: true`` to accept, ``success: false`` to refuse.  The real cloud was
-asked once (12 November 2026, 3.4 s after submitting a QPU task): it refused
-with :data:`LIVE_CANCEL_REFUSAL` and the task completed normally;
-``FakeCloud.refuse_cancel`` reproduces that.  The HTTP status and ``code`` of
-that refusal were not recorded, so the fake's (200, 10001) are stand-ins.
-Which other tasks the real cloud refuses is an assumption here (unknown and
-finished ones); an accepted cancel has never been observed, nor the
-``taskState`` it leads to, so the fake invents none (see
-``FakeCloud.cancelled_state``).
+Cancellation (``/oqcs/task/cancelTask.json``): the fake expects the request
+pyqpanda3 0.5.1 sends (``task_mode: 0``, ``{"taskId": id}``) and answers as
+the real cloud did on 12 November 2026 (WK_C180):
+
+* accepted: HTTP 200, ``success: true``, code 10000; the task then reports
+  ``taskState`` :data:`LIVE_CANCELLED_STATE` (``FakeCloud.cancelled_state``);
+* refused: HTTP 200, ``success: false``, code 10096 and the message
+  :data:`LIVE_CANCEL_REFUSAL`, seen for a task that was already cancelled and
+  (by another client) for one submitted 3.4 s earlier, which then completed
+  normally; ``FakeCloud.refuse_cancel`` reproduces the latter.
+
+Assumptions, not observations: that a finished task is refused the same way,
+and the answer for an unknown task.
 
 Programs are parsed by pyqpanda3's own OriginIR parser and evaluated exactly
 on its CPUQVM, so QuSpect's emitter is checked by an independent
@@ -42,8 +43,11 @@ import numpy as np
 _QUBIT = re.compile(r"q\[(\d+)\]")
 KEY = "00" + "11" * 40
 
-#: The real cloud's answer to the one cancel request it was sent.
+#: The real cloud's message when it declines a cancel (with code 10096).
 LIVE_CANCEL_REFUSAL = "Unable to cancel this task. Please refresh and try again."
+LIVE_CANCEL_REFUSAL_CODE = 10096
+#: ``taskState`` the real cloud reported after it accepted a cancel.
+LIVE_CANCELLED_STATE = "35"
 
 #: WK_C180_2 available qubits and coupling map as reported by chipInfo.
 WK_C180_2_AVAILABLE = [
@@ -168,10 +172,10 @@ class FakeCloud:
         #: When set, every cancel is refused with this message and the task
         #: runs on, as the real cloud did (see :data:`LIVE_CANCEL_REFUSAL`).
         self.refuse_cancel: str | None = None
-        #: ``taskState`` reported once a cancel was accepted.  The real value
-        #: is unknown and pyqpanda3 names none: ``None`` leaves the task's
-        #: own state sequence untouched, and a test picks a value explicitly.
-        self.cancelled_state: str | None = None
+        #: ``taskState`` reported once a cancel was accepted: the value the
+        #: real cloud reported.  ``None`` leaves the task's own state
+        #: sequence untouched.
+        self.cancelled_state: str | None = LIVE_CANCELLED_STATE
 
     def resources(self) -> list[dict]:
         out = [
@@ -272,11 +276,23 @@ class FakeCloud:
         if task is None:
             return self._fail("unknown task")
         if self.refuse_cancel is not None:
-            return self._fail(self.refuse_cancel)
-        if not task["states"]:  # the next taskDetail is final
-            return self._fail("task cannot be cancelled")
+            return self._refuse(self.refuse_cancel)
+        # Already cancelled (observed), or the next taskDetail is final (assumed).
+        if task.get("cancelled") or not task["states"]:
+            return self._refuse(LIVE_CANCEL_REFUSAL)
         task["cancelled"] = True
         return self._ok(None)
+
+    @staticmethod
+    def _refuse(message) -> bytes:
+        return json.dumps(
+            {
+                "success": False,
+                "code": LIVE_CANCEL_REFUSAL_CODE,
+                "message": message,
+                "obj": None,
+            }
+        ).encode()
 
     def _detail(self, task_id) -> bytes:
         task = self.tasks.get(task_id)

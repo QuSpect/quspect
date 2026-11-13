@@ -21,16 +21,23 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
     ``pyqpanda3.qcloud.QCloudJob.cancel()`` sends to a stand-in server, and
     the answer is read the way the SDK reads it.
 
-    Checked against the live service once (12 November 2026): the same
-    request, sent by another client 3.4 s after submitting one QPU task on
-    WK_C180.  The cloud declined with "Unable to cancel this task. Please
-    refresh and try again.", and the task ran on and completed normally
-    209 s later.  So a task submitted seconds earlier can be refused, and a
-    refused task keeps running.  Not checked: the HTTP status of that
-    refusal (it was not recorded, so it is either HTTP 200 or a 4xx; both
-    are read as a refusal when the body carries ``success: false``), whether
-    the cloud ever accepts a cancel, and which ``taskState`` an accepted one
-    leads to.
+    Checked against the live service on 12 November 2026, on WK_C180:
+
+    * Sent about 1 s after submitting a QPU task (two tasks, 0.96 s and
+      1.05 s): accepted, HTTP 200 with ``success: true``, ``code: 10000``,
+      ``message: "success"``.  Each task then reported ``taskState``
+      ``"35"`` at the first read, under 2 s after submission; the first
+      still did 17 minutes later, with no result and no run time.
+    * Sent again to that cancelled task: declined, HTTP 200 with
+      ``success: false``, ``code: 10096`` and the message "Unable to cancel
+      this task. Please refresh and try again.".
+    * The same request sent by another client 3.4 s after submitting a QPU
+      task was declined with that message (its HTTP status was not
+      recorded), and the task completed normally 209 s later.
+
+    So a refused task keeps running, and a task submitted seconds earlier
+    can already be refused.  Not known: which tasks the cloud accepts a
+    cancel for, and whether ``"35"`` is reported in any other situation.
 
 Every request is authenticated with ``Authorization: oqcs_auth=<api key>``.
 Responses wrap their payload as ``{"success", "code", "message", "obj"}``
@@ -228,9 +235,9 @@ class OriginQClient:
         ``False`` when it declined, with the cloud's reason in
         ``provider_message``.  A declined task keeps running.
 
-        A refusal is read from the body at HTTP 200 and at HTTP 4xx alike:
-        which of the two the live service uses has not been checked, and
-        ``http_status`` records what it sent.
+        The live service declines with HTTP 200; an HTTP 4xx whose body
+        says ``success: false`` is read as a refusal too, and
+        ``http_status`` records what was sent.
 
         Raises:
             AuthenticationError: The API key was rejected (HTTP 401/403).

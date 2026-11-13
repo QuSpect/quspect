@@ -18,12 +18,9 @@ from quspect.simulation.result import SimulationResult
 PLATFORM = "originq"
 
 # ``taskState`` values (pyqpanda3 JobStatus: WAITING=1, COMPUTING=2,
-# FINISHED=3, FAILED=4, QUEUING=5).  The SDK has no cancelled member, and
-# which ``taskState`` the cloud reports for a cancelled task has not been
-# observed (the one cancel sent to the live service was declined), so none
-# is mapped to ``JobStatus.CANCELLED``: any other value stays ``UNKNOWN``.
-# (pyqpanda3 0.5.1 itself reports every value outside 1-5 as FAILED with
-# "returned unsupported taskState".)
+# FINISHED=3, FAILED=4, QUEUING=5).  Any value not listed here or below
+# stays ``UNKNOWN``.  (pyqpanda3 0.5.1 itself reports every value outside
+# 1-5 as FAILED with "returned unsupported taskState".)
 _STATUS_MAP: dict[str, JobStatus] = {
     "1": JobStatus.PENDING,
     "2": JobStatus.RUNNING,
@@ -32,10 +29,20 @@ _STATUS_MAP: dict[str, JobStatus] = {
     "5": JobStatus.QUEUED,
 }
 
+# The SDK has no cancelled member.  Observed on the live service (12 November
+# 2026, two QPU tasks on WK_C180): after an accepted cancel each task reported
+# "35" at the first read, under 2 s after submission; the first still did
+# 17 minutes later, with no result and no run time.  Whether "35" is reported
+# in any other situation is not known.
+_CANCELLED_STATE = "35"
+
 
 def map_status(task_state: Any) -> JobStatus:
     """Map a provider ``taskState`` to :class:`JobStatus`."""
-    return _STATUS_MAP.get(str(task_state).strip(), JobStatus.UNKNOWN)
+    state = str(task_state).strip()
+    if state == _CANCELLED_STATE:
+        return JobStatus.CANCELLED
+    return _STATUS_MAP.get(state, JobStatus.UNKNOWN)
 
 
 class OriginQJob(CloudJob):
@@ -56,7 +63,8 @@ class OriginQJob(CloudJob):
     ``quasi_probabilities``.
 
     A completed task whose result cannot be decoded raises
-    :class:`~quspect.backends.JobError` chained to the decoding error.
+    :class:`~quspect.backends.JobError` chained to the decoding error.  A
+    cancelled task raises ``JobError`` with ``error_type="cancelled"``.
     """
 
     def __init__(
@@ -93,16 +101,18 @@ class OriginQJob(CloudJob):
         for a refusal, is then in :attr:`cancel_response`.
 
         ``False`` means the task keeps running, so keep tracking it.  The
-        cloud can decline a task submitted seconds earlier: the one cancel
-        sent to the live service (12 November 2026, 3.4 s after submitting a
-        QPU task) was declined, and the task completed normally.  Whether
-        the cloud ever accepts a cancel has not been observed.
+        cloud can decline a task submitted seconds earlier: on the live
+        service (12 November 2026, WK_C180) a cancel sent 3.4 s after
+        submission was declined and the task completed normally, while two
+        sent about 1 s after submission were accepted.  Which tasks the
+        cloud accepts a cancel for is not known.
 
-        ``True`` does not mean the task has stopped, and which ``taskState``
-        a cancelled task reports is not known: afterwards :meth:`status`
-        returns whatever the cloud reports, ``UNKNOWN`` for a value outside
-        pyqpanda3's five states, and :meth:`result` keeps polling while it
-        does, so pass a ``timeout``.
+        ``True`` does not mean the task has stopped.  The two tasks accepted
+        on the live service then reported ``taskState`` ``"35"``, which
+        :meth:`status` maps to ``CANCELLED`` and :meth:`result` turns into a
+        ``JobError`` (``error_type="cancelled"``).  Two observations are not
+        a guarantee, so still pass a ``timeout`` to :meth:`result` after
+        cancelling.
 
         Raises:
             JobError: The request failed (network, HTTP error, rejected key
@@ -142,7 +152,11 @@ class OriginQJob(CloudJob):
         while True:
             detail = self._detail()
             status = map_status(detail.get("taskState"))
-            if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+            if status in {
+                JobStatus.COMPLETED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            }:
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 raise JobTimeoutError(
@@ -155,6 +169,12 @@ class OriginQJob(CloudJob):
                 sleep_for = max(0.0, min(poll_interval, deadline - time.monotonic()))
             time.sleep(sleep_for)
 
+        if status == JobStatus.CANCELLED:
+            raise JobError(
+                f"Origin Quantum job {self._task_id} was cancelled.",
+                error_type="cancelled",
+                job_id=self._task_id,
+            )
         if status == JobStatus.FAILED:
             message = detail.get("errInfo") or detail.get("errCode") or "job failed"
             raise JobError(

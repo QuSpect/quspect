@@ -295,10 +295,10 @@ def test_timeout_and_failure() -> None:
 #
 # The request is the one pyqpanda3 0.5.1 sends (compared with the SDK in
 # ``test_originq_reference.py``).  The answers follow the SDK's handling:
-# ``success`` alone decides.  The real cloud was asked once and refused (see
-# ``_originq_fakes.LIVE_CANCEL_REFUSAL``); the HTTP status of that refusal was
-# not recorded, so a refusal is read from the body at HTTP 200 and 4xx alike.
-# Any other HTTP error is an error.
+# ``success`` alone decides.  The real cloud accepted one cancel and declined
+# others, always with HTTP 200 (see ``_originq_fakes``); a 4xx whose body says
+# ``success: false`` is read as a refusal too.  Any other HTTP error is an
+# error.
 
 _ACCEPTED = {"success": True, "code": 10000, "message": "success", "obj": None}
 _REFUSED = {"success": False, "code": 10001, "message": "task finished", "obj": None}
@@ -489,7 +489,7 @@ def test_job_cancel_refused_like_the_live_cloud_and_the_task_runs_on() -> None:
     assert job.cancel_response == CancelResponse(
         accepted=False,
         http_status=200,
-        code=10001,
+        code=10096,
         provider_message=LIVE_CANCEL_REFUSAL,
     )
     assert "cancelled" not in cloud.tasks["T1"]
@@ -564,20 +564,56 @@ def test_job_cancel_http_error_is_a_job_error(response, cause) -> None:
     assert len(transport.calls) == 1
 
 
-@pytest.mark.parametrize("state", ["0", "6", "7", "-1", "cancelled", "", None])
+@pytest.mark.parametrize(
+    "state", ["0", "6", "7", "-1", "34", "36", "350", "3.5", "cancelled", "", None]
+)
 def test_task_states_outside_the_sdk_enum_stay_unknown(state) -> None:
-    """pyqpanda3's JobStatus stops at 5 and names no cancelled state."""
+    """pyqpanda3's JobStatus stops at 5; only the observed 35 is added."""
     assert map_status(state) == JobStatus.UNKNOWN
 
 
-def test_state_after_cancel_is_whatever_the_cloud_reports() -> None:
-    """No cancelled ``taskState`` is known, so nothing maps to CANCELLED."""
+@pytest.mark.parametrize("state", ["35", 35, " 35 "])
+def test_task_state_35_is_cancelled(state) -> None:
+    """What the real cloud reported after it accepted a cancel."""
+    assert map_status(state) == JobStatus.CANCELLED
+
+
+def test_job_cancel_accepted_like_the_live_cloud_then_reports_cancelled() -> None:
+    """The live observation: accepted, ``taskState`` 35, a second cancel refused."""
     cloud = FakeCloud()
     job = _fake_job(cloud)
     assert job.cancel() is True
-    assert job.status() == JobStatus.PENDING  # the fake invents no state
+    assert job.cancel_response == CancelResponse(
+        accepted=True, http_status=200, code=10000, provider_message="success"
+    )
+    assert job.status() == JobStatus.CANCELLED
+    assert job.done()
+    with pytest.raises(JobError, match="T1 was cancelled") as info:
+        job.result(poll_interval=1e-3)  # no timeout needed: the state is final
+    assert info.value.error_type == "cancelled"
+    assert info.value.job_id == "T1"
+    assert info.value.result_pending is False
 
-    cloud.cancelled_state = "6"  # stand-in for a value outside the SDK enum
+    assert job.cancel() is False
+    assert job.cancel_response == CancelResponse(
+        accepted=False,
+        http_status=200,
+        code=10096,
+        provider_message=LIVE_CANCEL_REFUSAL,
+    )
+    assert job.status() == JobStatus.CANCELLED
+
+
+def test_state_after_cancel_is_whatever_the_cloud_reports() -> None:
+    """Only 35 is known to follow a cancel; any other state is passed on."""
+    cloud = FakeCloud()
+    job = _fake_job(cloud)
+    assert job.cancel() is True
+
+    cloud.cancelled_state = None  # the task's own states: accepted, still running
+    assert job.status() == JobStatus.PENDING
+
+    cloud.cancelled_state = "6"  # stand-in for a value outside the known ones
     assert job.status() == JobStatus.UNKNOWN
     assert not job.done()
     with pytest.raises(JobTimeoutError, match="status: unknown"):

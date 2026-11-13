@@ -962,18 +962,22 @@ result = backend.run(qc, shots=2000)
   batch is one task, so the request names the batch.
   `capabilities.supports_cancel` means a cancel request can be sent, not that
   the cloud will carry it out.
-  - *Checked on the live service once* (12 November 2026): the same request,
-    sent 3.4 s after submitting one QPU task on WK_C180, was declined with
-    "Unable to cancel this task. Please refresh and try again."; the task
-    completed normally 209 s later. So a task submitted seconds earlier can
-    be refused.
-  - *Not checked*: the HTTP status of a refusal (it was not recorded; a body
-    with `success: false` is read as a refusal at HTTP 200 and at 4xx alike,
-    and `cancel_response.http_status` reports which it was), whether the
-    cloud ever accepts a cancel, and the state a cancelled task reports
-    (pyqpanda3 has no cancelled status either). `job.status()` returns what
-    the cloud reports, `unknown` for a state outside the five known ones, so
-    pass a `timeout` to `result()` after cancelling.
+  - *Checked on the live service* (12 November 2026, WK_C180). A cancel sent
+    about 1 s after submitting a QPU task was accepted (HTTP 200) for both
+    tasks tried; each then reported `taskState` `35`, the first unchanged
+    17 minutes later, with no result.
+    QuSpect maps `35` to `cancelled`: `job.status()` returns it and
+    `job.result()` raises `JobError` (`error_type="cancelled"`). A second
+    cancel of that task was declined (HTTP 200, `success: false`, code 10096)
+    with "Unable to cancel this task. Please refresh and try again.". A
+    cancel sent by another client 3.4 s after submission was declined with
+    the same message, and that task completed normally 209 s later. So a
+    task submitted seconds earlier can already be refused.
+  - *Not known*: which tasks the cloud accepts a cancel for, and whether
+    `35` is reported in any other situation (pyqpanda3 has no cancelled
+    status and reports `35` as failed). Each finding above rests on one or
+    two observations, so still pass a `timeout` to `result()` after
+    cancelling.
 - A malformed program is not rejected by the cloud — the task simply never
   finishes — so always pass a `timeout` to `result()`.
 

@@ -113,11 +113,12 @@ def test_qpu_bit_order_quspect_and_provider_mapping(provider) -> None:
 def test_qpu_cancel_right_after_submission_records_the_clouds_answer(provider) -> None:
     """Submit one small QPU task, cancel it at once, and record what follows.
 
-    The one cancel the live service has been sent (12 November 2026) was
-    declined and the task completed.  Still unknown, and printed here: the
-    HTTP status and ``code`` of a refusal, whether a cancel is ever
-    accepted, and the ``taskState`` values a task reports afterwards.  The
-    assertions only cover what QuSpect promises either way.
+    On 12 November 2026 (WK_C180) this cancel, sent 0.96 s after submission,
+    was accepted (HTTP 200, code 10000) and the task reported ``taskState``
+    35 from then on; a cancel another client sent 3.4 s after submission was
+    declined and that task completed.  Which tasks the cloud accepts a
+    cancel for is not known, so both outcomes pass; the record printed here
+    (status, code, message, ``taskState`` values) is the point of the test.
     """
     backend = provider.get_backend(os.environ.get("QUSPECT_ORIGINQ_QPU", "WK_C180_2"))
     circuit = QuantumCircuit(name="cancel_probe")
@@ -150,14 +151,18 @@ def test_qpu_cancel_right_after_submission_records_the_clouds_answer(provider) -
         if not states or states[-1][1] != state:
             states.append((round(time.monotonic() - submitted, 1), state))
         status = map_status(state)
-        if status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        if status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
             break
         time.sleep(5)
     record.update(task_states=states, final_status=status.value)
     print("\noriginq cancel record:", json.dumps(record, ensure_ascii=False))
 
     assert response.accepted is accepted
-    if not accepted:
+    if accepted:
+        # Accepted does not promise a state; a completed task would mean the
+        # cancel came too late, a failed one that 35 is not the only outcome.
+        assert status in {JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.UNKNOWN}
+    else:
         # A declined task keeps running; the cloud says why.
         assert response.provider_message
         assert status != JobStatus.CANCELLED
