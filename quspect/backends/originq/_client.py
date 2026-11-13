@@ -23,11 +23,13 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
 
     Checked against the live service on 12 November 2026, on WK_C180:
 
-    * Sent about 1 s after submitting a QPU task (two tasks, 0.96 s and
-      1.05 s): accepted, HTTP 200 with ``success: true``, ``code: 10000``,
-      ``message: "success"``.  Each task then reported ``taskState``
-      ``"35"`` at the first read, under 2 s after submission; the first
-      still did 17 minutes later, with no result and no run time.
+    * Sent 1 to 9 s after submitting a QPU task (three tasks: 0.96 s,
+      1.05 s and 8.9 s): accepted, HTTP 200 with ``success: true``,
+      ``code: 10000``, ``message: "success"``.  Each task reported
+      ``taskState`` ``"35"`` at the next read; the first still did
+      17 minutes later, with no result and no run time.  The third was read
+      before the cancel and reported ``"2"`` until then, so ``"35"`` follows
+      from the cancel.
     * Sent again to that cancelled task: declined, HTTP 200 with
       ``success: false``, ``code: 10096`` and the message "Unable to cancel
       this task. Please refresh and try again.".
@@ -37,7 +39,11 @@ used by pyqpanda3 0.5.1, recorded from its traffic in November 2026:
 
     So a refused task keeps running, and a task submitted seconds earlier
     can already be refused.  Not known: which tasks the cloud accepts a
-    cancel for, and whether ``"35"`` is reported in any other situation.
+    cancel for (state ``"2"`` alone does not decide: see above), and whether
+    ``"35"`` is reported in any other situation.  pyqpanda3's documentation
+    (0.5.1) says only that ``cancel()`` returns whether the service accepted
+    the request; it names no cancelled state and no rule for when a cancel
+    is allowed.
 
 Every request is authenticated with ``Authorization: oqcs_auth=<api key>``.
 Responses wrap their payload as ``{"success", "code", "message", "obj"}``

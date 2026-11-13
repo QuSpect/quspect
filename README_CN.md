@@ -805,17 +805,19 @@ result = backend.run(qc, shots=2000)
   `job.cancel_response.provider_message` 中。网络或 HTTP 错误抛出 `JobError`，
   此时任务是否被取消未知。真机的原生批量是一个任务，取消请求针对的是整个批量。
   `capabilities.supports_cancel` 表示可以发出取消请求，不表示云端一定会取消。
-  - *在真实云服务上核对过*（2026 年 11 月 12 日，WK_C180）。提交真机任务约 1 秒后
-    发出的取消被接受（HTTP 200），两个任务都是如此；此后任务报告 `taskState` 为
-    `35`，其中第一个 17 分钟后仍未变化，也没有结果。QuSpect 把 `35` 映射为 `cancelled`：`job.status()` 返回
+  - *在真实云服务上核对过*（2026 年 11 月 12 日，WK_C180）。提交真机任务 1 到 9 秒后
+    发出的取消被接受（HTTP 200），试过的三个任务都是如此；此后任务报告
+    `taskState` 为 `35`，其中第一个 17 分钟后仍未变化，也没有结果。有一个任务在
+    取消前读过状态，一直是 `2`（运行中）。QuSpect 把 `35` 映射为 `cancelled`：`job.status()` 返回
     该状态，`job.result()` 抛出 `JobError`（`error_type="cancelled"`）。对这个任务
     再发一次取消则被拒绝（HTTP 200，`success: false`，code 10096），原话是
     "Unable to cancel this task. Please refresh and try again."。另一个客户端在
     提交 3.4 秒后发出的取消也被以同一句话拒绝，那个任务在 209 秒后正常完成。
     也就是说，刚提交几秒的任务也可能被拒。
-  - *尚不清楚*：本源在哪些情况下接受取消；`35` 是否还会在其他情况下出现
-    （pyqpanda3 没有“已取消”状态，会把 `35` 报成失败）。以上每一条都只有一两次
-    观测，因此取消之后调用 `result()` 仍请传 `timeout`。
+  - *尚不清楚*：本源在哪些情况下接受取消；`35` 是否还会在其他情况下出现。
+    本源的文档没有说明：它只写 `cancel()` 返回请求是否被接受，pyqpanda3 也没有
+    “已取消”状态（会把 `35` 报成失败）。以上每一条都只有一到三次观测，因此取消
+    之后调用 `result()` 仍请传 `timeout`。
 - 格式错误的程序不会被云端拒绝，任务会一直停在计算中，因此调用 `result()` 时
   请务必传 `timeout`。
 
