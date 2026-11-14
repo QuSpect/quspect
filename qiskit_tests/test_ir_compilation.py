@@ -358,3 +358,54 @@ def test_decompose_deep_raises_when_not_converging() -> None:
     circ.append(Gate(name="other", num_qubits=1), (0,))
     with pytest.raises(RecursionError, match=r"3 passes.*\['grow', 'other'\]"):
         decompose_deep(circ, supported_gates={"h"}, max_passes=3)
+
+
+def test_decompose_deep_strict_names_the_gates_left() -> None:
+    """Known issue: gates without a rule came back silently (``s``, ``t``)."""
+    circ = quspect.QuantumCircuit().s(0).t(0)
+    supported = {"cz", "h", "rz", "rx", "ry"}
+
+    # The default is unchanged: the exporter, _fold_phases and the fusion cost
+    # rely on getting the leftovers back.
+    out = decompose_deep(circ, supported_gates=supported)
+    assert [i.gate.name for i in out.instructions if i.gate] == ["s", "t"]
+
+    with pytest.raises(ValueError, match=r"left gate\(s\) \['s', 't'\]") as caught:
+        decompose_deep(circ, supported_gates=supported, strict=True)
+    assert "['cz', 'h', 'rx', 'ry', 'rz']" in str(caught.value)
+    assert "DecomposePass" in str(caught.value)
+
+
+def test_decompose_deep_strict_counts_only_gates_left() -> None:
+    """Measurements, barriers and channels are not gates to lower; names are
+    listed once, sorted, and lowered gates are not listed."""
+    circ = quspect.QuantumCircuit().t(1).rx(0.3, 0).barrier().s(0)
+    circ.depolarize(0.1, 1).t(0).measure([0, 1], [0, 1])
+    with pytest.raises(ValueError, match=r"left gate\(s\) \['s', 't'\] that"):
+        decompose_deep(circ, supported_gates={"h", "rz", "cx"}, strict=True)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_decompose_deep_strict_returns_the_same_circuit_when_all_lower(
+    seed: int,
+) -> None:
+    circ, _ = random_circuit_pair(3, 25, seed)
+    loose = decompose_deep(circ, supported_gates=BASIS)
+    assert decompose_deep(circ, supported_gates=BASIS, strict=True).instructions == (
+        loose.instructions
+    )
+    already = quspect.QuantumCircuit().h(0).cx(0, 1).measure_all()
+    assert decompose_deep(
+        already, supported_gates={"h", "cx"}, strict=True
+    ).instructions == (already.instructions)
+
+
+def test_decompose_deep_strict_keeps_the_convergence_error() -> None:
+    def grow(gate: Gate, qs: tuple[int, ...]) -> list[tuple[Gate, tuple[int, ...]]]:
+        return [(gate, qs), (gate, qs)]
+
+    register_decomposition(GateDecompositionRule("grow", 1, grow))
+    circ = quspect.QuantumCircuit()
+    circ.append(Gate(name="grow", num_qubits=1), (0,))
+    with pytest.raises(RecursionError, match="3 passes"):
+        decompose_deep(circ, supported_gates={"h"}, max_passes=3, strict=True)
