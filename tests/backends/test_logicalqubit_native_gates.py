@@ -89,12 +89,50 @@ def test_chip_declaring_lqcloud_native_names_compiles(declared: list[str]) -> No
 
     document, _ = backend._lq_backend.calls[0]
     names = set(_sent_gate_names(document))
-    # Routing may add SWAPs; everything else is in the chip's set.
-    assert names - {"swap"} <= backend.native_gate_set
+    assert names <= backend.native_gate_set
     assert "cz" in names
     routed = loads(document).circuit
     assert routed is not None
     assert Simulator(seed=7).run(routed, shots=32).counts == {"101": 32}
+
+
+def _routed_with_a_fence(fence: str) -> QuantumCircuit:
+    """A classical triangle of CX gates, which a line holds only with SWAPs.
+
+    The fence (a barrier between gates, or a mid-circuit measurement) sends
+    the circuit through the device pipeline that routes after lowering.
+    """
+    circuit = QuantumCircuit().x(0).cx(0, 1).cx(1, 2)
+    if fence == "barrier":
+        circuit.barrier()
+    else:
+        circuit.measure([0], [3])
+    circuit.cx(0, 2).t(2).cx(2, 1).x(1)
+    return circuit.measure([0, 1, 2], [0, 1, 2])
+
+
+@pytest.mark.parametrize("fence", ["barrier", "mid-circuit measurement"])
+def test_routing_swaps_are_sent_in_the_declared_native_gates(fence: str) -> None:
+    """Known issue: routing SWAPs went out as ``swap``, which lqcloud lowered
+    to ``yhalf`` / ``myhalf``, gates the chip did not declare."""
+    backend = LogicalQubitBackend(_chip(["xhalf", "rz", "cz"], qubits=6))
+    backend._translator = _IdentityTranslator()
+    circuit = _routed_with_a_fence(fence)
+
+    backend.submit(circuit, shots=8)
+
+    document, options = backend._lq_backend.calls[0]
+    assert set(_sent_gate_names(document)) <= {"sx", "rz", "cz"}
+    layout = options["initial_layout"]
+    routed = loads(document).circuit
+    assert routed is not None
+    for instruction in routed:
+        if instruction.is_gate and len(instruction.qubits) == 2:
+            a, b = (layout[wire] for wire in instruction.qubits)
+            assert abs(a - b) == 1
+    expected = Simulator(seed=3).run(circuit, shots=16).counts
+    assert len(expected) == 1
+    assert Simulator(seed=3).run(routed, shots=16).counts == expected
 
 
 def test_chip_with_quspect_native_names_keeps_sx_as_sx() -> None:
@@ -297,3 +335,36 @@ class TestAgainstLqcloud:
             assert _equal_up_to_phase(
                 _native_unitary(payload, 3), _quspect_unitary(unitary_part, 3)
             )
+
+    @pytest.mark.parametrize("fence", ["barrier", "mid-circuit measurement"])
+    def test_routed_circuit_stays_in_the_declared_native_gates(
+        self, fence: str
+    ) -> None:
+        """Known issue: lqcloud lowered routing SWAPs to ``yhalf``/``myhalf``."""
+        rng = np.random.default_rng(54)
+        for _ in range(20):
+            n = int(rng.integers(3, 7))
+            a, b, c = (int(q) for q in rng.choice(n, 3, replace=False))
+            circuit = QuantumCircuit()
+            for qubit in range(n):
+                circuit.h(qubit)
+            # A triangle of two-qubit gates: the line needs routing SWAPs.
+            circuit.cx(a, b).cx(b, c)
+            if fence == "barrier":
+                circuit.barrier()
+            else:
+                circuit.measure([a], [n])
+            circuit.cx(a, c)
+            for _ in range(6):
+                circuit.ry(float(rng.uniform(-3, 3)), int(rng.integers(0, n)))
+                x, y = (int(q) for q in rng.choice(n, 2, replace=False))
+                circuit.cz(x, y)
+            circuit.measure(list(range(n)), list(range(n)))
+
+            backend = LogicalQubitBackend(_chip(["xhalf", "rz", "cz"], qubits=6))
+            backend.submit(circuit, shots=8)
+            program, _ = backend._lq_backend.calls[0]
+            payload = self._serialize(program)
+
+            sent = {item["name"] for item in payload["instructions"]}
+            assert sent - _NOT_GATES <= {"xhalf", "rz", "cz"}
