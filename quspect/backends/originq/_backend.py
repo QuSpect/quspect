@@ -647,7 +647,6 @@ class OriginQBackend(CloudBackend):
     ) -> tuple[QuantumCircuit, list[int]]:
         """Route on the chip and return ``(wire circuit, wire → physical)``."""
         from quspect.backends._compile import compile_for_device
-        from quspect.transpiler._passes import DecomposePass
         from quspect.transpiler._target import CompilationTarget
 
         try:
@@ -658,11 +657,6 @@ class OriginQBackend(CloudBackend):
                 initial_layout=initial_layout,
                 physical_qubits=physical_qubits,
             )
-            # Lower the routing SWAPs the earlier pipeline leaves in (a
-            # circuit compiled by transpile() is already in the chip basis).
-            # Decomposition is local to each gate's qubits, so the placement
-            # stays valid.
-            routed = DecomposePass(target).run(routed)
         except Exception as exc:
             raise TranslationError(
                 f"Failed to transpile experiment {label!r}: {exc}"

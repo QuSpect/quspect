@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from quspect import QuantumCircuit
+from quspect import QuantumCircuit, Simulator
 from quspect.backends import _compile
 from quspect.backends._compile import (
     _compile_with_passes,
@@ -58,7 +58,7 @@ def _gates(circuit: QuantumCircuit) -> list:
 
 
 def _two_qubit_gates(circuit: QuantumCircuit, target: CompilationTarget) -> int:
-    """Two-qubit gates once the routing SWAPs are lowered, as backends do."""
+    """Two-qubit gates, with any ``swap`` lowered to the target's gates."""
     lowered = DecomposePass(target).run(circuit)
     return sum(1 for ins in _gates(lowered) if len(ins.qubits) == 2)
 
@@ -403,6 +403,62 @@ def test_invalid_arguments_raise_the_earlier_errors() -> None:
         compile_for_device(target, circuit, physical_qubits=[3])
     with pytest.raises(ValueError, match="provides only 2 physical qubits"):
         compile_for_device(target, _star(3), physical_qubits=[3, 4])
+
+
+#: Declared gate sets: the backends' bases, and the set a LogicalQubit chip
+#: declaring lqcloud's ``xhalf, rz, cz`` compiles to.
+DECLARED_BASES = {
+    **{name: basis for name, basis in BACKEND_BASES.items() if basis},
+    "logicalqubit": {"sx", "rz", "cz"},
+}
+
+
+def _triangle(fence: str) -> QuantumCircuit:
+    """Two-qubit gates on a triangle, which a line holds only with SWAPs.
+
+    The ``fence`` (a barrier between gates, or a mid-circuit measurement)
+    keeps the circuit from ``transpile()``.
+    """
+    circuit = QuantumCircuit().x(0).h(1).ry(0.7, 2)
+    circuit.cx(0, 1).cx(1, 2)
+    if fence == "barrier":
+        circuit.barrier()
+    else:
+        circuit.measure([0], [3])
+    circuit.cx(0, 2).t(2).cx(2, 1).rx(0.4, 0)
+    return circuit.measure([0, 1, 2], [0, 1, 2])
+
+
+@pytest.mark.parametrize("fence", ["barrier", "mid-circuit measurement"])
+@pytest.mark.parametrize("backend", sorted(DECLARED_BASES))
+def test_the_earlier_pipeline_lowers_its_routing_swaps(
+    backend: str, fence: str
+) -> None:
+    """Known issue: routing SWAPs were returned as ``swap``, outside the set."""
+    circuit = _triangle(fence)
+    undeclared, _ = _compile_with_passes(_target(5, LINE8[:4]), circuit)
+    assert any(ins.gate.name == "swap" for ins in _gates(undeclared))
+    target = _target(5, LINE8[:4], DECLARED_BASES[backend])
+
+    routed, layout = _same_as_passes(target, circuit)
+
+    _assert_runs_on(routed, layout, target)
+    if fence == "barrier":
+        assert_same_distribution(
+            quspect_exact_distribution(routed), quspect_exact_distribution(circuit)
+        )
+    else:
+        assert used_after_measurement(routed) != []
+        expected = Simulator(seed=11).run(circuit, shots=64).counts
+        assert Simulator(seed=11).run(routed, shots=64).counts == expected
+
+
+def test_routing_swaps_the_declared_gates_cannot_express_are_refused() -> None:
+    """A set without the gates a SWAP needs gets an error, not a ``swap``."""
+    circuit = QuantumCircuit().cz(0, 1).cz(1, 2).barrier().cz(0, 2).measure_all()
+
+    with pytest.raises(ValueError, match="routing SWAPs cannot be expressed"):
+        compile_for_device(_target(5, LINE8[:4], {"cz"}), circuit)
 
 
 # ---------------------------------------------------------------------------

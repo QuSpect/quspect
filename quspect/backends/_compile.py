@@ -186,15 +186,19 @@ def compile_for_device(
         results are already in logical clbit order and need no qubit-level
         un-permutation.  ``layout`` is ``None`` when no routing happened.
 
-        A circuit compiled by ``transpile()`` is already in the target's
-        native gates.  The earlier pipeline leaves its routing SWAPs for the
-        caller to lower.
+        When the target declares native gates, the returned circuit holds
+        only those: ``transpile()`` compiles to them, and the earlier
+        pipeline lowers its routing SWAPs to them after routing.
 
         Terminal measurements stay terminal: they come after every gate of
         the returned circuit, each on the wire that holds its logical qubit
         after the final SWAP.  A gate follows a measurement only when the
         input circuit itself used a qubit after measuring it (see
         :func:`defer_terminal_measurements`).
+
+    Raises:
+        ValueError: If a gate, or a SWAP that routing needs, cannot be
+            expressed in the target's native gates.
     """
     compiled = _compile_with_transpile(
         device_target,
@@ -482,8 +486,9 @@ def _compile_with_passes(
 
     The pipeline behind :func:`compile_for_device` before it called
     ``transpile()``, kept for what ``transpile()`` cannot take.  Arguments
-    and result as in :func:`compile_for_device`; routing SWAPs are left in
-    the returned circuit for the caller to lower.
+    and result as in :func:`compile_for_device`.  When the target declares
+    native gates, the routing SWAPs are lowered to them; without a declared
+    set they stay ``swap`` for the provider to lower.
     """
     from quspect.transpiler._mapping import validate_initial_mapping
     from quspect.transpiler._passes import (
@@ -609,6 +614,18 @@ def _compile_with_passes(
                 f"the circuit qubit count ({num_logical})."
             )
         layout = list(initial_layout)[: circuit.num_qubits]
+
+    # Everything else is native already (decomposed above); routing adds
+    # SWAPs, which a declared set need not hold.  A decomposition acts on
+    # the gate's own wires, so the placement stays valid.
+    if device_target.native_gates:
+        try:
+            circuit = DecomposePass(device_target).run(circuit)
+        except ValueError as exc:
+            raise ValueError(
+                "The routing SWAPs cannot be expressed in the native gates "
+                f"{sorted(device_target.native_gates)}: {exc}"
+            ) from exc
 
     return circuit, layout
 
