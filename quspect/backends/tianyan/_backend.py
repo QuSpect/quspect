@@ -526,7 +526,6 @@ class TianyanBackend(CloudBackend):
         pool: Sequence[int] | None,
     ) -> tuple[QuantumCircuit, list[int]]:
         from quspect.backends._compile import compile_for_device
-        from quspect.transpiler._passes import DecomposePass
 
         target = self._target()
         try:
@@ -536,9 +535,6 @@ class TianyanBackend(CloudBackend):
                 initial_layout=initial_layout,
                 physical_qubits=pool if pool is not None else self.available_qubits,
             )
-            # Lower the routing SWAPs the earlier pipeline leaves in (a
-            # circuit compiled by transpile() is already in the QCIS basis).
-            routed = DecomposePass(target).run(routed)
         except Exception as exc:
             raise TranslationError(
                 f"Failed to transpile experiment {label!r}: {exc}"

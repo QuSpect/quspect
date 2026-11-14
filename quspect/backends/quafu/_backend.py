@@ -695,7 +695,6 @@ class QuafuBackend(CloudBackend):
         Reports what Quafu would refuse before compiling.
         """
         from quspect.backends._compile import compile_for_device
-        from quspect.transpiler._passes import DecomposePass
 
         width = circuit.num_qubits
         if width > len(pool):
@@ -723,9 +722,6 @@ class QuafuBackend(CloudBackend):
         routed, layout = compile_for_device(
             device, circuit, initial_layout=initial_layout, physical_qubits=pool
         )
-        # Lower the routing SWAPs the earlier pipeline leaves in; a circuit
-        # compiled by transpile() is already in the chip basis.
-        routed = DecomposePass(device).run(routed)
         if layout is None:
             # A pool without couplings (one qubit) is not routed.
             layout = pool[: routed.num_qubits]
