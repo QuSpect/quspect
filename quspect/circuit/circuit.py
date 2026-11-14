@@ -1097,16 +1097,41 @@ class QuantumCircuit:
         S ↔ S†, T ↔ T†.  Parameterized rotation gates flip the sign of
         their angle: RX(θ) → RX(-θ), etc.
 
-        Measurements, barriers, and noise channels are preserved in
-        reversed order.
+        Barriers are kept, in reversed order.  Measurements and noise
+        channels are not unitary, so a circuit that contains them has no
+        inverse and is refused, as Qiskit's ``inverse()`` refuses it.  Take
+        the dagger of the unitary part and measure afterwards.
 
         Returns:
             A new QuantumCircuit representing U†.
 
+        Raises:
+            ValueError: If the circuit contains a measurement or a noise
+                channel.
+
         Example:
             >>> circ = QuantumCircuit().z(0).ry(math.pi / 2, 0)
             >>> circ.dagger()  # Ry(-π/2) → Z
+            >>> QuantumCircuit().h(0).measure([0], [0]).dagger()
+            Traceback (most recent call last):
+                ...
+            ValueError: dagger() needs a unitary circuit, but instruction 1 ...
         """
+        for index, instr in enumerate(self._instructions):
+            if instr.is_measure:
+                raise ValueError(
+                    f"dagger() needs a unitary circuit, but instruction {index} "
+                    f"measures qubit(s) {list(instr.qubits)}: a measured circuit "
+                    "has no inverse. Take the dagger of the circuit before its "
+                    "measurements are added."
+                )
+            if instr.is_channel:
+                name = instr.channel.name if instr.channel is not None else "?"
+                raise ValueError(
+                    f"dagger() needs a unitary circuit, but instruction {index} "
+                    f"is a {name!r} noise channel on qubit(s) "
+                    f"{list(instr.qubits)}: a noisy circuit has no inverse."
+                )
         dag = QuantumCircuit(name=f"{self._name}†" if self._name else "dagger")
         for instr in reversed(self._instructions):
             if instr.is_barrier:
@@ -1114,10 +1139,6 @@ class QuantumCircuit:
                     dag.barrier(*instr.qubits)
                 else:
                     dag.barrier()
-            elif instr.is_measure:
-                dag.measure(instr.qubits, instr.clbits)
-            elif instr.is_channel and instr.channel is not None:
-                dag.append_channel(instr.channel, instr.qubits)
             elif instr.is_gate and instr.gate is not None:
                 dag_gate = _adjoint_gate(instr.gate)
                 dag.append(dag_gate, instr.qubits, instr.clbits)
