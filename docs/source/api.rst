@@ -52,6 +52,12 @@ Gates
    :members:
    :exclude-members: ParameterizedGate  (documented via Gate)
 
+Registered Gates
+~~~~~~~~~~~~~~~~
+
+.. automodule:: quspect.gates.registry
+   :members:
+
 Single-Qubit Synthesis
 ~~~~~~~~~~~~~~~~~~~~~~
 

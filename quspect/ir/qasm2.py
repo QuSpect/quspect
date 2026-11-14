@@ -213,6 +213,11 @@ class QASM2Exporter:
     :exc:`UnsupportedGateError` in STRICT mode.  EXTENDED and DECOMPOSE
     modes provide alternate handling (Phase 2).
 
+    A gate registered with :func:`quspect.gates.register_gate` (for example
+    an entangler added with :func:`quspect.synthesis.register_entangler`)
+    has no OpenQASM 2.0 name: every mode writes it as its registered
+    decomposition.
+
     Noise channels have no OpenQASM 2.0 form.  A circuit that contains one
     is refused in every mode (:exc:`UnsupportedGateError`) rather than
     written as its noiseless circuit; QSAL (:func:`quspect.ir.dumps`) keeps
@@ -276,6 +281,9 @@ class QASM2Exporter:
         if len(circuit) == 0:
             raise ValueError("Cannot export an empty circuit to OpenQASM 2.0.")
         _refuse_noise_channels(circuit)
+        from quspect.ir.compilation import _lower_registered_gates
+
+        circuit = _lower_registered_gates(circuit)
 
         # Pre-process circuit for DECOMPOSE / EXTENDED modes
         processed = circuit

@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from quspect.backends._base import Backend
+from quspect.ir.compilation import _lower_registered_gates
 from quspect.ir.qsal import dumps
 from quspect.native import NativeExecutor
 from quspect.simulation._seeding import validate_seed
@@ -204,7 +205,9 @@ class Simulator(Backend):
         cpp_shots = shots if has_measurements else 0
         result_shots = shots if has_measurements else 0
 
-        qsal_json = dumps(circuit)
+        # The native core knows the built-in gates only: registered gates
+        # (quspect.gates.register_gate) run as their decompositions.
+        qsal_json = dumps(_lower_registered_gates(circuit))
         cpp_result = self._native.run(
             qsal_json,
             shots=cpp_shots,
@@ -283,7 +286,7 @@ class Simulator(Backend):
                 "state, or run(..., save_statevector=True) to obtain the "
                 "state of one sampled trajectory."
             )
-        qsal_json = dumps(circuit)
+        qsal_json = dumps(_lower_registered_gates(circuit))
         cpp_result = self._native.run(qsal_json, shots=0, return_statevector=True)
         return np.array(cpp_result.statevector_f64, dtype=np.complex128)
 

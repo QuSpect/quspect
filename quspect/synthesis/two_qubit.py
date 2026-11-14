@@ -1181,8 +1181,13 @@ def entangler(name: str) -> Entangler:
 def register_entangler(name: str, matrix: np.ndarray) -> Entangler:
     """Register a CZ-class native two-qubit gate for synthesis.
 
-    The gate's matrix must also be known to :func:`quspect.gates.gate_matrix`
-    for circuits using it to be simulated or verified.
+    A gate that is not built in is also registered with
+    :func:`quspect.gates.register_gate`, by its matrix and by the
+    decomposition its CZ dressing gives (``u3`` gates around one ``cz``).
+    :func:`~quspect.gates.gate_matrix` then knows it, ``DecomposePass`` and
+    the OpenQASM 2.0 exporter lower it to that decomposition, and the
+    simulators run it, so circuits compiled for the gate can be simulated,
+    verified and exported.
 
     Args:
         name: Gate name.
@@ -1204,8 +1209,38 @@ def register_entangler(name: str, matrix: np.ndarray) -> Entangler:
         TwoQubitBasis(entangler='ecr', euler='zsx')
     """
     ent = Entangler.from_matrix(name, matrix)
+    from quspect.gates.registry import _builtin_names, register_gate
+
+    if name not in _builtin_names():
+        register_gate(name, ent.matrix, _cz_dressing_decomposition(ent))
     _ENTANGLERS[name] = ent
     return ent
+
+
+def _cz_dressing_decomposition(
+    ent: Entangler,
+) -> list[tuple[Gate, tuple[int, ...]]]:
+    """The entangler as ``cz`` between single-qubit gates, in time order.
+
+    ``CZ ∝ (A0 ⊗ A1) · E · (B0 ⊗ B1)`` gives
+    ``E ∝ (A0† ⊗ A1†) · CZ · (B0† ⊗ B1†)``: ``B0†``, ``B1†``, then ``cz``,
+    then ``A0†``, ``A1†``, each written as at most one ``u3``.
+    """
+    from quspect.gates.standard import CZ
+    from quspect.gates.synthesis import synthesize_one_qubit
+
+    def layer(
+        pair: tuple[np.ndarray, np.ndarray],
+    ) -> list[tuple[Gate, tuple[int, ...]]]:
+        out: list[tuple[Gate, tuple[int, ...]]] = []
+        for qubit, factor in enumerate(pair):
+            seq = synthesize_one_qubit(np.conj(factor).T, {"u3"})
+            if seq is None:  # pragma: no cover - u3 expresses every unitary
+                raise ValueError(f"Cannot write the dressing of {ent.name!r} as u3.")
+            out.extend((gate, (qubit,)) for gate in seq)
+        return out
+
+    return [*layer(ent.before), (CZ, (0, 1)), *layer(ent.after)]
 
 
 @dataclass(frozen=True)

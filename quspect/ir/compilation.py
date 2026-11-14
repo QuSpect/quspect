@@ -6,7 +6,10 @@ gates into simpler primitives that are supported by target formats
 
 Built-in decompositions cover common cases (SWAP → 3× CX, CCX →
 CX + single-qubit gates).  Users can register custom decomposition
-rules for application-specific gates.
+rules for application-specific gates.  A gate registered with
+:func:`quspect.gates.register_gate` (or
+:func:`quspect.synthesis.register_entangler`) is lowered to its registered
+decomposition.
 """
 
 from __future__ import annotations
@@ -622,6 +625,10 @@ def clear_extra_rules() -> None:
 def get_rules_for(gate_name: str, num_qubits: int) -> list[GateDecompositionRule]:
     """Return all applicable rules for a given gate, sorted by priority.
 
+    A gate registered with :func:`quspect.gates.register_gate` has one more
+    rule, its registered decomposition, tried after the user-registered
+    rules of the same priority.
+
     Args:
         gate_name: Name of the gate to decompose.
         num_qubits: Number of qubits the gate acts on.
@@ -635,8 +642,64 @@ def get_rules_for(gate_name: str, num_qubits: int) -> list[GateDecompositionRule
         for r in BUILTIN_DECOMPOSITIONS + _EXTRA_RULES
         if r.gate_name == gate_name and r.num_qubits == num_qubits
     ]
+    registered = _registered_rule(gate_name, num_qubits)
+    if registered is not None:
+        candidates.append(registered)
     candidates.sort(key=lambda r: -r.priority)
     return candidates
+
+
+def _registered_rule(gate_name: str, num_qubits: int) -> GateDecompositionRule | None:
+    """The rule lowering a registered gate to its registered decomposition."""
+    from quspect.gates.registry import gate_definition
+
+    definition = gate_definition(gate_name)
+    if definition is None or definition.num_qubits != num_qubits:
+        return None
+    return GateDecompositionRule(
+        gate_name=gate_name,
+        num_qubits=num_qubits,
+        decompose=lambda gate, qubits: definition.lower(qubits),
+        condition=lambda gate: not gate.params,
+        description=f"{gate_name} → its registered decomposition",
+    )
+
+
+def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
+    """Replace every registered gate of ``circuit`` by its decomposition.
+
+    The decompositions hold built-in gates only, so the result is a circuit
+    the native core and the OpenQASM 2.0 writer know.  A circuit without
+    registered gates is returned itself (not a copy), so it is serialized
+    and exported exactly as before.
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+    from quspect.circuit.instruction import _gate_instructions
+    from quspect.gates.registry import _REGISTRY
+
+    if not _REGISTRY:
+        return circuit
+    instructions = circuit.instructions
+    if not any(
+        instr.gate is not None and instr.is_gate and instr.gate.name in _REGISTRY
+        for instr in instructions
+    ):
+        return circuit
+    out: list[CircuitInstruction] = []
+    for instr in instructions:
+        gate = instr.gate
+        definition = (
+            _REGISTRY.get(gate.name) if gate is not None and instr.is_gate else None
+        )
+        if definition is None:
+            out.append(instr)
+            continue
+        if gate is not None and gate.params:
+            raise ValueError(
+                f"Registered gate {gate.name!r} takes no parameters, got {gate!r}."
+            )
+        out.extend(_gate_instructions(definition.lower(instr.qubits), instr.label))
+    return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
 
 
 def decompose_gate(
