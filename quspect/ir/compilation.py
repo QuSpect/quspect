@@ -804,6 +804,7 @@ def decompose_deep(
     *,
     supported_gates: set[str],
     max_passes: int = 20,
+    strict: bool = False,
 ) -> QuantumCircuit:
     """Recursively decompose unsupported gates until convergence.
 
@@ -811,17 +812,39 @@ def decompose_deep(
     function iterates until all gates are in ``supported_gates`` or
     no further decompositions are possible.
 
+    Only the decomposition rules are applied (see :func:`get_rules_for`).
+    A gate that no rule brings into ``supported_gates`` (for example ``s``
+    or ``t`` for ``{"cz", "h", "rz", "rx", "ry"}``) is returned unchanged,
+    unless ``strict`` is set.  :class:`~quspect.transpiler._passes.DecomposePass`
+    also synthesizes such gates from their matrices.
+
     Args:
         circuit: The circuit to decompose.
         supported_gates: Set of gate names that are considered native.
         max_passes: Safety limit on decomposition iterations.
+        strict: If True, raise instead of returning a circuit that still
+            holds gates outside ``supported_gates``.
 
     Returns:
-        A new circuit with as many gates decomposed as possible.
+        A new circuit with as many gates decomposed as possible.  With
+        ``strict=True``, every gate of the circuit is in ``supported_gates``.
 
     Raises:
         RecursionError: If decomposition does not converge within
             *max_passes*.
+        ValueError: With ``strict=True``, if gates are left that no rule
+            brings into ``supported_gates``; the message names them.
+
+    Example:
+        >>> from quspect import QuantumCircuit
+        >>> circuit = QuantumCircuit().s(0).rx(0.5, 0)
+        >>> out = decompose_deep(circuit, supported_gates={"h", "rz"})
+        >>> [i.gate.name for i in out]
+        ['s', 'h', 'rz', 'h']
+        >>> decompose_deep(circuit, supported_gates={"h", "rz"}, strict=True)
+        Traceback (most recent call last):
+            ...
+        ValueError: decompose_deep(strict=True) left gate(s) ['s'] ...
     """
     from quspect.circuit._native import unsupported_gate_indices
     from quspect.circuit.instruction import InstructionType
@@ -848,6 +871,14 @@ def decompose_deep(
         if all_supported:
             return decomposed
         if decomposed.instructions == current.instructions:
+            if strict:
+                raise ValueError(
+                    "decompose_deep(strict=True) left gate(s) "
+                    f"{_unsupported_gates(decomposed, supported_gates)} that no "
+                    "decomposition rule brings into the supported gates "
+                    f"{sorted(supported_gates)}. DecomposePass also synthesizes "
+                    "gates from their matrices."
+                )
             return decomposed
         current = decomposed
 

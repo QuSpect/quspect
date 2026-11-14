@@ -431,7 +431,7 @@ Decomposition:
 - `get_rules_for(gate_name)`
 - `decompose_gate(...)`
 - `decompose_circuit(circuit, supported_gates=...)`
-- `decompose_deep(circuit, supported_gates=..., max_passes=20)`
+- `decompose_deep(circuit, supported_gates=..., max_passes=20, strict=False)`
 
 Errors:
 
