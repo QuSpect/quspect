@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 
 from quspect.gates.gate import Gate
+from quspect.gates.registry import _REGISTRY
 
 # =============================================================================
 # Constants
@@ -120,8 +121,11 @@ _STANDARD_MATRICES: dict[str, np.ndarray] = {
 def gate_matrix(gate: Gate) -> np.ndarray:
     """Return the unitary matrix for a gate.
 
-    Standard gates return pre-computed constant matrices. Parameterized
-    gates compute their matrix from ``gate.params`` on each call. Every
+    Standard gates return pre-computed constant matrices, and gates added
+    with :func:`~quspect.gates.register_gate` (or
+    :func:`~quspect.synthesis.register_entangler`) their registered matrix.
+    Parameterized gates compute their matrix from ``gate.params`` on each
+    call. Every
     parameter must be a concrete real number (or a constant
     :class:`~quspect.circuit.parameter.ParameterExpression`) and the number
     of parameters must match the gate exactly.
@@ -150,6 +154,14 @@ def gate_matrix(gate: Gate) -> np.ndarray:
                 f"Gate '{gate.name}' takes no parameters, got {len(gate.params)}"
             )
         return _STANDARD_MATRICES[gate.name].copy()
+    definition = _REGISTRY.get(gate.name)
+    if definition is not None:
+        if gate.params or gate.num_qubits != definition.num_qubits:
+            raise ValueError(
+                f"Registered gate '{gate.name}' acts on {definition.num_qubits} "
+                f"qubit(s) and takes no parameters, got {gate!r}"
+            )
+        return definition.matrix.copy()
 
     return _parameterized_matrix(gate)
 
