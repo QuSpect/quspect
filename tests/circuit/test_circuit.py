@@ -1036,19 +1036,36 @@ class TestQuantumCircuitDagger:
         assert dag[1].is_barrier
         assert dag[1].qubits == (0, 1)
 
-    def test_dagger_measurement_preserved(self) -> None:
-        """Measurements are preserved in dagger."""
-        dag = QuantumCircuit().h(0).measure([0], [0]).dagger()
-        assert dag[0].is_measure
-        assert dag[0].qubits == (0,)
-        assert dag[0].clbits == (0,)
+    def test_dagger_measurement_raises(self) -> None:
+        """A measured circuit has no inverse: dagger() refuses it.
 
-    def test_dagger_channel_preserved(self) -> None:
-        """Noise channels are preserved in dagger."""
+        Known issue: the measurement was moved in front of the inverse gates.
+        """
+        with pytest.raises(
+            ValueError, match=r"instruction 1 measures qubit\(s\) \[0\]"
+        ):
+            QuantumCircuit().h(0).measure([0], [0]).dagger()
+        with pytest.raises(ValueError, match="a measured circuit has no inverse"):
+            QuantumCircuit().h(0).cx(0, 1).measure_all().dagger()
+        # A mid-circuit measurement is refused as well.
+        with pytest.raises(ValueError, match="instruction 1 measures"):
+            QuantumCircuit().h(0).measure([0], [0]).x(0).dagger()
+
+    def test_dagger_channel_raises(self) -> None:
+        """A noisy circuit has no inverse: dagger() refuses it."""
         circ = QuantumCircuit()
         circ.h(0).depolarize(0.1, 0).x(0)
-        dag = circ.dagger()
-        assert dag[1].is_channel
+        with pytest.raises(
+            ValueError, match="instruction 1 is a 'depolarizing' noise channel"
+        ):
+            circ.dagger()
+
+    def test_dagger_of_the_unitary_part_then_measure(self) -> None:
+        """The supported route: invert the gates, then add the measurements."""
+        circ = QuantumCircuit().h(0).cx(0, 1)
+        undone = circ.compose(circ.dagger(), [0, 1]).measure_all()
+        assert [i.gate.name for i in undone if i.is_gate] == ["h", "cx", "cx", "h"]
+        assert undone[-1].is_measure
 
     # -- matrix verification via simulator --
 

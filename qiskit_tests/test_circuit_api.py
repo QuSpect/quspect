@@ -394,19 +394,33 @@ def test_dagger_random_circuit_matches_qiskit_inverse(seed: int) -> None:
 
 
 def test_dagger_structure_and_names() -> None:
-    """Dagger reverses order, keeps measure/barrier/channel, renames."""
-    circ = QuantumCircuit(name="c").h(0).barrier().s(0).measure([0], [0])
-    circ.bit_flip(0.1, 0)
+    """Dagger reverses order, keeps barriers, renames; refuses measure/channel."""
+    circ = QuantumCircuit(name="c").h(0).barrier().s(0).cx(0, 1)
     dag = circ.dagger()
     assert dag.name == "c†"
     assert QuantumCircuit().h(0).dagger().name == "dagger"
-    assert dag[0].is_channel and dag[0].channel is circ[-1].channel
-    assert dag[1].is_measure and dag[1].clbits == (0,)
-    assert dag[2].gate is not None and dag[2].gate.name == "sdg"
-    assert dag[3].is_barrier and dag[3].qubits == (0,)
-    assert dag[4].gate is not None and dag[4].gate.name == "h"
+    assert dag[0].gate is not None and dag[0].gate.name == "cx"
+    assert dag[1].gate is not None and dag[1].gate.name == "sdg"
+    assert dag[2].is_barrier and dag[2].qubits == (0,)
+    assert dag[3].gate is not None and dag[3].gate.name == "h"
     empty_barrier = QuantumCircuit().barrier().dagger()
     assert empty_barrier[0].is_barrier and empty_barrier[0].qubits == ()
+    measured = circ.copy().measure([0], [0])
+    with pytest.raises(ValueError, match="instruction 4 measures"):
+        measured.dagger()
+    noisy = circ.copy().bit_flip(0.1, 0)
+    with pytest.raises(ValueError, match="noise channel"):
+        noisy.dagger()
+
+
+@pytest.mark.qiskit_ref
+def test_dagger_refuses_a_measured_circuit_like_qiskit_inverse() -> None:
+    """Qiskit's ``inverse()`` refuses a measured circuit too."""
+    circ = QuantumCircuit().h(0).cx(0, 1).measure_all()
+    with pytest.raises(qiskit.circuit.exceptions.CircuitError):
+        to_qiskit(circ).inverse()
+    with pytest.raises(ValueError, match="no inverse"):
+        circ.dagger()
 
 
 @pytest.mark.qiskit_ref
