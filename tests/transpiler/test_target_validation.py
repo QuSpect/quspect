@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from quspect import QuantumCircuit
+from quspect.gates import registry
 from quspect.synthesis.two_qubit import _ENTANGLERS, register_entangler
 from quspect.transpiler import CompilationTarget, transpile
 
@@ -107,6 +108,7 @@ def test_registered_entangler_is_a_known_name() -> None:
         assert "test_ecr" in {i.gate.name for i in result.circuit.instructions}
     finally:
         del _ENTANGLERS["test_ecr"]
+        registry._REGISTRY.pop("test_ecr", None)
 
 
 def test_other_constructors_stay_permissive() -> None:

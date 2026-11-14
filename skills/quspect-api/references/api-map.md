@@ -183,6 +183,7 @@ Import:
 from quspect.gates.standard import H, X, CX
 from quspect.gates.parameterized import RX, RY, RZ, U3
 from quspect.gates import Gate, gate_matrix, ALL_STANDARD, ALL_PARAMETERIZED
+from quspect.gates import register_gate, gate_definition, GateDefinition
 ```
 
 Standard singleton gates:
@@ -200,6 +201,8 @@ Parameterized templates:
 - `ALL_PARAMETERIZED`
 
 `Gate` is metadata: name, qubit count, label, params. Create concrete parameterized gates with `RX.with_params(0.5)`. Matrix computation lives in `quspect.gates._matrix_utils.gate_matrix`.
+
+Registered gates: `register_gate(name, matrix, decomposition)` adds a fixed gate by its unitary and an exact decomposition into built-in gates (`(gate, relative_qubits)` pairs in time order); it returns the `Gate` to append. `gate_matrix` then knows it, `decompose_deep` / `DecomposePass` lower it, the simulators run it as its decomposition, and the OpenQASM 2.0 exporter writes it decomposed in every mode. `gate_definition(name)` returns its `GateDefinition` (or `None`). `register_entangler` registers new entanglers this way.
 
 ## Simulation
 
@@ -680,7 +683,9 @@ from quspect.synthesis import TwoQubitBasis, synthesize_two_qubit
 - `num_cz_required(unitary)`, `weyl_coordinates(unitary)`,
   `kak_decompose(unitary) -> TwoQubitKAK`
 - `TwoQubitBasis(entangler="cz", euler="zxz")`, `TwoQubitBasis.from_gates(names)`
-- `Entangler`, `entangler(name)`, `register_entangler(name, matrix)`
+- `Entangler`, `entangler(name)`, `register_entangler(name, matrix)`; a new
+  entangler is also registered as a gate (`quspect.gates.register_gate`) with
+  its CZ dressing as decomposition, so compiled circuits simulate and export
 
 ## Hamiltonian Simulation
 
