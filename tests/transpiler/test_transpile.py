@@ -216,6 +216,8 @@ def test_level3_never_worse_than_level2(
     # level-3-only CNOT-phase resynthesis changes the candidate scores, so it
     # is switched off for this structural check).
     monkeypatch.setattr(transpile_module, "_PHASE_POLY_LEVEL", 4)
+    # 另一个起点（Toffoli 也拆开的全连接相位重综合）胜出时，候选来自那次编译，也关掉
+    monkeypatch.setattr(transpile_module, "_PHASE_WIDE", False)
     # 选中结果之后的精炼（再编译一遍、三比特块数值实例化）不改候选，也关掉
     monkeypatch.setattr(transpile_module, "_REPASS", False)
     monkeypatch.setattr(transpile_module, "_NUMERIC_BLOCKS", False)

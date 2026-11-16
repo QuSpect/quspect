@@ -104,6 +104,8 @@ def test_routed_zz_chain_gets_single_rz_blocks(
     # 第 3 级的第二个起点（路由前的 CNOT-相位重综合）把 ZZ 层改写成相位网络，
     # 不再有 SWAP 面块；这里检查的是 SWAP 面模板本身，关掉它
     monkeypatch.setattr(transpile_module, "_PHASE_POLY_PRE", False)
+    # 第三个起点（全连接的 CNOT-相位重综合）同样把 ZZ 层改写成相位网络
+    monkeypatch.setattr(transpile_module, "_PHASE_WIDE", False)
     qc = QuantumCircuit()
     n = 6
     for q in range(n):

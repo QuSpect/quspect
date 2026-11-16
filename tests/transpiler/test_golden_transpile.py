@@ -313,16 +313,16 @@ GOLDEN: dict[int, dict[str, str]] = {
         "three_qubit_8": "0eb12243364e4e36",
     },
     3: {
-        "qft_6": "6cf13558f195fbe6",
-        "qaoa_6": "0c27f9d376674566",
+        "qft_6": "d2e7902c912aa078",
+        "qaoa_6": "73d542fff6968599",
         "heisenberg_6": "dc5f5a1003058005",
-        "random_6": "cbe0dfd25640b9ed",
-        "adder_6": "a1b61b2addf66e1e",
+        "random_6": "ff03e3a6404de216",
+        "adder_6": "22cc1242c5c1e053",
         "three_qubit_5": "a7d0529639f27236",
         "qft_9": "3098ae82ae4001b3",
         "random_10": "433bf20739c2e63a",
-        "adder_10": "a7e1e505f2664315",
-        "three_qubit_8": "3e9cada8dc9c932f",
+        "adder_10": "87255a995c0cae06",
+        "three_qubit_8": "4197b91e9e742aea",
     },
 }
 

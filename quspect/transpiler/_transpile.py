@@ -72,6 +72,20 @@ Finally, small results are compiled once more with their physical circuit
 as the input and the identity layout ("repass"): the routing SWAPs, merged
 into neighbouring blocks, become ordinary gates and the second compilation
 often starts from a better point; the better of the two is kept.
+
+Level 3 also compiles from two more starting points and keeps the best of
+the three results.  Small circuits without gates on three or more qubits
+have their CNOT-phase regions resynthesized before routing on the qubit
+pairs that already interact.  And circuits up to a few thousand two-qubit
+gates are lowered completely to the CX level, Toffolis included, their
+rotations folded and their CNOT-phase regions resynthesized on all qubit
+pairs before routing; this start is taken when it saves at least 5 % of the
+two-qubit gates before routing (``stats.selected`` then starts with
+``"wide-phase/"``): routing a Toffoli as a unit is cheap, but it hides the
+gates that a compute/uncompute pair of Toffolis, neighbouring Toffolis or
+the Gray-code decomposition of a multi-controlled phase have in common
+(e.g. a 13-qubit VBE adder: 100 CX after a plain decomposition, 50 after
+this resynthesis).
 """
 
 from __future__ import annotations
@@ -236,6 +250,18 @@ _PHASE_POLY_RAW = True
 # 比特对），两条路取最终更好的
 _PHASE_POLY_PRE = True
 _PHASE_POLY_PRE_MAX_2Q = 300
+# 第三个起点（第 3 级）：把 Toffoli 等三比特以上的门也拆到 CX 级、做相位折叠，再在
+# 逻辑线路上用任意比特对做 CNOT-相位区域重综合（还没路由，不受耦合限制），然后照常
+# 路由。Toffoli 拆开后不再整体路由，但成对的计算 / 反计算 Toffoli、相邻 Toffoli
+# 之间的 T 门与 CX、多控相位门的格雷码分解能在同一个区域里相消。结果时好时坏，两条
+# 路都走，取最终更好的一个。拆开后两比特门数在 [2, _PHASE_WIDE_MAX_2Q] 之间、
+# 且重综合后少于拆开的 _PHASE_WIDE_GAIN 倍时才走（标准集 + arXiv 集 485 例：严格更少
+# 即走时多花 64% 编译时间，0.95 时多花 44%，两比特门几乎一样少）
+_PHASE_WIDE = True
+_PHASE_WIDE_LEVEL = 3
+_PHASE_WIDE_MAX_2Q = 3000
+_PHASE_WIDE_GAIN = 0.95
+_PHASE_WIDE_ROUNDS = 2
 # 区域划分是贪心的：按 (最多几根线, A* 展开预算) 各划分一次，取两比特门最少的
 # （4 根线最好；5 根线另有约 8% 的区域更省，但 A* 更贵，预算取小）
 _PHASE_POLY_SETTINGS = ((4, 200_000), (5, 20_000))
@@ -483,6 +509,22 @@ def transpile(
     It is skipped when ``time_limit`` is given, and its work budget scales
     with ``work_limit``.
 
+    Level 3 also compiles the circuit a second time from a different
+    starting point: every gate, Toffolis and multi-controlled gates
+    included, is lowered to the CX level, the diagonal rotations are folded
+    and the CNOT-phase regions are resynthesized on all qubit pairs before
+    routing (:class:`~quspect.transpiler._phase_poly.PhasePolynomialPass`
+    with regions of up to 16 wires).  Routing a Toffoli as a unit is cheap,
+    but it hides what a compute/uncompute pair of Toffolis, neighbouring
+    Toffolis or the Gray-code decomposition of a multi-controlled phase
+    have in common.  When that result is better, both results are refined
+    (compiled once more from their physical circuits, three-qubit blocks
+    resynthesized numerically) and the better one by the selection key
+    above is kept, so this start never costs two-qubit gates.  It runs only
+    when the resynthesis has at least 5 % fewer two-qubit gates than the
+    plain lowering (at most 3000), and not with ``time_limit``;
+    ``stats.selected`` starts with ``"wide-phase/"`` when it wins.
+
     Measurements, barriers and noise channels are not gates and stay in
     the circuit.  Each is put on the wires that hold its qubits at that
     point, and no gate is merged, cancelled or moved across it on those
@@ -684,34 +726,29 @@ def transpile(
             ):
                 res = alt
             res.stats.seconds = time.perf_counter() - t0
+        wide: TranspileResult | None = None
         if (
-            optimization_level >= _REPASS_LEVEL
-            and _REPASS
-            and time_limit is None
-            and initial_layout is None
-            and (res.stats.num_swaps > 0 or _REPASS_NO_SWAPS)
-            and 2 <= res.stats.two_qubit_gates <= _REPASS_MAX_2Q
-        ):
-            # 再编译一遍：把路由后的物理线路当作输入（布局固定为恒等）。SWAP 已并进
-            # 相邻的块、成为普通的门，新的一轮在它上面重新做块合并、路由与重综合，
-            # 常常落到另一个更好的起点（受限拓扑上的 QAOA / QFT）。取最终更好的一个
-            for _ in range(_REPASS_ROUNDS):
-                again = _recompile(res, circuit, target, kwargs)
-                if again is None or not _result_key(again, depth_weight) < _result_key(
-                    res, depth_weight
-                ):
-                    break
-                res = again
-            res.stats.seconds = time.perf_counter() - t0
-        if (
-            optimization_level >= _NUMERIC_3Q_LEVEL
-            and _NUMERIC_BLOCKS
-            and _NUMERIC_BLOCKS_MODE in ("end", "both")
+            optimization_level >= _PHASE_WIDE_LEVEL
+            and _PHASE_WIDE
             and time_limit is None
         ):
-            # 最后对选中的结果做一次三比特块的数值实例化（见 _polish_blocks）
-            res = _polish_blocks(res, circuit, target, elide_permutations)
+            # 第三个起点：Toffoli 也拆开，在逻辑线路上做不受耦合限制的 CNOT-相位区域
+            # 重综合（见 _wide_phase_regions）。它在这里更好时，两条路都做完下面的
+            # 精炼（再编译、三比特块抛光）再比：精炼对两者的收益不同，只比精炼前的
+            # 结果会偶尔丢掉原来那条路精炼后更好的结果
+            alt = _transpile(circuit, target, pre_wide_phase=True, **kwargs)
+            if alt is not None and _result_key(alt, depth_weight) < _result_key(
+                res, depth_weight
+            ):
+                alt.stats.selected = f"wide-phase/{alt.stats.selected}"
+                wide = alt
             res.stats.seconds = time.perf_counter() - t0
+        res = _refine(res, circuit, target, kwargs)
+        if wide is not None:
+            wide = _refine(wide, circuit, target, kwargs)
+            if _result_key(wide, depth_weight) < _result_key(res, depth_weight):
+                res = wide
+        res.stats.seconds = time.perf_counter() - t0
         if optimization_level >= _LEVEL1_FLOOR_LEVEL:
             # 第 2 级起的路由（块节点、镜像门、SWAP 融合折扣）用更多的 SWAP 换合并，
             # 稀疏线路上未必换得回来：第 1 级的结果也算一遍（快），目标值严格更小时用它
@@ -721,6 +758,46 @@ def transpile(
                 res = _as_selected_floor(floor, res.stats)
             res.stats.seconds = time.perf_counter() - t0
         return res
+
+
+def _refine(
+    res: TranspileResult,
+    circuit: QuantumCircuit,
+    target: CompilationTarget,
+    kwargs: dict[str, Any],
+) -> TranspileResult:
+    """The level-3 refinements of a selected result (see :func:`transpile`):
+    compile its physical circuit again ("repass") while that improves, then
+    resynthesize its three-qubit blocks numerically."""
+    level = kwargs["optimization_level"]
+    depth_weight = kwargs["depth_weight"]
+    if kwargs["time_limit"] is not None:
+        return res
+    if (
+        level >= _REPASS_LEVEL
+        and _REPASS
+        and kwargs["initial_layout"] is None
+        and (res.stats.num_swaps > 0 or _REPASS_NO_SWAPS)
+        and 2 <= res.stats.two_qubit_gates <= _REPASS_MAX_2Q
+    ):
+        # 再编译一遍：把路由后的物理线路当作输入（布局固定为恒等）。SWAP 已并进
+        # 相邻的块、成为普通的门，新的一轮在它上面重新做块合并、路由与重综合，
+        # 常常落到另一个更好的起点（受限拓扑上的 QAOA / QFT）。取最终更好的一个
+        for _ in range(_REPASS_ROUNDS):
+            again = _recompile(res, circuit, target, kwargs)
+            if again is None or not _result_key(again, depth_weight) < _result_key(
+                res, depth_weight
+            ):
+                break
+            res = again
+    if (
+        level >= _NUMERIC_3Q_LEVEL
+        and _NUMERIC_BLOCKS
+        and _NUMERIC_BLOCKS_MODE in ("end", "both")
+    ):
+        # 最后对选中的结果做一次三比特块的数值实例化（见 _polish_blocks）
+        res = _polish_blocks(res, circuit, target, kwargs["elide_permutations"])
+    return res
 
 
 def _as_selected_floor(
@@ -1073,11 +1150,15 @@ def _transpile(
     tolerance: float = 0.0,
     depth_weight: float = 0.0,
     pre_phase_regions: bool = False,
+    pre_wide_phase: bool = False,
 ) -> TranspileResult | None:
     """Body of :func:`transpile` (same arguments; ``tolerance`` from
     :func:`approximation_tolerance`).  ``pre_phase_regions`` resynthesizes the
     CNOT-phase regions of the logical circuit before routing (level 3) and
-    returns ``None`` if that changes nothing."""
+    returns ``None`` if that changes nothing.  ``pre_wide_phase`` does the
+    same on all qubit pairs after lowering every gate, Toffolis included, to
+    the CX level (see :func:`_wide_phase_regions`), and returns ``None`` if
+    that does not reduce the two-qubit count by at least 5 %."""
     if optimization_level not in (0, 1, 2, 3):
         raise ValueError(
             f"optimization_level must be 0, 1, 2 or 3, got {optimization_level!r}."
@@ -1238,6 +1319,11 @@ def _transpile(
             if rewritten is logical:
                 return None  # 与第一个起点相同，不必再走一遍
             logical = rewritten
+        if pre_wide_phase:
+            flat = _wide_phase_regions(logical, native)
+            if flat is None:
+                return None  # 两比特门没有明显减少，不必再走一遍
+            logical = flat
         if consolidate is not None:
             logical = ThreeQubitBlockPass().run(logical)
         logical = _fold_phases(logical, native)
@@ -1688,6 +1774,7 @@ def _transpile(
         and _NUMERIC_3Q
         and time_limit is None
         and not pre_phase_regions
+        and not pre_wide_phase
         and consolidate is not None
         and logical.num_qubits == 3
     ):
@@ -2345,6 +2432,57 @@ def _pre_routing_phase_regions(
         settings=_PHASE_POLY_FULL_SETTINGS, beam_width=_PHASE_POLY_BEAM
     ).run(flat)
     return out if _count_two_qubit(out) < n_two else circuit
+
+
+def _wide_phase_regions(
+    circuit: QuantumCircuit, native: frozenset[str]
+) -> QuantumCircuit | None:
+    """CNOT-phase resynthesis of the whole logical circuit, Toffolis included.
+
+    Every gate is lowered to the CX level (the native single-qubit gates and
+    ``cx``; Toffolis and multi-controlled gates are decomposed as well), the
+    diagonal rotations are folded (:class:`PhaseFoldingPass`, then
+    :class:`HighLevelOptimizePass` cancels the CX pairs they separated), and
+    the CNOT-phase regions are resynthesized on *all* qubit pairs
+    (:class:`PhasePolynomialPass`, regions of up to 16 wires): routing comes
+    afterwards, so no coupling constrains the networks.  This is where a
+    compute/uncompute pair of Toffolis, the T gates and CX of neighbouring
+    Toffolis or the Gray-code decomposition of a multi-controlled phase lose
+    most of their gates, which routing each Toffoli as a unit cannot see.
+    Rounds repeat while the two-qubit count drops.
+
+    Returns:
+        The rewritten circuit (equal to ``circuit`` up to global phase), or
+        ``None`` if it does not have at least 5 % fewer two-qubit gates than
+        the lowered circuit (``_PHASE_WIDE_GAIN``) or the lowered circuit has
+        more than ``_PHASE_WIDE_MAX_2Q`` (or fewer than two) two-qubit
+        gates.
+    """
+    from quspect.ir.compilation import decompose_deep
+
+    # CX 级：cz 也拆成 h·cx·h，相位折叠才看得到奇偶结构
+    supported = (set(native) | {"cx"}) - {"cz"}
+    lowered = decompose_deep(circuit, supported_gates=supported)
+    n_low = _count_two_qubit(lowered)
+    if n_low < 2 or n_low > _PHASE_WIDE_MAX_2Q:
+        return None
+    best = HighLevelOptimizePass().run(PhaseFoldingPass().run(lowered))
+    best_n = _count_two_qubit(best)
+    width = max(best.num_qubits, 2)
+    pairs = [(a, b) for a in range(width) for b in range(a + 1, width)]
+    for _ in range(_PHASE_WIDE_ROUNDS):
+        rewritten = PhasePolynomialPass(
+            settings=_PHASE_POLY_FULL_SETTINGS, edges=pairs, beam_width=_PHASE_POLY_BEAM
+        ).run(best)
+        if rewritten is best:
+            break
+        lowered_again = decompose_deep(rewritten, supported_gates=supported)
+        rewritten = HighLevelOptimizePass().run(PhaseFoldingPass().run(lowered_again))
+        n = _count_two_qubit(rewritten)
+        if n >= best_n:
+            break
+        best, best_n = rewritten, n
+    return best if best_n < _PHASE_WIDE_GAIN * n_low else None
 
 
 def _fold_phases(circuit: QuantumCircuit, native: frozenset[str]) -> QuantumCircuit:
