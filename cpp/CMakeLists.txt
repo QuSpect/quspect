@@ -297,6 +297,7 @@ set(TRANSPILER_SRCS
   src/transpiler/route_lns.cpp
   src/transpiler/sabre_routing.cpp
   src/transpiler/su4_routing.cpp
+  src/transpiler/tcount.cpp
 )
 
 # Synthesis on the deterministic numerics layer: two-qubit KAK, single-qubit synthesis, gate matrices
@@ -391,7 +392,7 @@ set(QSPECT_EXACT_FP_SRCS ${TRANSPILER_SRCS} ${SYNTHESIS_SRCS} ${DETMATH_SRCS} sr
     src/pybind/phase_fold_bindings.cpp src/pybind/synthesis_bindings.cpp src/pybind/detmath_bindings.cpp
     src/pybind/module.cpp src/pybind/dag_bindings.cpp src/pybind/dag_pass_bindings.cpp src/pybind/ir_bindings.cpp
     src/pybind/circuit_bindings.cpp src/pybind/consolidate_bindings.cpp src/pybind/replay_bindings.cpp
-    src/pybind/schedule_bindings.cpp
+    src/pybind/schedule_bindings.cpp src/pybind/tcount_bindings.cpp
     tests/test_detmath.cpp tests/test_kak_synthesis.cpp tests/test_one_qubit_gauge.cpp tests/test_cx_orientation.cpp
     tests/test_instantiate.cpp)
 if(NOT MSVC)
@@ -416,6 +417,7 @@ set(PYBIND_SRCS
   src/pybind/replay_bindings.cpp
   src/pybind/schedule_bindings.cpp
   src/pybind/synthesis_bindings.cpp
+  src/pybind/tcount_bindings.cpp
 )
 
 # ============================================================
@@ -616,6 +618,7 @@ if(QSPECT_BUILD_TESTS)
     tests/test_su4_routing.cpp
     tests/test_beam_routing.cpp
     tests/test_cnot_phase_synth.cpp
+    tests/test_tcount.cpp
     tests/test_depth_schedule.cpp
     tests/test_dilation_layout.cpp
     tests/test_one_qubit_gauge.cpp
