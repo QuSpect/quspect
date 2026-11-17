@@ -168,6 +168,17 @@ Exported from `quspect.transpiler` for building custom pipelines:
   ...)`, `ThreeQubitBlockPass()`, `PhaseFoldingPass()`: each has
   `.run(circuit)`; the stats classes (`HighLevelStats`, `ConsolidationStats`,
   `ThreeQubitBlockStats`, `PhaseFoldingStats`) describe what a pass did.
+- `TCountOptimizePass(plateau=None, rm_iterations=0, rm_runs=4,
+  tensor_walks=0, tensor_steps=200_000, lookahead=6, seed=0, native=True)`:
+  lowers the number of `t` / `tdg` gates in the Clifford+T regions of a
+  circuit (`h s sdg t tdg x y z cx cz swap ccx` and `rz`/`p`/`u1` at multiples
+  of π/4); `.run(circuit)` returns an equivalent circuit (up to global phase)
+  and `.stats` is a `TCountStats(t_count_in, t_count_out, regions,
+  regions_improved)`. It is not part of `transpile`: run it on the logical
+  circuit before layout and routing, because it ignores connectivity and
+  usually adds `cx` gates. `rm_iterations` / `tensor_walks` enable slower
+  searches that pay off on large phase polynomials such as finite-field
+  multipliers.
 
 `quspect.transpiler._passes` holds the internal building blocks
 (`DecomposePass(target)`, `LayoutRoutingPass(target, ...)`, `OptimizePass()`,

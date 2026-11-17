@@ -250,6 +250,13 @@ Transpiler: Phase Folding
    :members:
    :exclude-members: rotations_in, rotations_out
 
+Transpiler: T-count Optimization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: quspect.transpiler._tcount
+   :members: TCountOptimizePass, TCountStats
+   :exclude-members: t_count_in, t_count_out, regions, regions_improved
+
 Transpiler: Three-Qubit Block Resynthesis
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
