@@ -107,6 +107,9 @@ _ROTATION_NAMES = frozenset({"rz", "p", "u1"})
 #: Sideways TODD moves for the phase polynomial of a gadgetized region when
 #: ``plateau`` is automatic (they pay off on these large polynomials).
 _GADGET_PLATEAU = 200
+#: A gadget form with more variables (qubits of the region plus ancillas) than
+#: the compiled search handles is not tried.
+_GADGET_MAX_VARIABLES = 64
 _CONDITIONAL_GATES = {
     "x": standard.X,
     "z": standard.Z,
@@ -354,9 +357,9 @@ class TCountOptimizePass:
             docstring).  Off by default: the output of the default pass is a
             unitary circuit on the input's qubits.
         max_ancillas: With ``ancillas``, the most ancillas a region may use
-            (``None``: no limit).  A phase polynomial over more than 64
-            variables (qubits of the region plus its ancillas) is reduced by
-            the Python implementation, which is slow.
+            (``None``: no limit).  A gadget form needing more than 64
+            variables (qubits of the region plus its ancillas) is never
+            tried.
         native: Use the compiled implementation of the searches when it is
             available (same results as the Python one, much faster).
 
@@ -533,6 +536,8 @@ class TCountOptimizePass:
             if needed == 0:
                 continue
             if self.max_ancillas is not None and needed > self.max_ancillas:
+                continue
+            if n + needed > _GADGET_MAX_VARIABLES:
                 continue
             program = gadget.build_gadget_program(gates, n, self._gadget_reduce)
             if program is not None and (
