@@ -125,10 +125,16 @@ class DensityMatrixSimulator(Backend):
         has_measurements = any(instr.is_measure for instr in instructions)
         num_clbits = circuit.num_clbits if has_measurements else n
 
-        # Index of the last gate/channel: measurements after it are terminal and
-        # are read off the final branch states instead of branching.
+        # Index of the last gate/channel/conditional gate: measurements after
+        # it are terminal and are read off the final branch states instead of
+        # branching.  A measurement before a classically controlled gate is
+        # never terminal, so the record the gate reads is always in the key.
         last_op = max(
-            (i for i, ins in enumerate(instructions) if ins.is_gate or ins.is_channel),
+            (
+                i
+                for i, ins in enumerate(instructions)
+                if ins.is_gate or ins.is_channel or ins.is_conditional
+            ),
             default=-1,
         )
 
@@ -146,6 +152,13 @@ class DensityMatrixSimulator(Backend):
                 # 的大端约定相反,多比特门需反转 qubit 顺序才与 statevector 后端一致。
                 for rho in branches.values():
                     rho.apply_gate(mat, tuple(instr.qubits)[::-1])
+            elif instr.is_conditional and instr.gate is not None:
+                # Classical feed-forward: the gate acts on the branches whose
+                # record holds the condition value (unwritten bits read 0).
+                mat = gate_matrix(instr.gate)
+                for record, rho in branches.items():
+                    if _record_value(record, instr.clbits) == instr.condition:
+                        rho.apply_gate(mat, tuple(instr.qubits)[::-1])
             elif instr.is_channel and instr.channel is not None:
                 kraus = instr.channel.kraus_operators()
                 for rho in branches.values():
@@ -199,7 +212,18 @@ class DensityMatrixSimulator(Backend):
 
         Returns:
             The final :class:`DensityMatrix` after evolution.
+
+        Raises:
+            ValueError: If the circuit has classically controlled gates (the
+                state then depends on the measurement record; use
+                :meth:`run`).
         """
+        if any(instr.is_conditional for instr in circuit.instructions):
+            raise ValueError(
+                "density_matrix() does not support classically controlled gates: "
+                "measurements are skipped here, so there is no record to "
+                "condition on. Use run() to sample the circuit."
+            )
         n = circuit.num_qubits
         rho = DensityMatrix(n)
 
@@ -214,6 +238,15 @@ class DensityMatrixSimulator(Backend):
             # Skip measurements when computing density matrix
 
         return rho.copy()
+
+
+def _record_value(record: tuple[int, ...], clbits: tuple[int, ...]) -> int:
+    """Integer held by ``clbits`` in a classical record (first bit = LSB)."""
+    value = 0
+    for position, clbit in enumerate(clbits):
+        if clbit < len(record) and record[clbit]:
+            value |= 1 << position
+    return value
 
 
 def _branch_on_measurement(

@@ -271,6 +271,13 @@ class Simulator(Backend):
         self._validate_circuit(circuit)
         if circuit.num_qubits == 0:
             return np.ones(1, dtype=np.complex128)
+        if any(instr.is_conditional for instr in circuit.instructions):
+            raise ValueError(
+                "statevector() does not support classically controlled gates: "
+                "the final state depends on the measurement record. Use "
+                "run(..., save_statevector=True) to obtain the state of one "
+                "sampled shot."
+            )
         if _has_mid_circuit_measurement(circuit):
             raise ValueError(
                 "statevector() does not support mid-circuit measurements: the "
@@ -308,7 +315,7 @@ class Simulator(Backend):
 
         for instr in circuit.instructions:
             if (
-                instr.is_gate
+                (instr.is_gate or instr.is_conditional)
                 and instr.gate is not None
                 and instr.gate.params
                 and any(
@@ -322,7 +329,7 @@ class Simulator(Backend):
                     f"parameters. Bind all parameters before simulation "
                     f"using circuit.bind_parameters()."
                 )
-            if instr.is_gate and instr.gate is not None:
+            if (instr.is_gate or instr.is_conditional) and instr.gate is not None:
                 for p in instr.gate.params:
                     if type(p) is float and not isfinite(p):
                         raise ValueError(
@@ -332,7 +339,7 @@ class Simulator(Backend):
 
 
 def _has_mid_circuit_measurement(circuit: QuantumCircuit) -> bool:
-    """Return True if a gate or channel follows any measurement.
+    """Return True if a gate, conditional gate or channel follows a measurement.
 
     Barriers and further measurements after a measurement do not make it a
     mid-circuit measurement (they leave the pre-measurement state intact).
@@ -341,7 +348,9 @@ def _has_mid_circuit_measurement(circuit: QuantumCircuit) -> bool:
     for instr in circuit.instructions:
         if instr.is_measure:
             seen_measure = True
-        elif seen_measure and (instr.is_gate or instr.is_channel):
+        elif seen_measure and (
+            instr.is_gate or instr.is_channel or instr.is_conditional
+        ):
             return True
     return False
 

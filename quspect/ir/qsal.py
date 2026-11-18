@@ -348,6 +348,10 @@ def _serialize_circuit(circuit: QuantumCircuit) -> dict[str, Any]:
             instr_data["channel"] = _serialize_channel(instr.channel)
         if instr.label:
             instr_data["label"] = instr.label
+        if instr.condition is not None:
+            # Only CONDITIONAL instructions carry the key, so documents of
+            # circuits without classical control are unchanged.
+            instr_data["condition"] = instr.condition
         instructions.append(instr_data)
 
     circuit_data: dict[str, Any] = {}
@@ -433,6 +437,7 @@ def _deserialize_circuit(data: dict[str, Any]) -> QuantumCircuit:
             qubits=qubits,
             clbits=clbits,
             label=label,
+            condition=instr_data.get("condition"),
         )
         circ._instructions.append(instr)
 

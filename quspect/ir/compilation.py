@@ -14,7 +14,7 @@ decomposition.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -681,7 +681,9 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
         return circuit
     instructions = circuit.instructions
     if not any(
-        instr.gate is not None and instr.is_gate and instr.gate.name in _REGISTRY
+        instr.gate is not None
+        and (instr.is_gate or instr.is_conditional)
+        and instr.gate.name in _REGISTRY
         for instr in instructions
     ):
         return circuit
@@ -689,7 +691,9 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
     for instr in instructions:
         gate = instr.gate
         definition = (
-            _REGISTRY.get(gate.name) if gate is not None and instr.is_gate else None
+            _REGISTRY.get(gate.name)
+            if gate is not None and (instr.is_gate or instr.is_conditional)
+            else None
         )
         if definition is None:
             out.append(instr)
@@ -698,8 +702,36 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
             raise ValueError(
                 f"Registered gate {gate.name!r} takes no parameters, got {gate!r}."
             )
-        out.extend(_gate_instructions(definition.lower(instr.qubits), instr.label))
+        lowered = definition.lower(instr.qubits)
+        if instr.is_conditional:
+            out.extend(conditional_instructions(lowered, instr))
+        else:
+            out.extend(_gate_instructions(lowered, instr.label))
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
+def conditional_instructions(
+    items: Iterable[tuple[Gate, tuple[int, ...]]], like: CircuitInstruction
+) -> list[CircuitInstruction]:
+    """Gates ``(gate, qubits)`` under the classical condition of ``like``.
+
+    A classically controlled composite gate equals its gates, each under the
+    same condition: gates never write classical bits, so the condition holds
+    for all of them or for none.
+    """
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+    return [
+        CircuitInstruction(
+            type=InstructionType.CONDITIONAL,
+            gate=gate,
+            qubits=tuple(qubits),
+            clbits=like.clbits,
+            label=like.label,
+            condition=like.condition,
+        )
+        for gate, qubits in items
+    ]
 
 
 def decompose_gate(
