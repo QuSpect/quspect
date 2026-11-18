@@ -39,6 +39,22 @@ The pass minimizes T-count only: the CX count of a rewritten region usually
 grows, and connectivity is ignored, so run it before layout and routing.  It
 is not part of :func:`~quspect.transpiler.transpile`.
 
+**With ancillas** (``ancillas=True``).  Hadamard gates between the T gates
+split the phase polynomials.  Heyfron & Campbell's Hadamard gadget replaces
+each of them by a clean ancilla, a measurement and classically controlled
+Clifford gates (see :mod:`quspect.transpiler._tcount_ancilla`), so that all T
+gates of a region form one phase polynomial and the search above applies to
+the whole region.  A region is rewritten this way only when that gives
+strictly fewer T gates than the ancilla-free result.  The output then
+contains measurements and classically controlled gates
+(``InstructionType.CONDITIONAL``): it implements the same unitary on the
+circuit's qubits for *every* measurement record, returns every ancilla to
+``|0⟩`` and leaves each qubit on its own index.  The ancillas are the qubit
+indices from ``circuit.num_qubits`` on and must be in ``|0⟩``; the gadget
+measurements write the classical bits from ``circuit.num_clbits`` on.
+Published T-counts with Hadamard gadgets are far lower than without, e.g.
+``rc_adder_6`` 47 → 37 and ``mod_red_21`` 67 → 51 here.
+
 **Reference results** (ancilla-free, verified exactly; see ``docs``): on the
 standard arithmetic benchmarks of Nam et al. the default settings match or
 improve the published ancilla-free T-counts of TODD-type optimizers, e.g.
@@ -57,6 +73,7 @@ from numbers import Real
 from quspect.circuit.circuit import QuantumCircuit
 from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.gates import standard
+from quspect.transpiler import _tcount_ancilla as gadget
 from quspect.transpiler import _tcount_poly as poly
 from quspect.transpiler import _tcount_rotations as rot
 from quspect.transpiler._tcount_rotations import CX, SDG, TDG, GateT, H, Pauli, S, T
@@ -87,6 +104,15 @@ _PHASE_GATES: dict[int, tuple[int, ...]] = {
 }
 _PHASE_NAMES = {"z": 4, "s": 2, "sdg": 6, "t": 1, "tdg": 7}
 _ROTATION_NAMES = frozenset({"rz", "p", "u1"})
+#: Sideways TODD moves for the phase polynomial of a gadgetized region when
+#: ``plateau`` is automatic (they pay off on these large polynomials).
+_GADGET_PLATEAU = 200
+_CONDITIONAL_GATES = {
+    "x": standard.X,
+    "z": standard.Z,
+    "s": standard.S,
+    "sdg": standard.SDG,
+}
 _OUT_GATES = {
     H: standard.H,
     S: standard.S,
@@ -107,6 +133,10 @@ class TCountStats:
         t_count_out: ``T`` / ``T†`` gates in those regions of the output.
         regions: Clifford+T regions with at least two ``T`` gates.
         regions_improved: Regions that were replaced.
+        ancillas: Ancilla qubits used (the largest number in one region; the
+            same ancillas serve every region).  0 without ``ancillas=True``.
+        measurements: Gadget measurements added.
+        conditional_gates: Classically controlled gates added.
 
     Example:
         >>> TCountStats().t_count_in
@@ -117,6 +147,9 @@ class TCountStats:
     t_count_out: int = 0
     regions: int = 0
     regions_improved: int = 0
+    ancillas: int = 0
+    measurements: int = 0
+    conditional_gates: int = 0
 
 
 def _phase_index(angle: float) -> int | None:
@@ -316,6 +349,14 @@ class TCountOptimizePass:
             during emission (affects CX count only).
         seed: Seed of all randomized searches; the result is a deterministic
             function of the input circuit and the arguments.
+        ancillas: Allow Hadamard gadgets: clean ancilla qubits, mid-circuit
+            measurements and classically controlled gates (see the module
+            docstring).  Off by default: the output of the default pass is a
+            unitary circuit on the input's qubits.
+        max_ancillas: With ``ancillas``, the most ancillas a region may use
+            (``None``: no limit).  A phase polynomial over more than 64
+            variables (qubits of the region plus its ancillas) is reduced by
+            the Python implementation, which is slow.
         native: Use the compiled implementation of the searches when it is
             available (same results as the Python one, much faster).
 
@@ -337,6 +378,8 @@ class TCountOptimizePass:
         tensor_steps: int = 200_000,
         lookahead: int = 6,
         seed: int = 0,
+        ancillas: bool = False,
+        max_ancillas: int | None = None,
         native: bool = True,
     ) -> None:
         if plateau is not None and plateau < 0:
@@ -356,8 +399,14 @@ class TCountOptimizePass:
         self.tensor_steps = tensor_steps
         self.lookahead = lookahead
         self.seed = seed
+        if max_ancillas is not None and max_ancillas < 0:
+            raise ValueError("max_ancillas must be non-negative.")
+        self.ancillas = ancillas
+        self.max_ancillas = max_ancillas
         self.native = native
         self.stats = TCountStats()
+        self._first_ancilla = 0
+        self._first_clbit = 0
         self._heavy_cache: dict[tuple[tuple[tuple[int, int], ...], int], list[int]] = {}
 
     # ------------------------------------------------------------------ public
@@ -386,6 +435,9 @@ class TCountOptimizePass:
         """
         stats = TCountStats()
         self._heavy_cache = {}
+        # Ancillas and gadget bits lie behind everything the circuit uses.
+        self._first_ancilla = circuit.num_qubits
+        self._first_clbit = circuit.num_clbits
         out: list[CircuitInstruction] = []
         region: list[CircuitInstruction] = []
         gates: list[GateT] = []
@@ -424,9 +476,16 @@ class TCountOptimizePass:
         local = {q: i for i, q in enumerate(qubits)}
         n = len(qubits)
         mapped = [(g[0], local[g[1]], local[g[2]] if g[2] >= 0 else -1) for g in gates]
-        clifford, rots = rot.merge_rotations(*rot.from_gates(mapped, n), n)
+        merged = rot.merge_rotations(*rot.from_gates(mapped, n), n)
+        clifford, rots = merged
         if rots:
             clifford, rots = self._optimise(clifford, rots, n)
+        if self.ancillas and rots:
+            program = self._gadget_program(mapped, merged, (clifford, rots), n)
+            if program is not None and program.t_count < min(t_in, len(rots)):
+                stats.t_count_out += program.t_count
+                stats.regions_improved += 1
+                return self._gadget_instructions(program, qubits, n, stats)
         if len(rots) >= t_in:
             stats.t_count_out += t_in
             return region
@@ -441,6 +500,116 @@ class TCountOptimizePass:
             )
             for g in new
         ]
+
+    # ------------------------------------------------------------------ ancillas
+    def _gadget_reduce(
+        self, old: list[tuple[int, int]], base: list[int], k: int
+    ) -> list[int]:
+        """Column search for the single phase polynomial of a gadgetized region."""
+        plateau = _GADGET_PLATEAU if self.plateau is None else self.plateau
+        best = poly.todd(base, k, plateau=plateau, seed=self.seed, native=self.native)
+        if self.rm_iterations or self.tensor_walks:
+            other = self._heavy(old, base, k)
+            if len(other) < len(best):
+                best = other
+        return best
+
+    def _gadget_program(
+        self,
+        mapped: list[GateT],
+        merged: tuple[list[GateT], list[Pauli]],
+        optimised: tuple[list[GateT], list[Pauli]],
+        n: int,
+    ) -> gadget.GadgetProgram | None:
+        """Best gadget form over three gate lists: fewest T, then fewest ancillas."""
+        starts = [
+            mapped,
+            gadget.min_h_emit(merged[0], merged[1], n),
+            gadget.min_h_emit(optimised[0], optimised[1], n),
+        ]
+        best: gadget.GadgetProgram | None = None
+        for gates in starts:
+            needed = gadget.internal_hadamards(gates, n)
+            if needed == 0:
+                continue
+            if self.max_ancillas is not None and needed > self.max_ancillas:
+                continue
+            program = gadget.build_gadget_program(gates, n, self._gadget_reduce)
+            if program is not None and (
+                best is None
+                or (program.t_count, program.ancillas) < (best.t_count, best.ancillas)
+            ):
+                best = program
+        return best
+
+    def _gadget_instructions(
+        self,
+        program: gadget.GadgetProgram,
+        qubits: list[int],
+        n: int,
+        stats: TCountStats,
+    ) -> list[CircuitInstruction]:
+        """Circuit instructions of a gadget program on the circuit's qubits and bits."""
+
+        def qubit(wire: int) -> int:
+            return qubits[wire] if wire < n else self._first_ancilla + wire - n
+
+        clbit = {w: self._first_clbit + k for k, w in enumerate(program.measured)}
+        out: list[CircuitInstruction] = []
+        run: list[GateT] = []
+
+        def flush() -> None:
+            for g in _cleanup(run):
+                out.append(
+                    CircuitInstruction(
+                        type=InstructionType.GATE,
+                        gate=_OUT_GATES[g[0]],
+                        qubits=(qubit(g[1]),)
+                        if g[2] < 0
+                        else (qubit(g[1]), qubit(g[2])),
+                    )
+                )
+            run.clear()
+
+        for op in program.ops:
+            if op[0] == gadget.GATE:
+                run.append(op[1])  # type: ignore[arg-type]
+                continue
+            flush()
+            if op[0] == gadget.MEASURE_X:
+                wire = op[1]
+                assert isinstance(wire, int)
+                out.append(
+                    CircuitInstruction(
+                        type=InstructionType.GATE,
+                        gate=standard.H,
+                        qubits=(qubit(wire),),
+                    )
+                )
+                out.append(
+                    CircuitInstruction(
+                        type=InstructionType.MEASURE,
+                        qubits=(qubit(wire),),
+                        clbits=(clbit[wire],),
+                    )
+                )
+                stats.measurements += 1
+            else:
+                _, control, name, target = op
+                assert isinstance(control, int) and isinstance(target, int)
+                out.append(
+                    CircuitInstruction(
+                        type=InstructionType.CONDITIONAL,
+                        conditional_gate=_CONDITIONAL_GATES[str(name)],
+                        qubits=(qubit(target),),
+                        clbits=(clbit[control],),
+                        condition=1,
+                    )
+                )
+                stats.conditional_gates += 1
+        flush()
+        stats.ancillas = max(stats.ancillas, program.num_wires - n)
+        return out
 
     # ------------------------------------------------------------------ groups
     def _todd(
