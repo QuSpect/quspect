@@ -100,6 +100,11 @@ from quspect.hamsim import compile_evolution
   counts are inferred from validated non-negative indices.
 - Circuit builder methods mutate and return `self`; `compose(..., inplace=False)`
   returns a copy.
+- Classical feed-forward: `with circuit.if_test(clbits, value): circuit.x(q)`
+  (or `circuit.append(gate, qubits, condition=(clbits, value))`) adds
+  `InstructionType.CONDITIONAL` instructions, applied on the shots where the
+  classical bits hold `value` (first bit = least significant). Such an
+  instruction has `gate is None` and keeps its gate in `conditional_gate`.
 - Bind every circuit parameter before ordinary simulation. Prepared variational
   plans instead accept mappings or vectors in `plan.parameter_order`.
 - Build differentiable objectives without measurements or explicit noise

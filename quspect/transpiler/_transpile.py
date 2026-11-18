@@ -533,6 +533,18 @@ def transpile(
     circuit (every earlier gate is routed before it, every later gate after
     it); a two-qubit channel needs no coupling between its qubits.
 
+    Classically controlled gates (``InstructionType.CONDITIONAL``, see
+    :meth:`QuantumCircuit.if_test
+    <quspect.circuit.circuit.QuantumCircuit.if_test>`) are fences of the same
+    kind and keep their conditions.  Before routing, a conditional gate on
+    several qubits is rewritten into conditional single-qubit gates and
+    unconditional ``cx`` gates (two per conditional two-qubit interaction,
+    see :mod:`quspect.transpiler._conditional`), so that no conditional
+    interaction has to be routed; at the end every conditional single-qubit
+    gate is written in the target's single-qubit gates.  The output behaves
+    as the input on every measurement record.  ``stats`` counts
+    unconditional gates only; ``stats.depth`` includes the conditional ones.
+
     At every level the pre-routing decomposition keeps ``ccx``: SABRE
     routes each Toffoli as a three-qubit unit and synthesizes it for its
     final placement (see :meth:`SABRE.solve`); the post-routing
@@ -692,6 +704,15 @@ def transpile(
         True
     """
     tolerance = approximation_tolerance(approximation_degree)
+    dynamic = any(ins.is_conditional for ins in circuit)
+    if dynamic:
+        # Classically controlled gates (see _conditional): the pipeline treats
+        # them as fences on their qubits; they are first reduced to
+        # single-qubit conditional gates (no routing of a conditional
+        # interaction) and written in the target's gates at the end.
+        from quspect.transpiler._conditional import expand_conditional_gates
+
+        circuit = expand_conditional_gates(circuit)
     kwargs: dict[str, Any] = {
         "optimization_level": optimization_level,
         "seed": seed,
@@ -756,6 +777,15 @@ def transpile(
             assert floor is not None
             if _result_key(floor, depth_weight)[0] < _result_key(res, depth_weight)[0]:
                 res = _as_selected_floor(floor, res.stats)
+            res.stats.seconds = time.perf_counter() - t0
+        if dynamic:
+            from quspect.transpiler._conditional import translate_conditional_gates
+
+            res.circuit = translate_conditional_gates(res.circuit, target.native_gates)
+            res.wire_circuit = translate_conditional_gates(
+                res.wire_circuit, target.native_gates
+            )
+            res.stats.depth = _depth(res.circuit, two_qubit_only=False)
             res.stats.seconds = time.perf_counter() - t0
         return res
 

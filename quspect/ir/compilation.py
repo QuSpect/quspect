@@ -14,7 +14,7 @@ decomposition.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -681,15 +681,21 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
         return circuit
     instructions = circuit.instructions
     if not any(
-        instr.gate is not None and instr.is_gate and instr.gate.name in _REGISTRY
+        (instr.gate is not None and instr.is_gate and instr.gate.name in _REGISTRY)
+        or (
+            instr.conditional_gate is not None
+            and instr.conditional_gate.name in _REGISTRY
+        )
         for instr in instructions
     ):
         return circuit
     out: list[CircuitInstruction] = []
     for instr in instructions:
-        gate = instr.gate
+        gate = instr.conditional_gate if instr.is_conditional else instr.gate
         definition = (
-            _REGISTRY.get(gate.name) if gate is not None and instr.is_gate else None
+            _REGISTRY.get(gate.name)
+            if gate is not None and (instr.is_gate or instr.is_conditional)
+            else None
         )
         if definition is None:
             out.append(instr)
@@ -698,8 +704,89 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
             raise ValueError(
                 f"Registered gate {gate.name!r} takes no parameters, got {gate!r}."
             )
-        out.extend(_gate_instructions(definition.lower(instr.qubits), instr.label))
+        lowered = definition.lower(instr.qubits)
+        if instr.is_conditional:
+            out.extend(conditional_instructions(lowered, instr))
+        else:
+            out.extend(_gate_instructions(lowered, instr.label))
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
+def lower_conditional_gates(
+    circuit: QuantumCircuit, supported_gates: set[str]
+) -> QuantumCircuit:
+    """Decompose the gates of classically controlled instructions.
+
+    Every CONDITIONAL instruction whose gate is not in ``supported_gates`` is
+    replaced by the decomposition of that gate (see :func:`decompose_deep`),
+    each resulting gate under the same condition.  Pieces that the rules
+    cannot bring into ``supported_gates`` stay as conditional gates.  Other
+    instructions are untouched; a circuit without such instructions is
+    returned itself.
+
+    Args:
+        circuit: The circuit to process.
+        supported_gates: Gate names that need no decomposition.
+
+    Returns:
+        The circuit with conditional gates lowered.
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+
+    instructions = circuit.instructions
+    if not any(
+        instr.conditional_gate is not None
+        and instr.conditional_gate.name not in supported_gates
+        for instr in instructions
+    ):
+        return circuit
+    out: list[CircuitInstruction] = []
+    for instr in instructions:
+        gate = instr.conditional_gate
+        if gate is None or gate.name in supported_gates:
+            out.append(instr)
+            continue
+        single = QuantumCircuit()
+        single.append(gate, range(gate.num_qubits))
+        lowered = decompose_deep(single, supported_gates=supported_gates)
+        if lowered.instructions == single.instructions:
+            out.append(instr)  # no rule applies
+            continue
+        out.extend(
+            conditional_instructions(
+                (
+                    (piece.gate, tuple(instr.qubits[q] for q in piece.qubits))
+                    for piece in lowered.instructions
+                    if piece.gate is not None
+                ),
+                instr,
+            )
+        )
+    return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
+def conditional_instructions(
+    items: Iterable[tuple[Gate, tuple[int, ...]]], like: CircuitInstruction
+) -> list[CircuitInstruction]:
+    """Gates ``(gate, qubits)`` under the classical condition of ``like``.
+
+    A classically controlled composite gate equals its gates, each under the
+    same condition: gates never write classical bits, so the condition holds
+    for all of them or for none.
+    """
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+    return [
+        CircuitInstruction(
+            type=InstructionType.CONDITIONAL,
+            conditional_gate=gate,
+            qubits=tuple(qubits),
+            clbits=like.clbits,
+            label=like.label,
+            condition=like.condition,
+        )
+        for gate, qubits in items
+    ]
 
 
 def decompose_gate(
@@ -875,6 +962,9 @@ def decompose_deep(
     function iterates until all gates are in ``supported_gates`` or
     no further decompositions are possible.
 
+    Classically controlled gates are decomposed as well, every piece under
+    the same condition (see :func:`lower_conditional_gates`).
+
     Only the decomposition rules are applied (see :func:`get_rules_for`).
     A gate that no rule brings into ``supported_gates`` (for example ``s``
     or ``t`` for ``{"cz", "h", "rz", "rx", "ry"}``) is returned unchanged,
@@ -911,6 +1001,18 @@ def decompose_deep(
     """
     from quspect.circuit._native import unsupported_gate_indices
     from quspect.circuit.instruction import InstructionType
+
+    # Classically controlled gates are lowered under their condition; one the
+    # rules cannot bring into the supported gates is kept, like a plain gate.
+    circuit = lower_conditional_gates(circuit, supported_gates)
+    if strict:
+        left = _unsupported_conditional_gates(circuit, supported_gates)
+        if left:
+            raise ValueError(
+                "decompose_deep(strict=True) left classically controlled "
+                f"gate(s) {left} that no decomposition rule brings into the "
+                f"supported gates {sorted(supported_gates)}."
+            )
 
     current = circuit
     for _ in range(max_passes):
@@ -949,6 +1051,20 @@ def decompose_deep(
         f"Gate decomposition did not converge after {max_passes} passes. "
         f"Remaining unsupported gates: "
         f"{_unsupported_gates(current, supported_gates)}"
+    )
+
+
+def _unsupported_conditional_gates(
+    circuit: QuantumCircuit, supported_gates: set[str]
+) -> list[str]:
+    """Names of the classically controlled gates not in *supported_gates*."""
+    return sorted(
+        {
+            instr.conditional_gate.name
+            for instr in circuit
+            if instr.conditional_gate is not None
+            and instr.conditional_gate.name not in supported_gates
+        }
     )
 
 

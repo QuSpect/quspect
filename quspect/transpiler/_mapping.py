@@ -2655,6 +2655,15 @@ def _extract_gates(
             # A barrier or a noise channel: one fence per qubit (a barrier
             # without qubits spans every qubit).  Dropping it here would let
             # the later passes merge gates across it.
+            if instr.is_conditional and len(instr.qubits) > 1:
+                # a fence is not routed: its qubits would stay uncoupled
+                name = instr.conditional_gate.name if instr.conditional_gate else "?"
+                raise ValueError(
+                    f"Cannot route the classically controlled gate {name!r} on "
+                    f"qubits {instr.qubits}: rewrite multi-qubit conditional "
+                    "gates first (quspect.transpiler.transpile does, see "
+                    "quspect.transpiler._conditional.expand_conditional_gates)."
+                )
             count = len(instr.qubits)
             qubits = instr.qubits if count else tuple(range(circuit.num_qubits))
             for position, q in enumerate(qubits):

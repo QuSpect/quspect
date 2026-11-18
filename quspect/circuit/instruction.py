@@ -1,7 +1,8 @@
 """Circuit instructions for quantum circuit construction.
 
 A CircuitInstruction represents a single operation in a quantum circuit:
-a gate application, a measurement, a barrier, or a noise channel.
+a gate application, a classically controlled gate, a measurement, a
+barrier, or a noise channel.
 """
 
 from __future__ import annotations
@@ -28,12 +29,15 @@ class InstructionType(Enum):
         MEASURE: A projective measurement.
         BARRIER: A barrier preventing optimization reordering.
         CHANNEL: A CPTP quantum noise channel (non-unitary).
+        CONDITIONAL: A gate applied only when classical bits written by
+            earlier measurements hold a given value (classical feed-forward).
     """
 
     GATE = auto()
     MEASURE = auto()
     BARRIER = auto()
     CHANNEL = auto()
+    CONDITIONAL = auto()
 
 
 # Module-level aliases: enum members are singletons, so identity tests are
@@ -42,6 +46,7 @@ _GATE = InstructionType.GATE
 _MEASURE = InstructionType.MEASURE
 _BARRIER = InstructionType.BARRIER
 _CHANNEL = InstructionType.CHANNEL
+_CONDITIONAL = InstructionType.CONDITIONAL
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,16 @@ class CircuitInstruction:
         ``channel`` field, keeping them distinct from unitary gates
         at the type level.
 
+    Note:
+        A classically controlled gate uses ``type=InstructionType.CONDITIONAL``:
+        ``conditional_gate`` and ``qubits`` say what is applied, ``clbits``
+        are the classical bits that are *read* and ``condition`` is the value
+        they must hold (``clbits[0]`` is the least significant bit).  It is a
+        type of its own and its ``gate`` field is None, so that code that
+        only knows unitary gates (``is_gate``, ``gate is not None``) never
+        merges, cancels or reorders it by accident: to such code it is a
+        non-gate instruction, like a measurement.
+
     Gate and channel instructions must act on distinct qubits: an
     instruction such as ``cx(0, 0)`` is rejected with ``ValueError`` at
     construction time. Measurements may repeat a qubit (measuring the same
@@ -74,12 +89,18 @@ class CircuitInstruction:
     negative indices with ``ValueError``.
 
     Attributes:
-        type: The type of instruction (GATE, MEASURE, BARRIER, or CHANNEL).
+        type: The type of instruction (GATE, MEASURE, BARRIER, CHANNEL, or
+            CONDITIONAL).
         gate: The quantum gate to apply (for GATE type; None otherwise).
         channel: The noise channel to apply (for CHANNEL type; None otherwise).
         qubits: Tuple of qubit indices this instruction involves.
-        clbits: Tuple of classical bit indices (for MEASURE type).
+        clbits: Tuple of classical bit indices: the bits written by a MEASURE,
+            the bits read by a CONDITIONAL.
         label: Optional human-readable label.
+        conditional_gate: For CONDITIONAL, the gate that is applied when the
+            condition holds; None for every other type.
+        condition: For CONDITIONAL, the value ``sum(bit(clbits[i]) << i)`` at
+            which the gate is applied; None for every other type.
 
     Example:
         >>> from quspect.gates.standard import H, CX
@@ -92,6 +113,11 @@ class CircuitInstruction:
         >>> instr3 = CircuitInstruction(
         ...     type=InstructionType.MEASURE, qubits=(0, 1), clbits=(0, 1)
         ... )
+        >>> from quspect.gates.standard import X
+        >>> instr4 = CircuitInstruction(  # X on qubit 2 if clbit 0 is 1
+        ...     type=InstructionType.CONDITIONAL, conditional_gate=X,
+        ...     qubits=(2,), clbits=(0,), condition=1,
+        ... )
     """
 
     type: InstructionType
@@ -100,6 +126,8 @@ class CircuitInstruction:
     gate: Gate | None = None
     channel: NoiseChannel | None = field(default=None, compare=False, hash=False)
     label: str = ""
+    conditional_gate: Gate | None = None
+    condition: int | None = None
 
     def __post_init__(self) -> None:
         """Validate instruction consistency."""
@@ -120,6 +148,15 @@ class CircuitInstruction:
                 break
 
         kind = self.type
+        if kind is not _CONDITIONAL and (
+            self.condition is not None or self.conditional_gate is not None
+        ):
+            raise ValueError(
+                f"Only CONDITIONAL instructions take a condition and a "
+                f"conditional gate, got condition={self.condition!r}, "
+                f"conditional_gate={self.conditional_gate!r} on a {kind.name} "
+                f"instruction."
+            )
         if kind is _GATE:
             gate = self.gate
             if gate is None:
@@ -158,6 +195,51 @@ class CircuitInstruction:
             if self.gate is not None:
                 raise ValueError("CHANNEL instruction should not have a gate.")
             _validate_distinct_qubits(qubits, f"Channel {self.channel.name}")
+        elif kind is _CONDITIONAL:
+            if self.gate is not None:
+                raise ValueError(
+                    "CONDITIONAL instruction keeps its gate in conditional_gate; "
+                    "gate must be None."
+                )
+            gate = self.conditional_gate
+            if gate is None:
+                raise ValueError(
+                    "CONDITIONAL instruction must have a non-None conditional_gate."
+                )
+            if len(qubits) != gate.num_qubits:
+                raise ValueError(
+                    f"Gate {gate.name} requires {gate.num_qubits} "
+                    f"qubits, but {len(qubits)} were given."
+                )
+            if self.channel is not None:
+                raise ValueError("CONDITIONAL instruction should not have a channel.")
+            _validate_distinct_qubits(qubits, f"Gate {gate.name}")
+            clbits = self.clbits
+            if not clbits:
+                raise ValueError(
+                    "CONDITIONAL instruction must read at least one classical bit."
+                )
+            if len(set(clbits)) != len(clbits):
+                raise ValueError(
+                    f"CONDITIONAL reads classical bit(s) more than once "
+                    f"(clbits {clbits})."
+                )
+            raw: Any = self.condition
+            if type(raw) is int:
+                value: int = raw
+            else:
+                if isinstance(raw, (bool, np.bool_)) or not hasattr(raw, "__index__"):
+                    raise TypeError(
+                        f"CONDITIONAL condition must be a non-negative integer, "
+                        f"got {raw!r}."
+                    )
+                value = operator.index(raw)
+                object.__setattr__(self, "condition", value)
+            if not 0 <= value < (1 << len(clbits)):
+                raise ValueError(
+                    f"CONDITIONAL condition {value} does not fit in "
+                    f"{len(clbits)} classical bit(s) {clbits}."
+                )
 
     def matrix(self) -> np.ndarray | None:
         """Return the unitary matrix of this instruction, if applicable.
@@ -208,6 +290,15 @@ class CircuitInstruction:
     def is_channel(self) -> bool:
         """Return True if this instruction is a noise channel."""
         return self.type is _CHANNEL
+
+    @property
+    def is_conditional(self) -> bool:
+        """Return True if this is a classically controlled gate.
+
+        A classically controlled gate is *not* ``is_gate``: it is applied on
+        some measurement records only, so it has no unitary of its own.
+        """
+        return self.type is _CONDITIONAL
 
 
 def _normalize_bit_indices(indices: Sequence[object], kind: str) -> tuple[int, ...]:

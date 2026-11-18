@@ -398,6 +398,11 @@ def _unitary_view(circuit: QuantumCircuit, num_qubits: int = 0) -> QuantumCircui
             raise ValueError(
                 "Compiler statevector validation does not support noise channels."
             )
+        if instruction.is_conditional:
+            raise ValueError(
+                "Compiler statevector validation does not support classically "
+                "controlled gates."
+            )
         if instruction.is_measure:
             measurement_started = True
             continue

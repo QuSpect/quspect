@@ -287,6 +287,12 @@ class _BodyOp:
     qubits: tuple[int, ...]  # indices into the formal qubit list
 
 
+#: Statements that cannot follow ``if(creg==n)`` here.
+_NOT_CONDITIONABLE = frozenset(
+    {"measure", "reset", "barrier", "if", "gate", "opaque", "qreg", "creg", "include"}
+)
+
+
 @dataclass(frozen=True)
 class _Register:
     """A declared quantum or classical register."""
@@ -731,13 +737,31 @@ class _Parser:
         if reg_tok.value not in self._cregs:
             raise self._error(f"Unknown classical register {reg_tok.value!r}", reg_tok)
         self._expect_op("==")
-        self._expect_kind("int", "an integer")
+        value_tok = self._expect_kind("int", "an integer")
         self._expect_op(")")
-        raise self._error(
-            "Classically controlled 'if' statements are not supported by the "
-            "QuSpect importer (QuantumCircuit has no classical control flow)",
-            kw,
-        )
+        target = self._peek()
+        if target.kind != "id" or target.value in _NOT_CONDITIONABLE:
+            what = target.value if target.kind == "id" else self._describe(target)
+            raise self._error(
+                f"Only gate applications can be classically controlled: "
+                f"'if' cannot be followed by {what!r} (QuantumCircuit "
+                f"conditions gates only)",
+                kw,
+            )
+        register = self._cregs[reg_tok.value]
+        value = int(value_tok.value)
+        clbits = range(register.offset, register.offset + register.size)
+        if value >= (1 << register.size):
+            # The register can never hold this value: the statement never
+            # runs.  Parse it for its errors and leave the circuit unchanged.
+            circuit, self.circuit = self.circuit, QuantumCircuit()
+            try:
+                self._parse_gate_application()
+            finally:
+                self.circuit = circuit
+            return
+        with self.circuit.if_test(clbits, value):
+            self._parse_gate_application()
 
     def _parse_gate_application(self) -> None:
         name_tok = self._expect_kind("id", "a gate name")
@@ -890,9 +914,11 @@ def _library() -> dict[str, _GateDef]:
 class QASM2Importer:
     """Import an OpenQASM 2.0 string into a QuSpect QuantumCircuit.
 
-    The importer implements the full OpenQASM 2.0 grammar except classical
-    control (``if``) and ``reset``, which QuSpect circuits cannot represent
-    and which are therefore reported as :class:`QASM2ParseError`.  Semantics
+    The importer implements the full OpenQASM 2.0 grammar except ``reset``
+    and classical control of anything but a gate (``if(c==n) measure ...``),
+    which QuSpect circuits cannot represent and which are therefore reported
+    as :class:`QASM2ParseError`.  ``if(creg==n) gate ...;`` becomes
+    classically controlled gates reading the bits of ``creg``.  Semantics
     follow :mod:`qiskit.qasm2`:
 
     * Multiple ``qreg`` / ``creg`` declarations are concatenated in
@@ -945,7 +971,7 @@ class QASM2Importer:
         Raises:
             QASM2ParseError: If the source is malformed, uses an unknown or
                 mis-applied gate, or uses an unsupported construct
-                (``if``, ``reset``, opaque gates).  The message includes the
+                (``reset``, ``if`` on a non-gate, opaque gates).  The message has the
                 line and column of the problem.
             TypeError: If ``source`` is not a ``str`` (for example ``None``
                 or ``bytes``).

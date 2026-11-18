@@ -52,6 +52,13 @@ struct GateOperation {
     std::vector<std::complex<float>> dense_matrix_f32;
     uint64_t control_mask = 0;   // 受控门的控制位 mask
     uint64_t control_value = 0;  // 受控门的控制位期望值
+
+    // 经典控制（QSAL 的 CONDITIONAL 指令）：只有当经典寄存器中 condition_clbits 这些位
+    // （condition_clbits[0] 为最低位）组成的整数等于 condition_value 时才执行该门。
+    // 与上面的 control_mask / control_value（量子控制位）无关。
+    bool conditional = false;
+    std::vector<uint32_t> condition_clbits;
+    uint64_t condition_value = 0;
 };
 
 // ============================================================

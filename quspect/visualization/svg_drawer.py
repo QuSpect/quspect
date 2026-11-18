@@ -339,7 +339,8 @@ def _instruction_lane_span(
         quantum_lanes = tuple(range(num_qubits))
 
     lanes = list(quantum_lanes)
-    if instruction.is_measure:
+    if instruction.is_measure or instruction.is_conditional:
+        # measurement: the classical bits written; conditional gate: those read
         lanes.extend(num_qubits + clbit for clbit in instruction.clbits)
     if not lanes:
         return ()
@@ -369,6 +370,54 @@ def _render_instruction(
         parts.extend(_render_barrier(instruction, center_x, lane_ys, num_qubits, theme))
     elif instruction.is_channel:
         parts.extend(_render_channel(instruction, center_x, lane_ys, theme))
+    elif instruction.is_conditional and instruction.conditional_gate is not None:
+        parts.extend(
+            _render_conditional(instruction, center_x, lane_ys, num_qubits, theme)
+        )
+    return parts
+
+
+def _render_conditional(
+    instruction: CircuitInstruction,
+    center_x: float,
+    lane_ys: Sequence[float],
+    num_qubits: int,
+    theme: dict[str, str],
+) -> list[str]:
+    """Render a classically controlled gate.
+
+    The gate is drawn as usual.  A dashed line joins it to the classical bits
+    it reads; each of those carries a dot: filled if the bit must be 1, hollow
+    if it must be 0.  A ``<title>`` holds the condition in words.
+    """
+    gate = instruction.conditional_gate
+    assert gate is not None and instruction.condition is not None
+    clbits = instruction.clbits
+    bits = ", ".join(f"c{c}" for c in clbits)
+    values = ", ".join(
+        str((instruction.condition >> i) & 1) for i in range(len(clbits))
+    )
+    parts = [f"<g><title>{escape(gate.name)} if ({bits}) == ({values})</title>"]
+    lowest_y = max(lane_ys[num_qubits + c] for c in clbits)
+    gate_y = max(lane_ys[q] for q in instruction.qubits)
+    parts.append(
+        f'<line x1="{center_x:.1f}" y1="{gate_y:.1f}" '
+        f'x2="{center_x:.1f}" y2="{lowest_y:.1f}" '
+        f'stroke="{theme["classical_wire"]}" '
+        f'stroke-width="{_WIRE_STROKE}" stroke-dasharray="5 4" '
+        f'stroke-linecap="round" />'
+    )
+    for position, clbit in enumerate(clbits):
+        cy = lane_ys[num_qubits + clbit]
+        required = (instruction.condition >> position) & 1
+        fill = theme["classical_wire"] if required else theme["background"]
+        parts.append(
+            f'<circle cx="{center_x:.1f}" cy="{cy:.1f}" r="5.5" fill="{fill}" '
+            f'stroke="{theme["classical_wire"]}" stroke-width="1.5" />'
+        )
+    # the gate last, so that its box covers the start of the connector
+    parts.extend(_render_gate(gate, instruction.qubits, center_x, lane_ys, theme))
+    parts.append("</g>")
     return parts
 
 

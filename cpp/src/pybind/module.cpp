@@ -1319,7 +1319,10 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
         .def_readwrite("params_f32", &runtime::GateOperation::params_f32)
         .def_readwrite("parameter_expressions", &runtime::GateOperation::parameter_expressions)
         .def_readwrite("control_mask", &runtime::GateOperation::control_mask)
-        .def_readwrite("control_value", &runtime::GateOperation::control_value);
+        .def_readwrite("control_value", &runtime::GateOperation::control_value)
+        .def_readwrite("conditional", &runtime::GateOperation::conditional)
+        .def_readwrite("condition_clbits", &runtime::GateOperation::condition_clbits)
+        .def_readwrite("condition_value", &runtime::GateOperation::condition_value);
 
     py::class_<runtime::MeasureOperation>(m, "MeasureOperation", py::module_local())
         .def(py::init<>())

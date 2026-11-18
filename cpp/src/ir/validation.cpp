@@ -82,6 +82,24 @@ std::vector<std::string> Validator::CheckIndexBounds(const runtime::QSALProgram&
                     errors.push_back(oss.str());
                 }
             }
+            if (gate.conditional) {
+                if (gate.condition_clbits.empty() || gate.condition_clbits.size() > 64) {
+                    errors.push_back(ctx + " conditional gate '" + gate.name
+                                     + "': must read between 1 and 64 classical bits");
+                } else if (gate.condition_clbits.size() < 64
+                           && (gate.condition_value >> gate.condition_clbits.size()) != 0) {
+                    errors.push_back(ctx + " conditional gate '" + gate.name
+                                     + "': condition does not fit in its classical bits");
+                }
+                for (auto c : gate.condition_clbits) {
+                    if (c >= prog.num_clbits) {
+                        std::ostringstream oss;
+                        oss << ctx << " conditional gate '" << gate.name << "': clbit " << c << " >= num_clbits "
+                            << prog.num_clbits;
+                        errors.push_back(oss.str());
+                    }
+                }
+            }
         } else if (std::holds_alternative<runtime::MeasureOperation>(op_var)) {
             const auto& meas = std::get<runtime::MeasureOperation>(op_var);
             for (auto q : meas.qubits) {

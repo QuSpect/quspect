@@ -80,6 +80,20 @@ void RuntimeEngine<FP>::Run(bool execute_measurements) {
         if (std::holds_alternative<GateOperation>(op_var)) {
             const auto& gate = std::get<GateOperation>(op_var);
 
+            // 经典控制门：经典寄存器中的值不等于期望值时跳过（不消耗随机数）。
+            // 没有被测量写过的位读作 0。
+            if (gate.conditional) {
+                uint64_t value = 0;
+                for (size_t bit = 0; bit < gate.condition_clbits.size(); ++bit) {
+                    if (creg.Get(gate.condition_clbits[bit]) != 0) {
+                        value |= uint64_t{1} << bit;
+                    }
+                }
+                if (value != gate.condition_value) {
+                    continue;
+                }
+            }
+
             switch (gate.opcode) {
                 case OpCode::kNamedGate: {
                     // ---- 单比特门 ----

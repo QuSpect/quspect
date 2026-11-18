@@ -470,6 +470,11 @@ class PhasePolynomialCompiler:
 
         # Process operation nodes in topological order
         for node in dag.operation_nodes():
+            if node.instruction is not None and node.instruction.is_conditional:
+                raise ValueError(
+                    "A circuit with classically controlled gates has no phase "
+                    "polynomial."
+                )
             if node.instruction is None or node.instruction.gate is None:
                 continue
 

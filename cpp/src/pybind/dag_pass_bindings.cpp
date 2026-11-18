@@ -71,6 +71,8 @@ struct PassNames {
     py::str with_params = InternedStr("with_params");
     py::str channel = InternedStr("channel");
     py::str label = InternedStr("label");
+    py::str conditional_gate = InternedStr("conditional_gate");
+    py::str condition = InternedStr("condition");
 };
 
 PassNames& Names() {
@@ -400,6 +402,8 @@ private:
             SetField(instr.ptr(), n.gate, gate.ptr());
             SetField(instr.ptr(), n.channel, Py_None);
             SetField(instr.ptr(), n.label, EmptyStr());
+            SetField(instr.ptr(), n.conditional_gate, Py_None);
+            SetField(instr.ptr(), n.condition, Py_None);
             return instr;
         }
         return CallInstruction(type, gate, qubits, clbits);
@@ -706,7 +710,10 @@ bool FastRepr(PyObject* instr, std::string& out) {
     if (!AppendStrRepr(Attr(instr, n.label).ptr(), out)) {
         return false;
     }
-    out.push_back(')');
+    if (!Attr(instr, n.condition).is_none() || !Attr(instr, n.conditional_gate).is_none()) {
+        return false;  // 经典控制门：交给 Python 的 repr
+    }
+    out.append(", conditional_gate=None, condition=None)");
     return true;
 }
 

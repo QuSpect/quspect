@@ -597,6 +597,12 @@ ParsedParameters ExtractParameters(const json& params_array, std::vector<std::st
 runtime::ProgramOperation ParseInstruction(const json& instr, std::vector<std::string>& parameter_names,
                                            std::string& error) {
     std::string itype = instr.value("type", "");
+    const bool is_conditional = itype == "CONDITIONAL" || itype == "conditional";
+    if (!is_conditional && instr.contains("condition") && !instr.at("condition").is_null()) {
+        // 不能把条件悄悄丢掉：那样门会无条件执行。
+        error = "only CONDITIONAL instructions take a 'condition' (found on type '" + itype + "')";
+        return {};
+    }
 
     std::vector<uint32_t> qubits;
     for (const auto& q : instr.at("qubits")) {
@@ -627,6 +633,53 @@ runtime::ProgramOperation ParseInstruction(const json& instr, std::vector<std::s
             return {};
         }
         return ParseChannel(instr.at("channel"), qubits, error);
+    }
+
+    // 经典控制门：与 GATE 相同的门描述，外加读取的经典位（clbits）与期望值（condition）。
+    if (is_conditional) {
+        for (size_t a = 0; a < clbits.size(); ++a) {
+            for (size_t b = a + 1; b < clbits.size(); ++b) {
+                if (clbits[a] == clbits[b]) {
+                    error = "CONDITIONAL instruction reads a classical bit more than once";
+                    return {};
+                }
+            }
+        }
+        if (clbits.empty()) {
+            error = "CONDITIONAL instruction must read at least one classical bit";
+            return {};
+        }
+        if (clbits.size() > 64) {
+            error = "CONDITIONAL instruction reads more than 64 classical bits";
+            return {};
+        }
+        if (!instr.contains("condition") || !instr.at("condition").is_number_unsigned()) {
+            error = "CONDITIONAL instruction needs a non-negative integer 'condition'";
+            return {};
+        }
+        const uint64_t value = instr.at("condition").get<uint64_t>();
+        if (clbits.size() < 64 && (value >> clbits.size()) != 0) {
+            error = "CONDITIONAL condition does not fit in its classical bits";
+            return {};
+        }
+        json plain = instr;
+        plain["type"] = "GATE";
+        plain["clbits"] = json::array();
+        plain.erase("condition");
+        runtime::ProgramOperation op = ParseInstruction(plain, parameter_names, error);
+        if (!error.empty()) {
+            return {};
+        }
+        auto* gate = std::get_if<runtime::GateOperation>(&op);
+        if (gate == nullptr || gate->opcode == runtime::OpCode::kBarrier
+            || gate->opcode == runtime::OpCode::kMeasure) {
+            error = "CONDITIONAL instruction must carry a gate";
+            return {};
+        }
+        gate->conditional = true;
+        gate->condition_clbits = clbits;
+        gate->condition_value = value;
+        return op;
     }
 
     if (itype == "GATE" || itype == "gate") {

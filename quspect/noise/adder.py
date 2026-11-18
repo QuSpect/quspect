@@ -97,7 +97,10 @@ class NoiseModelAdder:
                 continue
 
             if not instr.is_gate or instr.gate is None:
-                # Pass through barriers and existing channels unchanged
+                # Pass through barriers, existing channels and classically
+                # controlled gates unchanged.  A conditional gate gets no gate
+                # noise: a channel after it would also act on the shots where
+                # the gate is not applied.
                 new_instructions.append(instr)
                 continue
 

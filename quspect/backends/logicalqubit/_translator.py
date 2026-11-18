@@ -300,6 +300,12 @@ class LQCircuitTranslator:
                     f"real hardware. Remove channels or use a simulator."
                 )
 
+            elif itype == "CONDITIONAL":
+                raise TranslationError(
+                    f"Instruction {i}: classically controlled gates are not "
+                    f"supported by the LogicalQubit backend. Use a simulator."
+                )
+
             else:
                 raise TranslationError(
                     f"Instruction {i}: unknown instruction type {itype!r}"

@@ -84,7 +84,17 @@ msgstr ""
 "测量以 :class:`~quspect.circuit.instruction.InstructionType` 表示，而不是作为 Gate "
 "的子类（架构决策 7.3），因为测量是投影操作，而不是幺正变换。"
 
-#: ../../source/architecture.rst:48
+#: ../../source/architecture.rst:47
+msgid ""
+"Classically controlled gates (feed-forward) are an ``InstructionType`` "
+"of their own, ``CONDITIONAL``: the gate sits in ``conditional_gate`` "
+"and ``gate`` is ``None``, ``clbits`` are the classical bits read and "
+"``condition`` is the value they must hold. Code that only knows unitary "
+"gates therefore sees a non-gate instruction and never merges, cancels "
+"or reorders it; the compiler treats it as a fence on its qubits."
+msgstr "经典控制门（前馈）是单独的一种 ``InstructionType``：``CONDITIONAL``。被控的门放在 ``conditional_gate`` 里，``gate`` 为 ``None``；``clbits`` 是读取的经典比特，``condition`` 是它们必须等于的值。只认识幺正门的代码因此把它看作非门指令，不会合并、消去或重排它；编译器把它当作所在量子比特上的栅栏。"
+
+#: ../../source/architecture.rst:55
 msgid "DAG System"
 msgstr "DAG 系统"
 

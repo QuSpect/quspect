@@ -95,6 +95,8 @@ def _build_column(
         _draw_barrier(column, instruction, num_qubits, cell_width)
     elif instruction.is_channel:
         _draw_channel(column, instruction, cell_width)
+    elif instruction.is_conditional and instruction.conditional_gate is not None:
+        _draw_conditional(column, instruction, num_qubits, cell_width)
 
     if len(column) != total_lanes:
         raise ValueError("Internal drawer error: unexpected lane count.")
@@ -150,6 +152,43 @@ def _draw_measurement(
         column[quantum_lane] = _boxed_cell("M", cell_width, _QUANTUM_FILL)
         column[classical_lane] = _centered_cell(str(clbit), cell_width, _CLASSICAL_FILL)
         _draw_vertical_wire(column, quantum_lane, classical_lane)
+
+
+def _plain_gate(instruction: CircuitInstruction) -> CircuitInstruction:
+    """The gate of a classically controlled instruction as a plain gate."""
+    from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+    return CircuitInstruction(
+        type=InstructionType.GATE,
+        gate=instruction.conditional_gate,
+        qubits=instruction.qubits,
+    )
+
+
+def _draw_conditional(
+    column: list[str],
+    instruction: CircuitInstruction,
+    num_qubits: int,
+    cell_width: int,
+) -> None:
+    """Draw a classically controlled gate.
+
+    The gate is drawn as usual; a vertical line joins it to the classical
+    bits it reads, and each of those shows the value it must hold: ``(1)`` or
+    ``(0)``.
+    """
+    _draw_gate(column, _plain_gate(instruction), cell_width)
+    assert instruction.condition is not None
+    lanes = [num_qubits + clbit for clbit in instruction.clbits]
+    # Column cells already drawn (the gate's own) keep their content; the
+    # line runs from below the gate to the lowest classical bit read.
+    low_gate = max(instruction.qubits)
+    for lane in range(low_gate + 1, max(lanes)):
+        fill_char = _CLASSICAL_FILL if lane >= num_qubits else _QUANTUM_FILL
+        column[lane] = _overlay_center(column[lane], "|", fill_char)
+    for position, lane in enumerate(lanes):
+        bit = (instruction.condition >> position) & 1
+        column[lane] = _centered_cell(f"({bit})", cell_width, _CLASSICAL_FILL)
 
 
 def _draw_barrier(
@@ -214,6 +253,9 @@ def _lane_prefixes(labels: list[str]) -> list[str]:
 
 def _instruction_width(instruction: CircuitInstruction) -> int:
     labels: list[str] = []
+    if instruction.is_conditional and instruction.conditional_gate is not None:
+        # as wide as the gate itself; the "(0)" / "(1)" marks fit any cell
+        return _instruction_width(_plain_gate(instruction))
     if instruction.is_gate and instruction.gate is not None:
         labels.append(_gate_label(instruction.gate))
         if instruction.gate.name.lower() in _CONTROLLED_TARGET_LABELS:

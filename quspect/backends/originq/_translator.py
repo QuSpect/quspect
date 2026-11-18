@@ -235,6 +235,12 @@ def translate(
                 f"Instruction {index}: noise channels cannot run on Origin "
                 "Quantum backends. Remove channels or use a local simulator."
             )
+        if instruction.is_conditional:
+            raise TranslationError(
+                f"Instruction {index}: classically controlled gates cannot run "
+                "on Origin Quantum backends (no mid-circuit feed-forward in "
+                "the OriginIR this backend submits). Use a local simulator."
+            )
         if instruction.is_barrier:
             # A barrier after a terminal measurement orders nothing; keep
             # only the still-active qubits.

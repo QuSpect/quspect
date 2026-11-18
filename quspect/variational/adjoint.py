@@ -303,6 +303,10 @@ def _validate_objective(objective: ObservableObjective) -> None:
             raise ValueError("Adjoint objectives cannot contain measurements.")
         if instruction.is_channel:
             raise ValueError("Adjoint objectives cannot contain noise channels.")
+        if instruction.is_conditional:
+            raise ValueError(
+                "Adjoint objectives cannot contain classically controlled gates."
+            )
         if instruction.is_gate and instruction.gate is not None:
             gate = instruction.gate
             name = gate.name.lower()

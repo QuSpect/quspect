@@ -198,8 +198,17 @@ def compile_for_device(
 
     Raises:
         ValueError: If a gate, or a SWAP that routing needs, cannot be
-            expressed in the target's native gates.
+            expressed in the target's native gates, or if the circuit has
+            classically controlled gates.
     """
+    for index, instruction in enumerate(circuit.instructions):
+        if instruction.is_conditional:
+            raise ValueError(
+                f"Instruction {index} is a classically controlled gate. The "
+                "cloud devices supported here run no mid-circuit feed-forward; "
+                "use a local simulator, or quspect.transpiler.transpile() to "
+                "compile such a circuit for a target."
+            )
     compiled = _compile_with_transpile(
         device_target,
         circuit,

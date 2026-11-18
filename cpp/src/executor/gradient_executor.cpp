@@ -308,6 +308,9 @@ std::vector<CompiledGate> CompileTape(const runtime::QSALProgram& program, const
             throw std::invalid_argument("AdjointGradientExecutor: noise channels are not supported");
         }
         const auto& gate = std::get<runtime::GateOperation>(operation);
+        if (gate.conditional) {
+            throw std::invalid_argument("AdjointGradientExecutor: classically controlled gates are not supported");
+        }
         switch (gate.opcode) {
             case runtime::OpCode::kBarrier:
                 continue;
