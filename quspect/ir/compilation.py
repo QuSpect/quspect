@@ -710,6 +710,63 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
 
 
+def lower_conditional_gates(
+    circuit: QuantumCircuit, supported_gates: set[str]
+) -> QuantumCircuit:
+    """Decompose the gates of classically controlled instructions.
+
+    Every CONDITIONAL instruction whose gate is not in ``supported_gates`` is
+    replaced by the decomposition of that gate (see :func:`decompose_deep`),
+    each resulting gate under the same condition.  A gate that the rules
+    cannot bring into ``supported_gates`` is left as it is.  Other
+    instructions are untouched; a circuit without such instructions is
+    returned itself.
+
+    Args:
+        circuit: The circuit to process.
+        supported_gates: Gate names that need no decomposition.
+
+    Returns:
+        The circuit with conditional gates lowered.
+    """
+    from quspect.circuit.circuit import QuantumCircuit
+
+    instructions = circuit.instructions
+    if not any(
+        instr.is_conditional
+        and instr.gate is not None
+        and instr.gate.name not in supported_gates
+        for instr in instructions
+    ):
+        return circuit
+    out: list[CircuitInstruction] = []
+    for instr in instructions:
+        gate = instr.gate
+        if not instr.is_conditional or gate is None or gate.name in supported_gates:
+            out.append(instr)
+            continue
+        single = QuantumCircuit()
+        single.append(gate, range(gate.num_qubits))
+        lowered = decompose_deep(single, supported_gates=supported_gates)
+        if any(
+            piece.gate is None or piece.gate.name not in supported_gates
+            for piece in lowered.instructions
+        ):
+            out.append(instr)
+            continue
+        out.extend(
+            conditional_instructions(
+                (
+                    (piece.gate, tuple(instr.qubits[q] for q in piece.qubits))
+                    for piece in lowered.instructions
+                    if piece.gate is not None
+                ),
+                instr,
+            )
+        )
+    return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
+
+
 def conditional_instructions(
     items: Iterable[tuple[Gate, tuple[int, ...]]], like: CircuitInstruction
 ) -> list[CircuitInstruction]:

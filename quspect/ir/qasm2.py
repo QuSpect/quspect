@@ -166,6 +166,70 @@ class QASM2ExportConfig:
     barrier_as_comment: bool = False
 
 
+def _creg_layout(circuit: QuantumCircuit) -> list[tuple[str, int, int]]:
+    """Classical registers ``(name, first clbit, size)`` to declare for ``circuit``.
+
+    Without classically controlled gates this is the single register
+    ``c[num_clbits]``.  OpenQASM 2.0 compares a *whole* register in
+    ``if(creg==n)``, so the classical bits read by each conditional gate must
+    form a register of their own: the bits are split at the boundaries of
+    those groups into ``c0``, ``c1``, … in index order, which keeps every
+    classical bit at its index when the text is read back.
+
+    Raises:
+        UnsupportedGateError: If the bits read by a conditional gate are not
+            a run of consecutive indices in increasing order, or two
+            conditional gates read overlapping but different runs.
+    """
+    num_clbits = circuit.num_clbits
+    if num_clbits == 0:
+        return []
+    groups: set[tuple[int, int]] = set()
+    for index, instr in enumerate(circuit.instructions):
+        if not instr.is_conditional:
+            continue
+        bits = instr.clbits
+        if bits != tuple(range(bits[0], bits[0] + len(bits))):
+            raise UnsupportedGateError(
+                "if",
+                "OpenQASM 2.0",
+                suggestion=(
+                    f"Instruction {index} is conditioned on classical bits "
+                    f"{bits}. OpenQASM 2.0 compares a whole classical register "
+                    "(least significant bit first), so the bits must be "
+                    "consecutive and in increasing order."
+                ),
+            )
+        groups.add((bits[0], len(bits)))
+    if not groups:
+        return [("c", 0, num_clbits)]
+    ordered = sorted(groups)
+    for (start_a, size_a), (start_b, _size_b) in zip(ordered, ordered[1:], strict=False):
+        if start_b < start_a + size_a:
+            raise UnsupportedGateError(
+                "if",
+                "OpenQASM 2.0",
+                suggestion=(
+                    f"Conditional gates read the overlapping classical bit "
+                    f"groups starting at {start_a} and {start_b}. OpenQASM 2.0 "
+                    "needs every condition to be a whole register, so "
+                    "different conditions must use disjoint bits."
+                ),
+            )
+    segments: list[tuple[int, int]] = []
+    position = 0
+    for start, size in ordered:
+        if start > position:
+            segments.append((position, start - position))
+        segments.append((start, size))
+        position = start + size
+    if position < num_clbits:
+        segments.append((position, num_clbits - position))
+    if len(segments) == 1:
+        return [("c", 0, num_clbits)]
+    return [(f"c{k}", start, size) for k, (start, size) in enumerate(segments)]
+
+
 def _refuse_noise_channels(circuit: QuantumCircuit) -> None:
     """Refuse a circuit with noise channels.
 
@@ -247,6 +311,8 @@ class QASM2Exporter:
         # Custom gates declared in EXTENDED mode, keyed by
         # (gate name, num_qubits, num_params).
         self._declared_gates: dict[tuple[str, int, int], _Declaration] = {}
+        # Classical registers of the circuit being written: (name, start, size).
+        self._cregs: list[tuple[str, int, int]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -284,6 +350,16 @@ class QASM2Exporter:
         from quspect.ir.compilation import _lower_registered_gates
 
         circuit = _lower_registered_gates(circuit)
+        if self._config.mode != QASM2ExportMode.STRICT and any(
+            instr.is_conditional for instr in circuit.instructions
+        ):
+            # Classically controlled gates are written as ``if(c==n) gate``,
+            # which has no room for a declared or decomposed gate: lower the
+            # gate first, every piece under the same condition.
+            from quspect.ir.compilation import lower_conditional_gates
+
+            circuit = lower_conditional_gates(circuit, get_supported_gates())
+        self._cregs = _creg_layout(circuit)
 
         # Pre-process circuit for DECOMPOSE / EXTENDED modes
         processed = circuit
@@ -364,15 +440,14 @@ class QASM2Exporter:
             lines: Output line buffer.
         """
         n_q = circuit.num_qubits
-        n_c = circuit.num_clbits
 
         if n_q == 0:
             # Fallback for edge case: no qubit used but we need at least one
             # (shouldn't happen because empty circuit is caught earlier)
             n_q = 1
         lines.append(f"qreg q[{n_q}];")
-        if n_c > 0:
-            lines.append(f"creg c[{n_c}];")
+        for name, _start, size in self._cregs:
+            lines.append(f"creg {name}[{size}];")
 
     # ------------------------------------------------------------------
     # Internal — instructions
@@ -395,6 +470,8 @@ class QASM2Exporter:
                 line = self._emit_measure_instruction(instr)
             elif instr.type == InstructionType.BARRIER:
                 line = self._emit_barrier_instruction(instr)
+            elif instr.type == InstructionType.CONDITIONAL:
+                line = self._emit_conditional_instruction(instr)
             else:
                 # export() refuses noise channels before it gets here; never
                 # drop an instruction this writer does not know.
@@ -484,11 +561,47 @@ class QASM2Exporter:
         """
         parts: list[str] = []
         for q, c in zip(instr.qubits, instr.clbits, strict=True):
-            parts.append(f"measure q[{q}] -> c[{c}];")
+            parts.append(f"measure q[{q}] -> {self._clbit(c)};")
         # Each measure on its own line if there are multiple
         return "\n".join(
             f"{self._config.indent}{p}" if i > 0 else p for i, p in enumerate(parts)
         )
+
+    def _clbit(self, clbit: int) -> str:
+        """``name[index]`` of a classical bit in the registers being written."""
+        for name, start, size in self._cregs:
+            if start <= clbit < start + size:
+                return f"{name}[{clbit - start}]"
+        raise AssertionError(f"classical bit {clbit} has no register")
+
+    def _emit_conditional_instruction(self, instr: CircuitInstruction) -> str:
+        """Emit a classically controlled gate as ``if(creg==value) gate ...;``.
+
+        Args:
+            instr: A CONDITIONAL-type instruction whose classical bits are a
+                whole register of :func:`_creg_layout`.
+
+        Returns:
+            A QASM ``if`` statement.
+
+        Raises:
+            ParameterizedGateError: If the gate has symbolic parameters.
+            UnsupportedGateError: If the gate is not in the QASM registry.
+        """
+        from quspect.circuit.instruction import CircuitInstruction, InstructionType
+
+        assert instr.gate is not None and instr.condition is not None
+        start = instr.clbits[0]
+        name = next(n for n, s, size in self._cregs if s == start)
+        plain = CircuitInstruction(
+            type=InstructionType.GATE, gate=instr.gate, qubits=instr.qubits
+        )
+        saved, self._declared_gates = self._declared_gates, {}
+        try:
+            statement = self._emit_gate_instruction(plain)
+        finally:
+            self._declared_gates = saved
+        return f"if({name}=={instr.condition}) {statement}"
 
     def _emit_barrier_instruction(self, instr: CircuitInstruction) -> str:
         """Emit a barrier instruction.
