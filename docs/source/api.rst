@@ -250,6 +250,12 @@ Transpiler: Phase Folding
    :members:
    :exclude-members: rotations_in, rotations_out
 
+Transpiler: Classically Controlled Gates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: quspect.transpiler._conditional
+   :members: expand_conditional_gates, translate_conditional_gates
+
 Transpiler: T-count Optimization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

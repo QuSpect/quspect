@@ -533,6 +533,18 @@ def transpile(
     circuit (every earlier gate is routed before it, every later gate after
     it); a two-qubit channel needs no coupling between its qubits.
 
+    Classically controlled gates (``InstructionType.CONDITIONAL``, see
+    :meth:`QuantumCircuit.if_test
+    <quspect.circuit.circuit.QuantumCircuit.if_test>`) are fences of the same
+    kind and keep their conditions.  Before routing, a conditional gate on
+    several qubits is rewritten into conditional single-qubit gates and
+    unconditional ``cx`` gates (two per conditional two-qubit interaction,
+    see :mod:`quspect.transpiler._conditional`), so that no conditional
+    interaction has to be routed; at the end every conditional single-qubit
+    gate is written in the target's single-qubit gates.  The output behaves
+    as the input on every measurement record.  ``stats`` counts
+    unconditional gates only; ``stats.depth`` includes the conditional ones.
+
     At every level the pre-routing decomposition keeps ``ccx``: SABRE
     routes each Toffoli as a three-qubit unit and synthesizes it for its
     final placement (see :meth:`SABRE.solve`); the post-routing

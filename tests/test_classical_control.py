@@ -630,6 +630,19 @@ def test_cloud_backends_refuse_classical_control() -> None:
         LQCircuitTranslator().translate(dumps(qc))
 
 
+def test_variational_objectives_and_statevector_validation_refuse_it() -> None:
+    from quspect.transpiler.validation import _unitary_view
+
+    qc = QuantumCircuit().h(0)
+    qc.append(X, [0], condition=(0, 1))
+    with pytest.raises(ValueError, match="classically controlled"):
+        _unitary_view(qc)
+    with pytest.raises(ValueError, match="classically controlled"):
+        _unitary_view(
+            QuantumCircuit().h(0).measure([0], [0]).append(X, [0], condition=(0, 1))
+        )
+
+
 def test_noise_model_leaves_conditional_gates_without_gate_noise() -> None:
     from quspect.noise.adder import NoiseModelAdder
     from quspect.noise.noise_model import NoiseModel

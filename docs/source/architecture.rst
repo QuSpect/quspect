@@ -44,6 +44,13 @@ Measurements are represented as :class:`~quspect.circuit.instruction.Instruction
 rather than as Gate subclasses (architecture decision 7.3), since measurement
 is a projective operation, not a unitary transformation.
 
+Classically controlled gates (feed-forward) are an ``InstructionType`` of
+their own, ``CONDITIONAL``: the gate sits in ``conditional_gate`` and
+``gate`` is ``None``, ``clbits`` are the classical bits read and
+``condition`` is the value they must hold. Code that only knows unitary gates
+therefore sees a non-gate instruction and never merges, cancels or reorders
+it; the compiler treats it as a fence on its qubits.
+
 DAG System
 ~~~~~~~~~~
 

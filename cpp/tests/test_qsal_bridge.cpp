@@ -3,6 +3,8 @@
 #include <complex>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -435,6 +437,130 @@ TEST(QSALDecoderTest, IgnoresOptionalCircuitNameAndGateLabel) {
     ASSERT_NE(prog, nullptr) << decoder.LastError();
     EXPECT_EQ(prog->num_qubits, 1);
     EXPECT_EQ(prog->ops.size(), 2);
+}
+
+// ---- 经典控制门（CONDITIONAL）----
+
+namespace {
+
+std::string ConditionalDocument(const std::string& conditional, int num_clbits = 2) {
+    return std::string(R"({
+      "qsal_version": "0.1.0",
+      "circuit": {
+        "num_qubits": 2,
+        "num_clbits": )")
+           + std::to_string(num_clbits) + R"(,
+        "instructions": [
+          {"type": "GATE", "qubits": [0], "clbits": [],
+           "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}},
+          {"type": "MEASURE", "qubits": [0], "clbits": [0]},
+          )" + conditional
+           + R"(,
+          {"type": "MEASURE", "qubits": [1], "clbits": [1]}
+        ]
+      }
+    })";
+}
+
+std::vector<uint64_t> RunSamples(const runtime::QSALProgram& prog, uint64_t shots) {
+    executor::SimulationExecutor::Options opts;
+    opts.precision = executor::PrecisionKind::kFloat64;
+    executor::SimulationExecutor exec(opts);
+    executor::ExecutionRequest req;
+    req.shots = shots;
+    req.return_samples = true;
+    return exec.Run(prog, req).packed_samples;
+}
+
+}  // namespace
+
+TEST(QSALDecoderTest, DecodesConditionalGate) {
+    const std::string source = ConditionalDocument(R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0],
+           "condition": 1, "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})");
+    ir::QSALDecoder decoder;
+    auto prog = decoder.Decode(source);
+    ASSERT_NE(prog, nullptr) << decoder.LastError();
+    ASSERT_EQ(prog->ops.size(), 4u);
+    const auto& gate = std::get<runtime::GateOperation>(prog->ops[2]);
+    EXPECT_TRUE(gate.conditional);
+    EXPECT_EQ(gate.name, "x");
+    EXPECT_EQ(gate.condition_clbits, std::vector<uint32_t>({0}));
+    EXPECT_EQ(gate.condition_value, 1u);
+    EXPECT_FALSE(std::get<runtime::GateOperation>(prog->ops[0]).conditional);
+    EXPECT_TRUE(ir::Validator::Validate(*prog).empty());
+
+    // q0 is measured as 1, so the gate is applied: both classical bits are 1 on every shot.
+    for (uint64_t sample : RunSamples(*prog, 50)) {
+        EXPECT_EQ(sample, 3u);
+    }
+}
+
+TEST(QSALDecoderTest, ConditionalGateIsSkippedWhenTheConditionFails) {
+    const std::string source = ConditionalDocument(R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0],
+           "condition": 0, "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})");
+    ir::QSALDecoder decoder;
+    auto prog = decoder.Decode(source);
+    ASSERT_NE(prog, nullptr) << decoder.LastError();
+    for (uint64_t sample : RunSamples(*prog, 50)) {
+        EXPECT_NE(sample, 3u);  // only c0 is set
+        EXPECT_NE(sample, 0u);
+    }
+}
+
+TEST(QSALDecoderTest, ConditionalGateOnTwoBitsAndParameterizedGate) {
+    // c0 = 1, c1 never written (0): the value of (c0, c1) is 1.  rx(pi) flips q1.
+    const std::string source = ConditionalDocument(R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0, 2],
+           "condition": 1, "gate": {"name": "rx", "num_qubits": 1, "params": [3.141592653589793],
+                                    "gate_type": "parameterized"}})",
+                                                   3);
+    ir::QSALDecoder decoder;
+    auto prog = decoder.Decode(source);
+    ASSERT_NE(prog, nullptr) << decoder.LastError();
+    const auto& gate = std::get<runtime::GateOperation>(prog->ops[2]);
+    EXPECT_EQ(gate.condition_clbits, std::vector<uint32_t>({0, 2}));
+    for (uint64_t sample : RunSamples(*prog, 50)) {
+        EXPECT_EQ(sample, 3u);
+    }
+}
+
+TEST(QSALDecoderTest, RejectsMalformedConditionalGates) {
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0],
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "condition"},
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [], "condition": 0,
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "at least one classical bit"},
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0], "condition": 2,
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "does not fit"},
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0], "condition": -1,
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "condition"},
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0], "condition": 1})", "gate"},
+    };
+    for (const auto& [instruction, message] : cases) {
+        ir::QSALDecoder decoder;
+        EXPECT_EQ(decoder.Decode(ConditionalDocument(instruction)), nullptr) << instruction;
+        EXPECT_NE(decoder.LastError().find(message), std::string::npos) << decoder.LastError();
+    }
+}
+
+TEST(ValidatorTest, ConditionalGateClbitOutOfRange) {
+    runtime::QSALProgram prog;
+    prog.num_qubits = 1;
+    prog.num_clbits = 1;
+    runtime::GateOperation gate;
+    gate.opcode = runtime::OpCode::kNamedGate;
+    gate.name = "x";
+    gate.qubits = {0};
+    gate.conditional = true;
+    gate.condition_clbits = {3};
+    gate.condition_value = 1;
+    prog.ops.push_back(gate);
+    const auto errors = ir::Validator::Validate(prog);
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors[0].find("clbit 3"), std::string::npos) << errors[0];
 }
 
 TEST(QSALDecoderTest, DecodeBarrierCircuit) {
