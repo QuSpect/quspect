@@ -495,6 +495,12 @@ class QuafuBackend(CloudBackend):
     ) -> _Prepared:
         from quspect.ir.qasm2 import QASM2ExportConfig, QASM2Exporter, QASM2ExportMode
 
+        if any(instruction.is_conditional for instruction in circuit.instructions):
+            raise TranslationError(
+                f"Experiment {label!r} has classically controlled gates, which "
+                "Quafu backends do not run (no mid-circuit feed-forward). Use "
+                "a local simulator."
+            )
         if not any(instruction.is_measure for instruction in circuit.instructions):
             raise TranslationError(
                 f"Experiment {label!r} has no measurement. "

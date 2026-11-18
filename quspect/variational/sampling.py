@@ -567,6 +567,11 @@ def _compile_plan(
             raise ValueError(
                 "Sampling objective state preparation cannot contain noise."
             )
+        if instruction.is_conditional:
+            raise ValueError(
+                "Sampling objective state preparation cannot contain "
+                "classically controlled gates."
+            )
 
     parameter_order = _parameter_order(circuit)
     occurrences = _shift_occurrences(circuit, parameter_order)

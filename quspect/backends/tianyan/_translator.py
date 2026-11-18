@@ -142,6 +142,12 @@ def translate(
                 f"Instruction {index}: noise channels cannot run on Tianyan "
                 "backends. Remove channels or use a local simulator."
             )
+        if instruction.is_conditional:
+            raise TranslationError(
+                f"Instruction {index}: classically controlled gates cannot run "
+                "on Tianyan backends (QCIS has no feed-forward). Use a local "
+                "simulator."
+            )
         if instruction.is_barrier:
             active = [q for q in qubits if q not in measured_by_qubit]
             if active:
