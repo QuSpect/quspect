@@ -914,9 +914,11 @@ def _library() -> dict[str, _GateDef]:
 class QASM2Importer:
     """Import an OpenQASM 2.0 string into a QuSpect QuantumCircuit.
 
-    The importer implements the full OpenQASM 2.0 grammar except classical
-    control (``if``) and ``reset``, which QuSpect circuits cannot represent
-    and which are therefore reported as :class:`QASM2ParseError`.  Semantics
+    The importer implements the full OpenQASM 2.0 grammar except ``reset``
+    and classical control of anything but a gate (``if(c==n) measure ...``),
+    which QuSpect circuits cannot represent and which are therefore reported
+    as :class:`QASM2ParseError`.  ``if(creg==n) gate ...;`` becomes
+    classically controlled gates reading the bits of ``creg``.  Semantics
     follow :mod:`qiskit.qasm2`:
 
     * Multiple ``qreg`` / ``creg`` declarations are concatenated in
@@ -969,7 +971,7 @@ class QASM2Importer:
         Raises:
             QASM2ParseError: If the source is malformed, uses an unknown or
                 mis-applied gate, or uses an unsupported construct
-                (``if``, ``reset``, opaque gates).  The message includes the
+                (``reset``, ``if`` on a non-gate, opaque gates).  The message has the
                 line and column of the problem.
             TypeError: If ``source`` is not a ``str`` (for example ``None``
                 or ``bytes``).

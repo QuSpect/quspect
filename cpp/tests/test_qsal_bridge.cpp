@@ -538,6 +538,13 @@ TEST(QSALDecoderTest, RejectsMalformedConditionalGates) {
              "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
          "condition"},
         {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0], "condition": 1})", "gate"},
+        {R"({"type": "CONDITIONAL", "qubits": [1], "clbits": [0, 0], "condition": 1,
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "more than once"},
+        // a condition on any other instruction type must not be dropped silently
+        {R"({"type": "GATE", "qubits": [1], "clbits": [], "condition": 1,
+             "gate": {"name": "x", "num_qubits": 1, "gate_type": "standard"}})",
+         "only CONDITIONAL"},
     };
     for (const auto& [instruction, message] : cases) {
         ir::QSALDecoder decoder;

@@ -18,6 +18,10 @@ from quspect.gates._matrix_utils import gate_matrix
 
 Record = tuple[int, ...]
 
+#: Branches below this probability are numerical noise (a compiled circuit is
+#: exact to about 1e-12 in amplitude) and are not followed.
+_NEGLIGIBLE = 1e-18
+
 
 def _apply(
     state: np.ndarray, matrix: np.ndarray, qubits: tuple[int, ...]
@@ -68,7 +72,7 @@ def branches(
                             index[qubit] = outcome
                             projected = np.zeros_like(state)
                             projected[tuple(index)] = state[tuple(index)]
-                            if np.vdot(projected, projected).real < 1e-24:
+                            if np.vdot(projected, projected).real < _NEGLIGIBLE:
                                 continue
                             key = record[:clbit] + (outcome,) + record[clbit + 1 :]
                             out.setdefault(key, []).append(projected)
@@ -114,9 +118,10 @@ def assert_same_behaviour(
     n = max(a.num_qubits, b.num_qubits)
     m = max(a.num_clbits, b.num_clbits)
     da, db = densities(a, n, m), densities(b, n, m)
-    assert set(da) == set(db), (sorted(da), sorted(db))
-    for record, rho in da.items():
-        error = float(np.max(np.abs(rho - db[record])))
+    zero = np.zeros((2**n, 2**n), dtype=complex)
+    for record in set(da) | set(db):
+        # a record missing on one side must be negligible on the other
+        error = float(np.max(np.abs(da.get(record, zero) - db.get(record, zero))))
         assert error < atol, (record, error)
 
 
@@ -138,7 +143,6 @@ def assert_compiled_behaviour(
     m = max(logical.num_clbits, physical.num_clbits)
     want = branches(logical, n, m)
     got = densities(physical, num_physical, m)
-    assert set(want) == set(got), (sorted(want), sorted(got))
     free = [p for p in range(num_physical) if p not in final_layout]
     zeros = np.zeros(2 ** len(free), dtype=complex)
     zeros[0] = 1.0
@@ -146,13 +150,16 @@ def assert_compiled_behaviour(
         final_layout.index(p) if p in final_layout else n + free.index(p)
         for p in range(num_physical)
     ]
+    empty = np.zeros((2**num_physical, 2**num_physical), dtype=complex)
+    for record in set(got) - set(want):
+        assert float(np.max(np.abs(got[record]))) < atol, (record, "unexpected record")
     for record, ensemble in want.items():
         rho = np.zeros((2**num_physical, 2**num_physical), dtype=complex)
         for state in ensemble:
             tensor = np.kron(state.reshape(-1), zeros).reshape([2] * num_physical)
             vec = np.transpose(tensor, order).reshape(-1)
             rho += np.outer(vec, vec.conj())
-        error = float(np.max(np.abs(rho - got[record])))
+        error = float(np.max(np.abs(rho - got.get(record, empty))))
         assert error < atol, (record, error)
 
 

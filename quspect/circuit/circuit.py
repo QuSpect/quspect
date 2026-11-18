@@ -319,11 +319,26 @@ class QuantumCircuit:
         """
         if self._condition is not None:
             raise ValueError("if_test() blocks do not nest.")
-        self._condition = _normalize_condition(clbits, value)
+        # Validate now (not at the first gate), with the instruction's rules.
+        probe = CircuitInstruction(
+            type=InstructionType.CONDITIONAL,
+            conditional_gate=I,
+            qubits=(0,),
+            clbits=_normalize_condition(clbits, value)[0],
+            condition=value,
+        )
+        assert probe.condition is not None
+        self._condition = (probe.clbits, probe.condition)
         try:
             yield self
         finally:
             self._condition = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        """State for pickle / deepcopy: an open :meth:`if_test` block is not copied."""
+        state = dict(self.__dict__)
+        state.pop("_condition", None)
+        return state
 
     def _refuse_in_condition(self, what: str) -> None:
         if self._condition is not None:

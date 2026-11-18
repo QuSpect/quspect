@@ -604,6 +604,158 @@ def test_transpile_of_a_circuit_without_conditions_is_unchanged() -> None:
     assert not any(i.is_conditional for i in a.circuit)
 
 
+def test_router_refuses_a_multi_qubit_conditional_gate() -> None:
+    from quspect.transpiler import SABRE
+
+    target = _TARGETS["line5-cz"]
+    qc = QuantumCircuit().h(0).cx(0, 1).cx(1, 2).cx(2, 3).cx(3, 4).measure([0], [0])
+    with qc.if_test(0):
+        qc.cx(0, 4)
+    with pytest.raises(ValueError, match="Cannot route the classically controlled"):
+        SABRE(target).solve(qc, seed=1)
+    routed, initial, _ = SABRE(target).solve(expand_conditional_gates(qc), seed=1)
+    for ins in routed:
+        if ins.is_gate and len(ins.qubits) == 2:
+            assert tuple(sorted(ins.qubits)) in target.coupling_graph
+        assert not ins.is_conditional or len(ins.qubits) == 1
+    assert len(initial) == qc.num_qubits
+
+
+def test_decompose_lowers_conditional_gates_under_their_condition() -> None:
+    from quspect.ir.compilation import decompose_deep
+    from quspect.transpiler._passes import DecomposePass
+
+    native = {"cz", "h", "rz", "x"}
+    target = CompilationTarget.from_coupling_map(
+        3, [(0, 1), (1, 2)], native_gates=native
+    )
+    qc = QuantumCircuit().ry(0.3, 0).h(1).measure([0], [0])
+    with qc.if_test(0):
+        qc.ccx(0, 1, 2).rx(0.3, 1).s(2)
+    qc.rx(0.3, 1)
+    out = DecomposePass(target).run(qc)
+    names = {(i.gate or i.conditional_gate).name for i in out if not i.is_measure}
+    assert names <= native
+    assert all(i.condition == 1 and i.clbits == (0,) for i in out if i.is_conditional)
+    assert_same_behaviour(qc, out)
+    # the rules alone cannot express a conditional ``s``: strict mode says so
+    with pytest.raises(ValueError, match="classically controlled"):
+        decompose_deep(qc, supported_gates=native, strict=True)
+    lowered = decompose_deep(qc, supported_gates=native)
+    assert "ccx" not in {i.conditional_gate.name for i in lowered if i.is_conditional}
+    assert_same_behaviour(qc, lowered)
+    # a conditional gate with neither a rule nor a matrix is reported, not kept
+    odd = QuantumCircuit()
+    odd.append(dataclasses.replace(H, name="mystery"), [0], condition=(0, 1))
+    with pytest.raises(ValueError, match="mystery"):
+        DecomposePass(target).run(odd)
+
+
+def test_transpile_errors_for_conditional_gates_are_value_errors() -> None:
+    target = CompilationTarget.from_coupling_map(
+        2, [(0, 1)], native_gates={"cz", "h", "rz", "x"}
+    )
+    qc = QuantumCircuit().h(0).measure([0], [0])
+    qc.append(dataclasses.replace(H, name="mystery"), [1], condition=(0, 1))
+    with pytest.raises(ValueError, match="mystery"):
+        transpile(qc, target, seed=1)
+
+
+def test_transpile_keeps_native_symbolic_conditional_gates() -> None:
+    target = CompilationTarget.from_coupling_map(
+        2, [(0, 1)], native_gates={"cz", "h", "rz", "x"}
+    )
+    theta = Parameter("theta")
+    qc = QuantumCircuit().h(0).measure([0], [0])
+    with qc.if_test(0):
+        qc.rz(theta, 1).s(1)
+        qc.crz(theta, 0, 1)
+    res = transpile(qc, target, seed=1)
+    assert res.circuit.parameters == {theta}
+    assert all(
+        (i.gate or i.conditional_gate).name in target.native_gates
+        for i in res.circuit
+        if not i.is_measure
+    )
+    bound = res.circuit.bind_parameters({theta: 0.37})
+    assert_compiled_behaviour(
+        qc.bind_parameters({theta: 0.37}), bound, res.final_layout[:2], 2
+    )
+    # a symbolic gate that is not native is lowered by the rules, condition kept
+    sym = QuantumCircuit().h(1).measure([0], [0])
+    with sym.if_test(0, 0):
+        sym.ry(theta, 1)
+    res = transpile(sym, target, seed=1)
+    assert all(
+        (i.gate or i.conditional_gate).name in target.native_gates
+        for i in res.circuit
+        if not i.is_measure
+    )
+    assert_compiled_behaviour(
+        sym.bind_parameters({theta: 1.2}),
+        res.circuit.bind_parameters({theta: 1.2}),
+        res.final_layout[:2],
+        2,
+    )
+
+
+def test_phase_polynomial_extraction_refuses_conditional_gates() -> None:
+    from quspect.dag.phase_polynomial import PhasePolynomialCompiler
+
+    qc = QuantumCircuit().t(0).measure([1], [0])
+    with qc.if_test(0):
+        qc.rz(0.5, 0)
+    with pytest.raises(ValueError, match="classically controlled"):
+        PhasePolynomialCompiler.extract(qc.to_dag())
+
+
+def test_copies_made_inside_a_block_have_no_open_block() -> None:
+    import copy
+
+    qc = QuantumCircuit().h(0)
+    with qc.if_test(0):
+        clones = [copy.deepcopy(qc), pickle.loads(pickle.dumps(qc)), qc.copy()]
+    for clone in clones:
+        assert clone._condition is None
+        assert clone.x(1)[-1].is_gate
+
+
+def test_if_test_validates_its_condition_before_any_gate() -> None:
+    qc = QuantumCircuit()
+    with pytest.raises(ValueError, match="does not fit"), qc.if_test(0, 5):
+        pass
+    with pytest.raises(ValueError, match="more than once"), qc.if_test([1, 1], 0):
+        pass
+    with pytest.raises(TypeError), qc.if_test(0, True):
+        pass
+    assert qc._condition is None and len(qc) == 0
+    with qc.if_test(np.int64(2), np.int64(1)):
+        qc.x(0)
+    assert qc[0].clbits == (2,) and type(qc[0].condition) is int
+
+
+def test_native_executor_rejects_a_condition_on_a_plain_gate() -> None:
+    import json
+
+    from quspect.ir import qsal
+    from quspect.native import NativeExecutor, load_core
+
+    if load_core() is None:
+        pytest.skip("native extension not built")
+    qc = QuantumCircuit().h(0).measure([0], [0])
+    with qc.if_test(0):
+        qc.x(1)
+    qc.measure([1], [1])
+    doc = json.loads(qsal.dumps(qc))
+    doc["circuit"]["instructions"][2]["type"] = "GATE"  # still carries "condition"
+    with pytest.raises(Exception, match="only CONDITIONAL"):
+        NativeExecutor(seed=1).run(json.dumps(doc), shots=10)
+    doc = json.loads(qsal.dumps(qc))
+    doc["circuit"]["instructions"][2]["clbits"] = [0, 0]
+    with pytest.raises(Exception, match="more than once"):
+        NativeExecutor(seed=1).run(json.dumps(doc), shots=10)
+
+
 # ---------------------------------------------------------------- consumers that refuse
 def test_cloud_backends_refuse_classical_control() -> None:
     from quspect.backends._compile import compile_for_device

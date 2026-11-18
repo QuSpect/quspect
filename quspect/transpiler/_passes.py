@@ -89,6 +89,10 @@ class DecomposePass:
                 _synthesize_unsupported(out, supported), supported_gates=supported
             )
             out = _synthesize_unsupported(out, supported, one_qubit_only=True)
+            # single-qubit conditional gates without a rule: by synthesis too
+            from quspect.transpiler._conditional import translate_conditional_gates
+
+            out = translate_conditional_gates(out, supported, strict=False)
         left = _unsupported(out, supported)
         if left:
             raise ValueError(
@@ -111,11 +115,18 @@ def _unsupported(circuit: QuantumCircuit, supported: set[str]) -> set[tuple[str,
         if indices is not None:
             # Only the listed instructions can be unsupported gates.
             candidates = [circuit._instructions[i] for i in indices]
-    return {
+    found = {
         (i.gate.name, len(i.qubits))
         for i in candidates
         if i.is_gate and i.gate is not None and i.gate.name not in supported
     }
+    # classically controlled gates must be native as well
+    found.update(
+        (i.conditional_gate.name, len(i.qubits))
+        for i in circuit
+        if i.conditional_gate is not None and i.conditional_gate.name not in supported
+    )
+    return found
 
 
 def _synthesize_unsupported(

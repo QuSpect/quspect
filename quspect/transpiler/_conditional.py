@@ -128,7 +128,7 @@ def expand_conditional_gates(circuit: QuantumCircuit) -> QuantumCircuit:
 
 
 def translate_conditional_gates(
-    circuit: QuantumCircuit, native_gates: Collection[str]
+    circuit: QuantumCircuit, native_gates: Collection[str], *, strict: bool = True
 ) -> QuantumCircuit:
     """Write conditional single-qubit gates in the target's single-qubit gates.
 
@@ -136,19 +136,23 @@ def translate_conditional_gates(
     are one conditional unitary; a run that holds a non-native gate is
     resynthesized (up to a global phase, which is unobservable for a
     conditional gate as well: it multiplies one record's state).  Runs of
-    native gates are kept as they are.
+    native gates are kept as they are, and so is a native gate whose matrix
+    is not numeric (symbolic parameters).
 
     Args:
-        circuit: Circuit whose conditional gates act on one qubit each.
+        circuit: Circuit whose non-native conditional gates act on one qubit.
         native_gates: The target's native gate names (empty: any gate).
+        strict: Raise for a conditional gate that cannot be made native
+            (default).  With ``False`` such a gate is kept as it is.
 
     Returns:
         The circuit with every conditional gate native.
 
     Raises:
-        ValueError: If a conditional gate acts on several qubits, has
-            symbolic parameters and is not native, or cannot be expressed in
-            the native single-qubit gates.
+        ValueError: With ``strict``, if a non-native conditional gate acts on
+            several qubits, has no numeric matrix (symbolic parameters, an
+            unknown gate), or cannot be expressed in the native single-qubit
+            gates.
     """
     from quspect.gates._matrix_utils import gate_matrix
     from quspect.gates.synthesis import synthesize_one_qubit
@@ -158,6 +162,34 @@ def translate_conditional_gates(
         return circuit
     instructions = circuit.instructions
     out: list[CircuitInstruction] = []
+
+    def emit(matrix: np.ndarray | None, run: list[CircuitInstruction]) -> None:
+        """The pending product ``matrix`` of ``run``, in native gates."""
+        if matrix is None:
+            return
+        like = run[0]
+        sequence = synthesize_one_qubit(matrix, native)
+        if sequence is None:
+            if strict:
+                raise ValueError(
+                    f"Cannot express a classically controlled single-qubit gate "
+                    f"on qubit {like.qubits[0]} in the target gates "
+                    f"{sorted(native)}."
+                )
+            out.extend(run)
+            return
+        out.extend(
+            CircuitInstruction(
+                type=InstructionType.CONDITIONAL,
+                conditional_gate=g,
+                qubits=like.qubits,
+                clbits=like.clbits,
+                label=like.label,
+                condition=like.condition,
+            )
+            for g in sequence
+        )
+
     i = 0
     while i < len(instructions):
         ins = instructions[i]
@@ -166,10 +198,14 @@ def translate_conditional_gates(
             i += 1
             continue
         if len(ins.qubits) != 1:
-            raise ValueError(
-                f"Conditional gate {_name(ins)!r} on qubits "
-                f"{ins.qubits} was not expanded to single-qubit gates."
-            )
+            if _name(ins) not in native and strict:
+                raise ValueError(
+                    f"Conditional gate {_name(ins)!r} on qubits "
+                    f"{ins.qubits} was not expanded to single-qubit gates."
+                )
+            out.append(ins)
+            i += 1
+            continue
         j = i + 1
         while (
             j < len(instructions)
@@ -180,38 +216,31 @@ def translate_conditional_gates(
             and instructions[j].label == ins.label
         ):
             j += 1
-        run = instructions[i:j]
+        run = list(instructions[i:j])
         i = j
         if all(_name(r) in native for r in run):
             out.extend(run)
             continue
-        matrix = np.eye(2, dtype=complex)
+        matrix: np.ndarray | None = None
+        pending: list[CircuitInstruction] = []
         for r in run:
             assert r.conditional_gate is not None
             try:
                 step = np.asarray(gate_matrix(r.conditional_gate), dtype=complex)
-            except ValueError as err:
-                raise ValueError(
-                    f"Cannot express the classically controlled gate "
-                    f"{_name(r)!r} on qubit {r.qubits[0]} in the target "
-                    f"gates: {err}"
-                ) from err
-            matrix = step @ matrix
-        sequence = synthesize_one_qubit(matrix, native)
-        if sequence is None:
-            raise ValueError(
-                f"Cannot express a classically controlled single-qubit gate on "
-                f"qubit {ins.qubits[0]} in the target gates {sorted(native)}."
-            )
-        out.extend(
-            CircuitInstruction(
-                type=InstructionType.CONDITIONAL,
-                conditional_gate=g,
-                qubits=ins.qubits,
-                clbits=ins.clbits,
-                label=ins.label,
-                condition=ins.condition,
-            )
-            for g in sequence
-        )
+            except (KeyError, ValueError, TypeError) as err:
+                # no numeric matrix: a native gate (symbolic parameters) stays
+                # as it is, between the resynthesized pieces around it
+                emit(matrix, pending)
+                matrix, pending = None, []
+                if _name(r) not in native and strict:
+                    raise ValueError(
+                        f"Cannot express the classically controlled gate "
+                        f"{_name(r)!r} on qubit {r.qubits[0]} in the target "
+                        f"gates {sorted(native)}: {err}"
+                    ) from err
+                out.append(r)
+                continue
+            matrix = step if matrix is None else step @ matrix
+            pending.append(r)
+        emit(matrix, pending)
     return QuantumCircuit._from_instruction_snapshot(out, name=circuit.name)
