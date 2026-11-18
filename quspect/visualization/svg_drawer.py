@@ -394,7 +394,9 @@ def _render_conditional(
     assert gate is not None and instruction.condition is not None
     clbits = instruction.clbits
     bits = ", ".join(f"c{c}" for c in clbits)
-    values = ", ".join(str((instruction.condition >> i) & 1) for i in range(len(clbits)))
+    values = ", ".join(
+        str((instruction.condition >> i) & 1) for i in range(len(clbits))
+    )
     parts = [f"<g><title>{escape(gate.name)} if ({bits}) == ({values})</title>"]
     lowest_y = max(lane_ys[num_qubits + c] for c in clbits)
     gate_y = max(lane_ys[q] for q in instruction.qubits)

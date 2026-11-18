@@ -9,6 +9,8 @@ hold several states (a mixed state); comparisons use density matrices.
 
 from __future__ import annotations
 
+import random
+
 import numpy as np
 
 from quspect.circuit.circuit import QuantumCircuit
@@ -17,7 +19,9 @@ from quspect.gates._matrix_utils import gate_matrix
 Record = tuple[int, ...]
 
 
-def _apply(state: np.ndarray, matrix: np.ndarray, qubits: tuple[int, ...]) -> np.ndarray:
+def _apply(
+    state: np.ndarray, matrix: np.ndarray, qubits: tuple[int, ...]
+) -> np.ndarray:
     k = len(qubits)
     tensor = np.asarray(matrix, dtype=complex).reshape([2] * (2 * k))
     state = np.tensordot(tensor, state, axes=(list(range(k, 2 * k)), list(qubits)))
@@ -25,7 +29,9 @@ def _apply(state: np.ndarray, matrix: np.ndarray, qubits: tuple[int, ...]) -> np
 
 
 def branches(
-    circuit: QuantumCircuit, num_qubits: int | None = None, num_clbits: int | None = None
+    circuit: QuantumCircuit,
+    num_qubits: int | None = None,
+    num_clbits: int | None = None,
 ) -> dict[Record, list[np.ndarray]]:
     """Unnormalized final states of every classical record (qubit 0 = first axis)."""
     n = circuit.num_qubits if num_qubits is None else num_qubits
@@ -40,7 +46,8 @@ def branches(
             assert ins.gate is not None
             matrix = gate_matrix(ins.gate)
             states = {
-                r: [_apply(s, matrix, ins.qubits) for s in ss] for r, ss in states.items()
+                r: [_apply(s, matrix, ins.qubits) for s in ss]
+                for r, ss in states.items()
             }
         elif ins.is_conditional:
             assert ins.conditional_gate is not None and ins.condition is not None
@@ -72,7 +79,9 @@ def branches(
 
 
 def densities(
-    circuit: QuantumCircuit, num_qubits: int | None = None, num_clbits: int | None = None
+    circuit: QuantumCircuit,
+    num_qubits: int | None = None,
+    num_clbits: int | None = None,
 ) -> dict[Record, np.ndarray]:
     """Unnormalized density matrix of every reachable classical record."""
     out = {}
@@ -87,7 +96,9 @@ def densities(
 
 
 def distribution(
-    circuit: QuantumCircuit, num_qubits: int | None = None, num_clbits: int | None = None
+    circuit: QuantumCircuit,
+    num_qubits: int | None = None,
+    num_clbits: int | None = None,
 ) -> dict[Record, float]:
     """Exact probability of every reachable classical record."""
     return {
@@ -143,3 +154,43 @@ def assert_compiled_behaviour(
             rho += np.outer(vec, vec.conj())
         error = float(np.max(np.abs(rho - got[record])))
         assert error < atol, (record, error)
+
+
+def _random_gate(qc: QuantumCircuit, rng: random.Random, n: int) -> None:
+    r = rng.random()
+    q = rng.randrange(n)
+    if r < 0.45 or n < 2:
+        getattr(qc, rng.choice(["h", "x", "z", "s", "t", "sdg", "y", "sx"]))(q)
+    elif r < 0.6:
+        getattr(qc, rng.choice(["rz", "rx", "ry"]))(rng.choice([0.3, 1.1, -0.7]), q)
+    elif r < 0.9 or n < 3:
+        a, b = rng.sample(range(n), 2)
+        name = rng.choice(["cx", "cz", "swap", "rzz", "cp"])
+        if name in ("rzz", "cp"):
+            getattr(qc, name)(rng.choice([0.4, -1.3]), a, b)
+        else:
+            getattr(qc, name)(a, b)
+    else:
+        qc.ccx(*rng.sample(range(n), 3))
+
+
+def random_dynamic_circuit(
+    seed: int, max_qubits: int = 4, max_size: int = 22
+) -> QuantumCircuit:
+    """Random circuit with gates, measurements, barriers and conditional gates."""
+    rng = random.Random(seed)
+    n, m = rng.randint(1, max_qubits), rng.randint(1, 3)
+    qc = QuantumCircuit()
+    for _ in range(rng.randint(3, max_size)):
+        r = rng.random()
+        if r < 0.15:
+            qc.measure([rng.randrange(n)], [rng.randrange(m)])
+        elif r < 0.45:
+            k = rng.randint(1, min(2, m))
+            with qc.if_test(rng.sample(range(m), k), rng.randrange(1 << k)):
+                _random_gate(qc, rng, n)
+        elif r < 0.48:
+            qc.barrier(*rng.sample(range(n), rng.randint(1, n)))
+        else:
+            _random_gate(qc, rng, n)
+    return qc

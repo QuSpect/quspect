@@ -224,16 +224,16 @@ class CircuitInstruction:
                     f"CONDITIONAL reads classical bit(s) more than once "
                     f"(clbits {clbits})."
                 )
-            value = self.condition
-            if type(value) is not int:
-                if isinstance(value, (bool, np.bool_)) or not hasattr(
-                    value, "__index__"
-                ):
+            raw: Any = self.condition
+            if type(raw) is int:
+                value: int = raw
+            else:
+                if isinstance(raw, (bool, np.bool_)) or not hasattr(raw, "__index__"):
                     raise TypeError(
                         f"CONDITIONAL condition must be a non-negative integer, "
-                        f"got {value!r}."
+                        f"got {raw!r}."
                     )
-                value = operator.index(value)
+                value = operator.index(raw)
                 object.__setattr__(self, "condition", value)
             if not 0 <= value < (1 << len(clbits)):
                 raise ValueError(

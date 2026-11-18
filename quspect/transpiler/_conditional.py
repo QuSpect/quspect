@@ -114,9 +114,13 @@ def expand_conditional_gates(circuit: QuantumCircuit) -> QuantumCircuit:
             a, b = qubits
             # if c: cx(a, b)  ==  if c: h(b); [if c: cz(a, b)]; if c: h(b)
             conditional(H, b, ins)
-            out.append(CircuitInstruction(type=InstructionType.GATE, gate=CX, qubits=(a, b)))
+            out.append(
+                CircuitInstruction(type=InstructionType.GATE, gate=CX, qubits=(a, b))
+            )
             conditional(SDG, b, ins)
-            out.append(CircuitInstruction(type=InstructionType.GATE, gate=CX, qubits=(a, b)))
+            out.append(
+                CircuitInstruction(type=InstructionType.GATE, gate=CX, qubits=(a, b))
+            )
             conditional(S, a, ins)
             conditional(S, b, ins)
             conditional(H, b, ins)

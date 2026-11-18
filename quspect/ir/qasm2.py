@@ -204,7 +204,9 @@ def _creg_layout(circuit: QuantumCircuit) -> list[tuple[str, int, int]]:
     if not groups:
         return [("c", 0, num_clbits)]
     ordered = sorted(groups)
-    for (start_a, size_a), (start_b, _size_b) in zip(ordered, ordered[1:], strict=False):
+    for (start_a, size_a), (start_b, _size_b) in zip(
+        ordered, ordered[1:], strict=False
+    ):
         if start_b < start_a + size_a:
             raise UnsupportedGateError(
                 "if",

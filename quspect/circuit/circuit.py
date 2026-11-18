@@ -258,6 +258,7 @@ class QuantumCircuit:
                 )
             if condition is not None:
                 active = _normalize_condition(*condition)
+            assert active is not None
             self._instructions.append(
                 CircuitInstruction(
                     type=InstructionType.CONDITIONAL,
@@ -1033,10 +1034,12 @@ class QuantumCircuit:
                         gate.num_qubits,
                         *new_params,
                     )
-                    new_instr = dataclasses.replace(
-                        instr,
-                        **{"gate" if instr.gate is not None else "conditional_gate": new_gate},
-                    )
+                    if instr.gate is not None:
+                        new_instr = dataclasses.replace(instr, gate=new_gate)
+                    else:
+                        new_instr = dataclasses.replace(
+                            instr, conditional_gate=new_gate
+                        )
                     new_circuit._instructions.append(new_instr)
                 else:
                     new_circuit._instructions.append(instr)
