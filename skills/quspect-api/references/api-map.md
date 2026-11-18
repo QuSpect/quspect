@@ -462,8 +462,8 @@ from quspect.visualization import display_sampling, compare_results
 
 Circuit diagrams:
 
-- `QuantumCircuit.draw()`
-- `draw_text_circuit(circuit)`
+- `QuantumCircuit.draw(width=None, fold=True)` — Unicode text diagram (gates as rounded cards, measurements as `M→c0`, no classical wires); folds to the terminal width (`width=None`), to `width` columns, or not at all (`fold=False`)
+- `draw_text_circuit(circuit, width=None, fold=True)`
 - `QuantumCircuit.svg(style="official", width=None, scale=1.0)`
 - `draw_svg_circuit(circuit, style="official" | "light" | "dark" | SvgStyle, width=None, scale=1.0)`
 - `CircuitSVG.to_file(filename)`

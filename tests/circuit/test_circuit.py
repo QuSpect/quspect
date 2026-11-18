@@ -729,52 +729,62 @@ class TestQuantumCircuitDraw:
         circ = QuantumCircuit()
         circ.h(0).cx(0, 1)
         result = circ.draw()
-        assert "q0:" in result
-        assert "q1:" in result
-        assert "[H]" in result
-        assert "o" in result
-        assert "[X]" in result
+        assert "q0 ─" in result
+        assert "q1 ─" in result
+        assert "┤ H ├" in result
+        assert "●" in result
+        assert "⊕" in result
 
     def test_draw_shows_vertical_wire_for_non_adjacent_gate(self) -> None:
         """Test draw shows a vertical wire between non-adjacent qubits."""
         circ = QuantumCircuit()
         circ.cx(0, 2)
-        result = circ.draw().splitlines()
-        assert "|" in result[1]
+        q1 = next(line for line in circ.draw().splitlines() if line.startswith("q1"))
+        assert "┼" in q1
 
-    def test_draw_includes_classical_lanes_for_measurement(self) -> None:
-        """Test draw renders classical bit lanes for measurements."""
+    def test_draw_names_the_classical_bit_of_a_measurement(self) -> None:
+        """Test draw shows which classical bit each measurement writes."""
         circ = QuantumCircuit()
-        circ.h(0).measure([0, 1], [0, 1])
-        result = circ.draw()
-        assert "c0:" in result
-        assert "c1:" in result
-        assert "[M]" in result
+        circ.h(0).measure([0, 1], [1, 0])
+        q0, q1 = (ln for ln in circ.draw().splitlines() if ln.startswith("q"))
+        assert "┤ M→c1 ├" in q0
+        assert "┤ M→c0 ├" in q1
 
     def test_draw_renders_barrier(self) -> None:
         """Test draw renders barrier markers on covered qubits."""
         circ = QuantumCircuit()
         circ.h(0).barrier(0, 1).x(1)
         result = circ.draw()
-        assert "|" in result
+        assert "┆" in result
 
     def test_draw_parameterized_gate_label(self) -> None:
         """Test draw includes formatted parameterized gate labels."""
         theta = Parameter("theta")
         result = QuantumCircuit().rx(theta, 0).draw()
-        assert "[RX(theta)]" in result
+        assert "┤ RX(theta) ├" in result
 
     def test_draw_swap_renders_cross_marks(self) -> None:
         """Test draw uses cross marks for swap gates."""
         lines = QuantumCircuit().swap(0, 1).draw().splitlines()
-        assert "x" in lines[0]
-        assert "x" in lines[1]
+        assert lines[0].startswith("q0") and "╳" in lines[0]
+        assert "│" in lines[1]
+        assert lines[2].startswith("q1") and "╳" in lines[2]
 
     def test_draw_multi_control_gate_shows_all_controls(self) -> None:
         """Test draw renders multiple control markers for CCX."""
         result = QuantumCircuit().ccx(0, 1, 2).draw()
-        assert result.count("o") == 2
-        assert "[X]" in result
+        assert result.count("●") == 2
+        assert "⊕" in result
+
+    def test_draw_folds_to_the_given_width(self) -> None:
+        """Test draw continues a wide circuit below, within the width."""
+        circ = QuantumCircuit()
+        for _ in range(20):
+            circ.h(0).cx(0, 1)
+        result = circ.draw(width=40)
+        assert "┄" in result and "\n\n" in result
+        assert max(len(line) for line in result.splitlines()) <= 40
+        assert "┄" not in circ.draw(fold=False)
 
 
 class TestQuantumCircuitSvg:
@@ -792,23 +802,20 @@ class TestQuantumCircuitSvg:
         assert svg_text.startswith("<svg")
         assert "</svg>" in svg_text
         assert ">H<" in svg_text
-        assert sum(item.attrib.get("r") == "5.5" for item in circles) == 1
-        assert sum(item.attrib.get("r") == "15.0" for item in circles) == 1
+        assert len(circles) == 1  # the circled plus of the CNOT target
+        assert svg_text.count("h0") == 1  # its control dot
 
-    def test_svg_measurement_includes_classical_lines(self) -> None:
-        """Test measurement rendering includes its icon and classical connector."""
+    def test_svg_measurement_names_its_classical_bit(self) -> None:
+        """Test a measurement is a card naming the bit it writes, without wires."""
         circ = QuantumCircuit()
         circ.h(0).measure([0], [1])
         svg_text = str(circ.svg())
         root = ET.fromstring(svg_text)
-        paths = [item for item in root.iter() if item.tag.endswith("path")]
-        lines = [item for item in root.iter() if item.tag.endswith("line")]
-        circles = [item for item in root.iter() if item.tag.endswith("circle")]
+        texts = [item.text for item in root.iter() if item.tag.endswith("text")]
 
-        assert "c1:" in svg_text
-        assert any(item.attrib.get("stroke-dasharray") == "5 4" for item in lines)
-        assert any("A 10 10 0 0 1" in item.attrib.get("d", "") for item in paths)
-        assert sum(item.attrib.get("r") == "2.2" for item in circles) == 1
+        assert "M→c1" in texts
+        assert [text for text in texts if text and text.startswith("q")] == ["q0"]
+        assert not any(text and text.startswith("c1") for text in texts)
 
     def test_svg_empty(self) -> None:
         """Test empty circuit SVG rendering."""
@@ -827,17 +834,18 @@ class TestQuantumCircuitSvg:
         assert "RX(theta)" in svg_text
 
     def test_svg_swap_renders_cross_lines(self) -> None:
-        """Test SVG output uses line elements for swap marks."""
-        svg_text = str(QuantumCircuit().swap(0, 1).svg())
-        assert svg_text.count("<line") >= 3
+        """Test SVG output draws two crosses of two strokes each for a swap."""
+        root = ET.fromstring(str(QuantumCircuit().swap(0, 1).svg()))
+        paths = [item.attrib["d"] for item in root.iter() if item.tag.endswith("path")]
+        assert sum(data.count("l") for data in paths) == 4
 
     def test_svg_multi_control_gate_renders_multiple_controls(self) -> None:
         """Test SVG output contains one control circle per control qubit."""
         root = ET.fromstring(str(QuantumCircuit().ccx(0, 1, 2).svg()))
         circles = [item for item in root.iter() if item.tag.endswith("circle")]
 
-        assert sum(item.attrib.get("r") == "5.5" for item in circles) == 2
-        assert sum(item.attrib.get("r") == "15.0" for item in circles) == 1
+        assert len(circles) == 1
+        assert str(QuantumCircuit().ccx(0, 1, 2).svg()).count("h0") == 2
 
     def test_svg_accepts_style_object(self) -> None:
         """Test svg accepts a strongly typed style object."""

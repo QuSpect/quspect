@@ -1489,15 +1489,33 @@ class QuantumCircuit:
             f"instructions={len(self)})"
         )
 
-    def draw(self) -> str:
+    def draw(self, *, width: int | None = None, fold: bool = True) -> str:
         """Return a text-based circuit diagram.
+
+        Gates are drawn as rounded cards on the qubit wires, with Unicode
+        box-drawing characters.  A circuit wider than the display is
+        continued on further lines.
+
+        Args:
+            width: Number of columns available.  ``None`` uses the width of
+                the terminal (80 when there is none, e.g. output piped to a
+                file).
+            fold: Whether to continue a wide circuit on further lines.  With
+                ``False`` every lane is a single line, however long.
 
         Returns:
             A multi-line string showing the circuit layout.
+
+        Example:
+            >>> print(QuantumCircuit().h(0).cx(0, 1).draw())
+                 ╭───╮
+            q0 ──┤ H ├───●───
+                 ╰───╯   │
+            q1 ──────────⊕───
         """
         from quspect.visualization import draw_text_circuit
 
-        return draw_text_circuit(self)
+        return draw_text_circuit(self, width=width, fold=fold)
 
     def svg(
         self,
