@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 
+import numpy as np
 import pytest
 
 from quspect import QuantumCircuit
@@ -220,6 +221,221 @@ def test_empty_circuit() -> None:
     p = TCountOptimizePass()
     assert len(p.run(QuantumCircuit())) == 0
     assert p.stats == TCountStats()
+
+
+# ---------------------------------------------------------------- with ancillas
+def _ancilla_error(
+    circuit: QuantumCircuit, out: QuantumCircuit, trials: int = 2
+) -> float:
+    """How far ``out`` is from implementing ``circuit`` with clean ancillas.
+
+    From random product states (prepared by rotations the pass treats as
+    fences), every measurement record of ``out`` must leave the ideal output
+    state on the circuit's qubits and ``|0…0⟩`` on the ancillas; the record
+    probabilities must add up to 1.  Exact branch simulation
+    (:mod:`tests._dynamic`).
+    """
+    from tests._dynamic import branches
+
+    n = circuit.num_qubits
+    total = out.num_qubits
+    rng = np.random.default_rng(1)
+    worst = 0.0
+    for _ in range(trials):
+        prep = QuantumCircuit()
+        for q in range(n):
+            prep.ry(float(rng.uniform(0, 3)), q).rz(float(rng.uniform(0, 6)), q)
+        ideal = QuantumCircuit()
+        ideal._instructions = [
+            i
+            for i in list(prep) + list(circuit)
+            if not i.is_measure and not i.is_barrier
+        ]
+        (want,) = branches(ideal, n, 0)[()]
+        zeros = np.zeros(2 ** (total - n), dtype=complex)
+        zeros[0] = 1.0
+        target = np.kron(want.reshape(-1), zeros)
+        full = QuantumCircuit()
+        full._instructions = list(prep) + list(out)
+        probability = 0.0
+        for ensemble in branches(full, total, out.num_clbits).values():
+            for state in ensemble:
+                vec = state.reshape(-1)
+                weight = float(np.vdot(vec, vec).real)
+                probability += weight
+                worst = max(worst, abs(abs(np.vdot(target, vec)) ** 2 - weight))
+        worst = max(worst, abs(probability - 1.0))
+    return worst
+
+
+def test_hadamard_gadgets_lower_the_t_count_of_toffoli_circuits() -> None:
+    qc = QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3)
+    plain = TCountOptimizePass()
+    plain.run(qc)
+    assert plain.stats.t_count_out == 15
+    p = TCountOptimizePass(ancillas=True)
+    out = p.run(qc)
+    assert p.stats == TCountStats(21, 13, 1, 1, 2, 2, 13)
+    assert _t_count(out) == 13
+    assert sum(i.is_measure for i in out) == 2
+    assert sum(i.is_conditional for i in out) == 13
+    assert out.num_qubits == qc.num_qubits + 2 and out.num_clbits == 2
+    assert _ancilla_error(qc, out) < 1e-9
+
+    qc = QuantumCircuit().ccx(0, 1, 2).h(2).ccx(0, 1, 2).h(1).ccx(0, 2, 1)
+    out = p.run(qc)
+    assert (p.stats.t_count_out, p.stats.ancillas) == (7, 2)
+    assert _ancilla_error(qc, out) < 1e-9
+
+
+def test_gadgets_are_used_only_when_they_save_t_gates() -> None:
+    # no internal Hadamard after optimization: the ancilla-free result is kept
+    qc = QuantumCircuit().ccx(0, 1, 2).cx(2, 3).ccx(0, 1, 2).h(3).ccx(1, 3, 0)
+    qc.h(3).ccx(1, 3, 0)
+    p = TCountOptimizePass(ancillas=True)
+    out = p.run(qc)
+    assert (p.stats.t_count_out, p.stats.ancillas, p.stats.measurements) == (11, 0, 0)
+    assert not any(i.is_measure or i.is_conditional for i in out)
+    _assert_equivalent(qc, out)
+    # nothing to gain on a single qubit
+    qc = QuantumCircuit().h(0).t(0).h(0).t(0).h(0).t(0).h(0).t(0)
+    out = p.run(qc)
+    assert p.stats.regions_improved == 0 and p.stats.ancillas == 0
+    assert [(i.gate, i.qubits) for i in out] == [(i.gate, i.qubits) for i in qc]
+
+
+def test_max_ancillas_limits_the_gadgets() -> None:
+    qc = QuantumCircuit().ccx(0, 1, 2).h(2).ccx(0, 1, 2).h(1).ccx(0, 2, 1)
+    limited = TCountOptimizePass(ancillas=True, max_ancillas=1)
+    out = limited.run(qc)
+    assert (limited.stats.t_count_out, limited.stats.ancillas) == (15, 0)
+    _assert_equivalent(qc, out)
+    off = TCountOptimizePass(ancillas=True, max_ancillas=0)
+    assert [(i.gate, i.qubits) for i in off.run(qc)] == [
+        (i.gate, i.qubits) for i in TCountOptimizePass().run(qc)
+    ]
+    with pytest.raises(ValueError, match="max_ancillas"):
+        TCountOptimizePass(max_ancillas=-1)
+
+
+def test_the_default_pass_adds_no_ancilla_measurement_or_condition() -> None:
+    qc = QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3)
+    p = TCountOptimizePass()
+    out = p.run(qc)
+    assert out.num_qubits == qc.num_qubits and out.num_clbits == 0
+    assert all(i.is_gate for i in out)
+    assert (p.stats.ancillas, p.stats.measurements, p.stats.conditional_gates) == (
+        0,
+        0,
+        0,
+    )
+
+
+@pytest.mark.parametrize("seed", range(24))
+def test_random_circuits_with_gadgets_implement_the_same_unitary(seed: int) -> None:
+    rng = random.Random(seed)
+    qc = _random_circuit(rng.randint(2, 4), rng.randint(8, 40), 500 + seed)
+    p = TCountOptimizePass(ancillas=True, max_ancillas=5)
+    out = p.run(qc)
+    assert p.stats.t_count_out <= p.stats.t_count_in
+    assert _t_count(out) == p.stats.t_count_out or p.stats.regions_improved == 0
+    assert sum(i.is_measure for i in out) == p.stats.measurements
+    assert sum(i.is_conditional for i in out) == p.stats.conditional_gates
+    assert out.num_qubits <= qc.num_qubits + p.stats.ancillas
+    if out.num_qubits <= 10:
+        assert _ancilla_error(qc, out) < 1e-8
+
+
+def test_gadget_bits_and_ancillas_lie_behind_the_circuit_and_are_reused() -> None:
+    # two regions separated by a fence; the circuit already has classical bits
+    block = [(0, 1, 2), (0, 1, 2)]
+    qc = QuantumCircuit().x(5).measure([5], [3])
+    for a, b, c in block:
+        qc.ccx(a, b, c).h(c)
+    qc.rx(0.3, 4)
+    for a, b, c in block:
+        qc.ccx(a, c, b).h(b)
+    p = TCountOptimizePass(ancillas=True)
+    out = p.run(qc)
+    assert (
+        p.stats.regions == 2 and p.stats.regions_improved == 2 and p.stats.ancillas >= 1
+    )
+    first_ancilla, first_bit = qc.num_qubits, qc.num_clbits
+    gadget_bits = {c for i in out if i.is_conditional for c in i.clbits}
+    assert gadget_bits and min(gadget_bits) >= first_bit
+    measured = [i for i in out if i.is_measure][1:]
+    assert all(i.clbits[0] >= first_bit for i in measured)
+    # the same ancillas (and bits) serve both regions
+    assert out.num_qubits == first_ancilla + p.stats.ancillas
+    assert len({i.clbits for i in measured}) < len(measured)
+    unitary = QuantumCircuit()
+    unitary._instructions = [i for i in qc if not i.is_measure]
+    rewritten = QuantumCircuit()
+    rewritten._instructions = [
+        i for i in out if not (i.is_measure and i.clbits == (3,))
+    ]
+    assert _ancilla_error(unitary, rewritten, trials=1) < 1e-8
+
+
+def test_gadget_output_runs_in_the_simulator_and_compiles() -> None:
+    from quspect.simulation import Simulator
+    from quspect.transpiler import CompilationTarget, transpile
+    from tests._dynamic import assert_compiled_behaviour, distribution
+
+    qc = QuantumCircuit().h(0).h(1).ccx(0, 1, 2).h(2).ccx(0, 1, 2).h(1).ccx(0, 2, 1)
+    p = TCountOptimizePass(ancillas=True)
+    out = p.run(qc)
+    assert p.stats.ancillas > 0
+    exact = distribution(qc.copy().measure([0, 1, 2], [0, 1, 2]))
+    measured = out.copy()
+    first = out.num_clbits
+    measured.measure([0, 1, 2], [first, first + 1, first + 2])
+    counts = Simulator(seed=3).run(measured, shots=3000).counts
+    marginal: dict[tuple[int, ...], float] = {}
+    for key, n in counts.items():
+        record = tuple(int(ch) for ch in key[first : first + 3])
+        marginal[record] = marginal.get(record, 0.0) + n / 3000
+    for record, probability in exact.items():
+        assert abs(marginal.get(record, 0.0) - probability) < 0.05
+    target = CompilationTarget.from_coupling_map(
+        out.num_qubits,
+        [(i, i + 1) for i in range(out.num_qubits - 1)],
+        native_gates={"cz", "h", "rz", "x"},
+    )
+    res = transpile(out, target, optimization_level=1, seed=0)
+    assert_compiled_behaviour(
+        out, res.circuit, res.final_layout[: out.num_qubits], target.num_qubits
+    )
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_gadgets_python_reference_gives_the_same_circuit(seed: int) -> None:
+    qc = _random_circuit(4, 40, 900 + seed)
+    a = TCountOptimizePass(ancillas=True, max_ancillas=4, native=True).run(qc)
+    b = TCountOptimizePass(ancillas=True, max_ancillas=4, native=False).run(qc)
+    assert [repr(i) for i in a] == [repr(i) for i in b]
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_min_h_emission_keeps_the_unitary(seed: int) -> None:
+    from quspect.transpiler import _tcount_ancilla as gadget
+    from quspect.transpiler._tcount import _OUT_GATES, _translate
+
+    qc = _random_circuit(4, 40, 700 + seed)
+    gates = [g for ins in qc for g in _translate(ins) or []]
+    n = _num_qubits(qc)
+    clifford, rots = rot.merge_rotations(*rot.from_gates(gates, n), n)
+    emitted = gadget.min_h_emit(clifford, rots, n)
+    out = QuantumCircuit()
+    for g in emitted:
+        out.append(_OUT_GATES[g[0]], [g[1]] if g[2] < 0 else [g[1], g[2]])
+    if len(out):
+        _assert_equivalent(qc, out)
+    assert sum(1 for g in emitted if g[0] in (rot.T, rot.TDG)) == len(rots)
+    head, mid, tail = gadget.split_head_middle_tail(emitted, n)
+    assert len(head) + len(mid) + len(tail) == len(emitted)
+    assert not any(g[0] in (rot.T, rot.TDG) for g in head + tail)
+    assert gadget.internal_hadamards(emitted, n) == sum(1 for g in mid if g[0] == rot.H)
 
 
 # ---------------------------------------------------------------- Pauli bookkeeping
