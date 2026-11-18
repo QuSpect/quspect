@@ -239,6 +239,8 @@ class QuantumCircuit:
             >>> circ = circ.append(X, [1], condition=(0, 1))
             >>> circ[2].is_conditional, circ[2].clbits, circ[2].condition
             (True, (0,), 1)
+            >>> circ[2].gate is None, circ[2].conditional_gate.name
+            (True, 'x')
         """
         qubits_tuple = tuple(qubits)
         clbits_tuple = tuple(clbits)
@@ -259,7 +261,7 @@ class QuantumCircuit:
             self._instructions.append(
                 CircuitInstruction(
                     type=InstructionType.CONDITIONAL,
-                    gate=gate,
+                    conditional_gate=gate,
                     qubits=qubits_tuple,
                     clbits=active[0],
                     condition=active[1],
@@ -977,8 +979,9 @@ class QuantumCircuit:
         """Return the set of all Parameters used in this circuit."""
         params: set[Parameter] = set()
         for instr in self._instructions:
-            if instr.gate is not None and instr.gate.params:
-                for p in instr.gate.params:
+            gate = instr.gate if instr.gate is not None else instr.conditional_gate
+            if gate is not None and gate.params:
+                for p in gate.params:
                     if isinstance(p, Parameter):
                         params.add(p)
                     elif isinstance(p, ParameterExpression):
@@ -1009,11 +1012,12 @@ class QuantumCircuit:
         """
         new_circuit = QuantumCircuit(name=self._name)
         for instr in self._instructions:
-            if instr.gate is not None:
-                if instr.gate.params:
+            gate = instr.gate if instr.gate is not None else instr.conditional_gate
+            if gate is not None:
+                if gate.params:
                     # Resolve each parameter
                     new_params = []
-                    for p in instr.gate.params:
+                    for p in gate.params:
                         if isinstance(p, Parameter):
                             if p not in binding:
                                 raise ValueError(f"Parameter {p!r} is not bound.")
@@ -1025,17 +1029,13 @@ class QuantumCircuit:
                     # Create new gate with resolved params
                     # Use _make_param_gate helper but with concrete values
                     new_gate = _make_param_gate(
-                        instr.gate.name,
-                        instr.gate.num_qubits,
+                        gate.name,
+                        gate.num_qubits,
                         *new_params,
                     )
-                    new_instr = CircuitInstruction(
-                        type=instr.type,
-                        gate=new_gate,
-                        qubits=instr.qubits,
-                        clbits=instr.clbits,
-                        label=instr.label,
-                        condition=instr.condition,
+                    new_instr = dataclasses.replace(
+                        instr,
+                        **{"gate" if instr.gate is not None else "conditional_gate": new_gate},
                     )
                     new_circuit._instructions.append(new_instr)
                 else:
@@ -1123,6 +1123,7 @@ class QuantumCircuit:
                     qubits=new_qubits,
                     clbits=new_clbits,
                     label=instr.label,
+                    conditional_gate=instr.conditional_gate,
                     condition=instr.condition,
                 )
             )
@@ -1319,12 +1320,13 @@ class QuantumCircuit:
                 "qubits": list(instr.qubits),
                 "clbits": list(instr.clbits),
             }
-            if instr.gate is not None:
+            gate = instr.gate if instr.gate is not None else instr.conditional_gate
+            if gate is not None:
                 gate_data: dict[str, Any] = {
-                    "name": instr.gate.name,
-                    "num_qubits": instr.gate.num_qubits,
+                    "name": gate.name,
+                    "num_qubits": gate.num_qubits,
                 }
-                if instr.gate.params:
+                if gate.params:
                     gate_data["params"] = [
                         p.name
                         if isinstance(p, Parameter)
@@ -1339,7 +1341,7 @@ class QuantumCircuit:
                         }
                         if isinstance(p, ParameterExpression)
                         else float(p)
-                        for p in instr.gate.params
+                        for p in gate.params
                     ]
                     gate_data["gate_type"] = "parameterized"
                 else:
@@ -1442,11 +1444,14 @@ class QuantumCircuit:
             circ._instructions.append(
                 CircuitInstruction(
                     type=itype,
-                    gate=gate,
+                    gate=None if itype is InstructionType.CONDITIONAL else gate,
                     channel=channel,
                     qubits=qubits,
                     clbits=clbits,
                     label=label,
+                    conditional_gate=(
+                        gate if itype is InstructionType.CONDITIONAL else None
+                    ),
                     condition=instr_data.get("condition"),
                 )
             )

@@ -31,6 +31,7 @@ struct CircuitNames {
     py::str gate = InternedStr("gate");
     py::str channel = InternedStr("channel");
     py::str label = InternedStr("label");
+    py::str conditional_gate = InternedStr("conditional_gate");
     py::str condition = InternedStr("condition");
     py::str name = InternedStr("name");
     py::str num_qubits = InternedStr("num_qubits");
@@ -75,10 +76,11 @@ bool ReadBits(PyObject* tuple, std::vector<long long>& out) {
     return true;
 }
 
-// 按数据类 __init__ 的字段顺序（type, qubits, clbits, gate, channel, label, condition）直接写入。
-// condition 只有经典控制门（CONDITIONAL）不是 None。
+// 按数据类 __init__ 的字段顺序（type, qubits, clbits, gate, channel, label, conditional_gate, condition）
+// 直接写入。后两个字段只有经典控制门（CONDITIONAL）不是 None。
 py::object NewInstruction(PyTypeObject* cls, PyObject* type, PyObject* qubits, PyObject* clbits, PyObject* gate,
-                          PyObject* channel, PyObject* label, PyObject* condition = Py_None) {
+                          PyObject* channel, PyObject* label, PyObject* conditional_gate = Py_None,
+                          PyObject* condition = Py_None) {
     static PyObject* empty_args = PyTuple_New(0);  // 进程内常驻
     PyObject* raw = PyBaseObject_Type.tp_new(cls, empty_args, nullptr);
     if (raw == nullptr) {
@@ -91,6 +93,7 @@ py::object NewInstruction(PyTypeObject* cls, PyObject* type, PyObject* qubits, P
         || PyObject_GenericSetAttr(raw, n.gate.ptr(), gate) != 0
         || PyObject_GenericSetAttr(raw, n.channel.ptr(), channel) != 0
         || PyObject_GenericSetAttr(raw, n.label.ptr(), label) != 0
+        || PyObject_GenericSetAttr(raw, n.conditional_gate.ptr(), conditional_gate) != 0
         || PyObject_GenericSetAttr(raw, n.condition.ptr(), condition) != 0) {
         throw py::error_already_set();
     }
@@ -235,7 +238,7 @@ py::object Remap(const py::list& instrs, const py::object& instr_cls, const py::
         }
         py::object ni = NewInstruction(cls, Attr(ins, n.type).ptr(), mapped.ptr(), Attr(ins, n.clbits).ptr(),
                                        Attr(ins, n.gate).ptr(), Attr(ins, n.channel).ptr(), Attr(ins, n.label).ptr(),
-                                       Attr(ins, n.condition).ptr());
+                                       Attr(ins, n.conditional_gate).ptr(), Attr(ins, n.condition).ptr());
         PyList_SET_ITEM(out.ptr(), i, ni.release().ptr());
     }
     return out;

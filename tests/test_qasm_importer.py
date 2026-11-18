@@ -407,11 +407,59 @@ class TestQASM2Statements:
     """B40 and unsupported statements."""
 
     @pytest.mark.parametrize(
-        "stmt", ["if(c==1) x q[0];", "if (c==1) measure q[0] -> c[0];"]
+        "stmt",
+        [
+            "if (c==1) measure q[0] -> c[0];",
+            "if(c==1) barrier q[0];",
+            "if(c==1) reset q[0];",
+            "if(c==1) if(c==1) x q[0];",
+        ],
     )
-    def test_if_statement_rejected_with_line(self, stmt: str) -> None:
+    def test_if_on_a_non_gate_rejected_with_line(self, stmt: str) -> None:
         with pytest.raises(QASM2ParseError, match=r"'if'.*line 5"):
             qasm2_loads(HEADER + "qreg q[1];\ncreg c[1];\n" + stmt)
+
+    def test_if_statement_becomes_a_conditional_gate(self) -> None:
+        circuit = qasm2_loads(
+            HEADER
+            + "qreg q[3];\ncreg a[1];\ncreg b[2];\n"
+            + "measure q[0] -> a[0];\nmeasure q[1] -> b[1];\n"
+            + "if(a==1) x q[1];\nif(b==2) ccx q[0],q[1],q[2];\nif(a==0) rz(0.5) q[2];\n"
+        )
+        got = [
+            (i.conditional_gate.name, i.qubits, i.clbits, i.condition)
+            for i in circuit
+            if i.is_conditional
+        ]
+        assert got == [
+            ("x", (1,), (0,), 1),
+            ("ccx", (0, 1, 2), (1, 2), 2),
+            ("rz", (2,), (0,), 0),
+        ]
+        assert all(i.gate is None for i in circuit if i.is_conditional)
+
+    def test_if_applies_to_every_gate_of_a_broadcast_and_of_a_definition(self) -> None:
+        circuit = qasm2_loads(
+            HEADER
+            + "gate pair a,b { h a; cx a,b; }\n"
+            + "qreg q[2];\ncreg c[1];\nif(c==1) h q;\nif(c==1) pair q[0],q[1];\n"
+        )
+        assert [
+            (i.conditional_gate.name, i.qubits, i.clbits, i.condition) for i in circuit
+        ] == [
+            ("h", (0,), (0,), 1),
+            ("h", (1,), (0,), 1),
+            ("h", (0,), (0,), 1),
+            ("cx", (0, 1), (0,), 1),
+        ]
+
+    def test_if_with_a_value_the_register_cannot_hold_never_runs(self) -> None:
+        circuit = qasm2_loads(
+            HEADER + "qreg q[1];\ncreg c[1];\nh q[0];\nif(c==2) x q[0];\n"
+        )
+        assert [i.gate.name for i in circuit] == ["h"]
+        with pytest.raises(QASM2ParseError, match="Unknown gate"):
+            qasm2_loads(HEADER + "qreg q[1];\ncreg c[1];\nif(c==2) nope q[0];\n")
 
     def test_opaque_gate_cannot_be_applied(self) -> None:
         with pytest.raises(QASM2ParseError, match="Opaque gate 'op'"):

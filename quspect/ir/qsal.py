@@ -316,14 +316,17 @@ def _serialize_circuit(circuit: QuantumCircuit) -> dict[str, Any]:
             "qubits": list(instr.qubits),
             "clbits": list(instr.clbits),
         }
-        if instr.gate is not None:
+        # A CONDITIONAL instruction keeps its gate in ``conditional_gate``; the
+        # document stores it under the same "gate" key.
+        gate = instr.gate if instr.gate is not None else instr.conditional_gate
+        if gate is not None:
             gate_data: dict[str, Any] = {
-                "name": instr.gate.name,
-                "num_qubits": instr.gate.num_qubits,
+                "name": gate.name,
+                "num_qubits": gate.num_qubits,
             }
-            if instr.gate.label:
-                gate_data["label"] = instr.gate.label
-            if instr.gate.params:
+            if gate.label:
+                gate_data["label"] = gate.label
+            if gate.params:
                 gate_data["params"] = [
                     {"_param": p.name}
                     if isinstance(p, Parameter)
@@ -338,7 +341,7 @@ def _serialize_circuit(circuit: QuantumCircuit) -> dict[str, Any]:
                     }
                     if isinstance(p, ParameterExpression)
                     else p
-                    for p in instr.gate.params
+                    for p in gate.params
                 ]
                 gate_data["gate_type"] = "parameterized"
             else:
@@ -430,13 +433,15 @@ def _deserialize_circuit(data: dict[str, Any]) -> QuantumCircuit:
 
         label = instr_data.get("label", "")
 
+        conditional = itype is InstructionType.CONDITIONAL
         instr = CircuitInstruction(
             type=itype,
-            gate=gate,
+            gate=None if conditional else gate,
             channel=channel,
             qubits=qubits,
             clbits=clbits,
             label=label,
+            conditional_gate=gate if conditional else None,
             condition=instr_data.get("condition"),
         )
         circ._instructions.append(instr)

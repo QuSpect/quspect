@@ -692,6 +692,15 @@ def transpile(
         True
     """
     tolerance = approximation_tolerance(approximation_degree)
+    dynamic = any(ins.is_conditional for ins in circuit)
+    if dynamic:
+        # Classically controlled gates (see _conditional): the pipeline treats
+        # them as fences on their qubits; they are first reduced to
+        # single-qubit conditional gates (no routing of a conditional
+        # interaction) and written in the target's gates at the end.
+        from quspect.transpiler._conditional import expand_conditional_gates
+
+        circuit = expand_conditional_gates(circuit)
     kwargs: dict[str, Any] = {
         "optimization_level": optimization_level,
         "seed": seed,
@@ -756,6 +765,15 @@ def transpile(
             assert floor is not None
             if _result_key(floor, depth_weight)[0] < _result_key(res, depth_weight)[0]:
                 res = _as_selected_floor(floor, res.stats)
+            res.stats.seconds = time.perf_counter() - t0
+        if dynamic:
+            from quspect.transpiler._conditional import translate_conditional_gates
+
+            res.circuit = translate_conditional_gates(res.circuit, target.native_gates)
+            res.wire_circuit = translate_conditional_gates(
+                res.wire_circuit, target.native_gates
+            )
+            res.stats.depth = _depth(res.circuit, two_qubit_only=False)
             res.stats.seconds = time.perf_counter() - t0
         return res
 

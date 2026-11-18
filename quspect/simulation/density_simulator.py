@@ -152,10 +152,10 @@ class DensityMatrixSimulator(Backend):
                 # 的大端约定相反,多比特门需反转 qubit 顺序才与 statevector 后端一致。
                 for rho in branches.values():
                     rho.apply_gate(mat, tuple(instr.qubits)[::-1])
-            elif instr.is_conditional and instr.gate is not None:
+            elif instr.is_conditional and instr.conditional_gate is not None:
                 # Classical feed-forward: the gate acts on the branches whose
                 # record holds the condition value (unwritten bits read 0).
-                mat = gate_matrix(instr.gate)
+                mat = gate_matrix(instr.conditional_gate)
                 for record, rho in branches.items():
                     if _record_value(record, instr.clbits) == instr.condition:
                         rho.apply_gate(mat, tuple(instr.qubits)[::-1])

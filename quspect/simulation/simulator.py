@@ -314,28 +314,25 @@ class Simulator(Backend):
         from quspect.circuit.parameter import Parameter, ParameterExpression
 
         for instr in circuit.instructions:
-            if (
-                (instr.is_gate or instr.is_conditional)
-                and instr.gate is not None
-                and instr.gate.params
-                and any(
-                    isinstance(p, Parameter)
-                    or (isinstance(p, ParameterExpression) and not p.is_constant)
-                    for p in instr.gate.params
-                )
+            gate = instr.conditional_gate if instr.is_conditional else instr.gate
+            if not (instr.is_gate or instr.is_conditional) or gate is None:
+                continue
+            if gate.params and any(
+                isinstance(p, Parameter)
+                or (isinstance(p, ParameterExpression) and not p.is_constant)
+                for p in gate.params
             ):
                 raise ValueError(
-                    f"Gate '{instr.gate.name}' has unbound symbolic "
+                    f"Gate '{gate.name}' has unbound symbolic "
                     f"parameters. Bind all parameters before simulation "
                     f"using circuit.bind_parameters()."
                 )
-            if (instr.is_gate or instr.is_conditional) and instr.gate is not None:
-                for p in instr.gate.params:
-                    if type(p) is float and not isfinite(p):
-                        raise ValueError(
-                            f"Gate '{instr.gate.name}' has a non-finite "
-                            f"parameter ({p!r}); gate angles must be finite."
-                        )
+            for p in gate.params:
+                if type(p) is float and not isfinite(p):
+                    raise ValueError(
+                        f"Gate '{gate.name}' has a non-finite "
+                        f"parameter ({p!r}); gate angles must be finite."
+                    )
 
 
 def _has_mid_circuit_measurement(circuit: QuantumCircuit) -> bool:

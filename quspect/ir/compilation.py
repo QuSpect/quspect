@@ -681,15 +681,17 @@ def _lower_registered_gates(circuit: QuantumCircuit) -> QuantumCircuit:
         return circuit
     instructions = circuit.instructions
     if not any(
-        instr.gate is not None
-        and (instr.is_gate or instr.is_conditional)
-        and instr.gate.name in _REGISTRY
+        (instr.gate is not None and instr.is_gate and instr.gate.name in _REGISTRY)
+        or (
+            instr.conditional_gate is not None
+            and instr.conditional_gate.name in _REGISTRY
+        )
         for instr in instructions
     ):
         return circuit
     out: list[CircuitInstruction] = []
     for instr in instructions:
-        gate = instr.gate
+        gate = instr.conditional_gate if instr.is_conditional else instr.gate
         definition = (
             _REGISTRY.get(gate.name)
             if gate is not None and (instr.is_gate or instr.is_conditional)
@@ -733,16 +735,15 @@ def lower_conditional_gates(
 
     instructions = circuit.instructions
     if not any(
-        instr.is_conditional
-        and instr.gate is not None
-        and instr.gate.name not in supported_gates
+        instr.conditional_gate is not None
+        and instr.conditional_gate.name not in supported_gates
         for instr in instructions
     ):
         return circuit
     out: list[CircuitInstruction] = []
     for instr in instructions:
-        gate = instr.gate
-        if not instr.is_conditional or gate is None or gate.name in supported_gates:
+        gate = instr.conditional_gate
+        if gate is None or gate.name in supported_gates:
             out.append(instr)
             continue
         single = QuantumCircuit()
@@ -781,7 +782,7 @@ def conditional_instructions(
     return [
         CircuitInstruction(
             type=InstructionType.CONDITIONAL,
-            gate=gate,
+            conditional_gate=gate,
             qubits=tuple(qubits),
             clbits=like.clbits,
             label=like.label,

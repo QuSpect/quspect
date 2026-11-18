@@ -69,12 +69,13 @@ class CircuitInstruction:
 
     Note:
         A classically controlled gate uses ``type=InstructionType.CONDITIONAL``:
-        ``gate`` and ``qubits`` say what is applied, ``clbits`` are the
-        classical bits that are *read* and ``condition`` is the value they
-        must hold (``clbits[0]`` is the least significant bit).  It is a type
-        of its own rather than a GATE with an extra field, so that code that
-        only knows unitary gates (``is_gate``) never merges, cancels or
-        reorders it by accident: to such code it is a non-gate instruction.
+        ``conditional_gate`` and ``qubits`` say what is applied, ``clbits``
+        are the classical bits that are *read* and ``condition`` is the value
+        they must hold (``clbits[0]`` is the least significant bit).  It is a
+        type of its own and its ``gate`` field is None, so that code that
+        only knows unitary gates (``is_gate``, ``gate is not None``) never
+        merges, cancels or reorders it by accident: to such code it is a
+        non-gate instruction, like a measurement.
 
     Gate and channel instructions must act on distinct qubits: an
     instruction such as ``cx(0, 0)`` is rejected with ``ValueError`` at
@@ -90,13 +91,14 @@ class CircuitInstruction:
     Attributes:
         type: The type of instruction (GATE, MEASURE, BARRIER, CHANNEL, or
             CONDITIONAL).
-        gate: The quantum gate to apply (for GATE and CONDITIONAL types; None
-            otherwise).
+        gate: The quantum gate to apply (for GATE type; None otherwise).
         channel: The noise channel to apply (for CHANNEL type; None otherwise).
         qubits: Tuple of qubit indices this instruction involves.
         clbits: Tuple of classical bit indices: the bits written by a MEASURE,
             the bits read by a CONDITIONAL.
         label: Optional human-readable label.
+        conditional_gate: For CONDITIONAL, the gate that is applied when the
+            condition holds; None for every other type.
         condition: For CONDITIONAL, the value ``sum(bit(clbits[i]) << i)`` at
             which the gate is applied; None for every other type.
 
@@ -113,8 +115,8 @@ class CircuitInstruction:
         ... )
         >>> from quspect.gates.standard import X
         >>> instr4 = CircuitInstruction(  # X on qubit 2 if clbit 0 is 1
-        ...     type=InstructionType.CONDITIONAL, gate=X, qubits=(2,),
-        ...     clbits=(0,), condition=1,
+        ...     type=InstructionType.CONDITIONAL, conditional_gate=X,
+        ...     qubits=(2,), clbits=(0,), condition=1,
         ... )
     """
 
@@ -124,6 +126,7 @@ class CircuitInstruction:
     gate: Gate | None = None
     channel: NoiseChannel | None = field(default=None, compare=False, hash=False)
     label: str = ""
+    conditional_gate: Gate | None = None
     condition: int | None = None
 
     def __post_init__(self) -> None:
@@ -145,10 +148,14 @@ class CircuitInstruction:
                 break
 
         kind = self.type
-        if self.condition is not None and kind is not _CONDITIONAL:
+        if kind is not _CONDITIONAL and (
+            self.condition is not None or self.conditional_gate is not None
+        ):
             raise ValueError(
-                f"Only CONDITIONAL instructions take a condition, got "
-                f"condition={self.condition!r} on a {kind.name} instruction."
+                f"Only CONDITIONAL instructions take a condition and a "
+                f"conditional gate, got condition={self.condition!r}, "
+                f"conditional_gate={self.conditional_gate!r} on a {kind.name} "
+                f"instruction."
             )
         if kind is _GATE:
             gate = self.gate
@@ -189,9 +196,16 @@ class CircuitInstruction:
                 raise ValueError("CHANNEL instruction should not have a gate.")
             _validate_distinct_qubits(qubits, f"Channel {self.channel.name}")
         elif kind is _CONDITIONAL:
-            gate = self.gate
+            if self.gate is not None:
+                raise ValueError(
+                    "CONDITIONAL instruction keeps its gate in conditional_gate; "
+                    "gate must be None."
+                )
+            gate = self.conditional_gate
             if gate is None:
-                raise ValueError("CONDITIONAL instruction must have a non-None gate.")
+                raise ValueError(
+                    "CONDITIONAL instruction must have a non-None conditional_gate."
+                )
             if len(qubits) != gate.num_qubits:
                 raise ValueError(
                     f"Gate {gate.name} requires {gate.num_qubits} "

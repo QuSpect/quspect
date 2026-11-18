@@ -62,6 +62,7 @@ struct IrNames {
     py::str gate = InternedStr("gate");
     py::str channel = InternedStr("channel");
     py::str label = InternedStr("label");
+    py::str conditional_gate = InternedStr("conditional_gate");
     py::str condition = InternedStr("condition");
     py::str name = InternedStr("name");
     py::str num_qubits = InternedStr("num_qubits");
@@ -243,6 +244,7 @@ public:
         SetField(obj.ptr(), n.gate, gate.ptr());
         SetField(obj.ptr(), n.channel, Py_None);
         SetField(obj.ptr(), n.label, reg.empty_str.ptr());
+        SetField(obj.ptr(), n.conditional_gate, Py_None);
         SetField(obj.ptr(), n.condition, Py_None);
         return obj;
     }

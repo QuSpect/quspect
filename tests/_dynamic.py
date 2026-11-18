@@ -43,8 +43,8 @@ def branches(
                 r: [_apply(s, matrix, ins.qubits) for s in ss] for r, ss in states.items()
             }
         elif ins.is_conditional:
-            assert ins.gate is not None and ins.condition is not None
-            matrix = gate_matrix(ins.gate)
+            assert ins.conditional_gate is not None and ins.condition is not None
+            matrix = gate_matrix(ins.conditional_gate)
             for record in states:
                 value = sum(record[c] << i for i, c in enumerate(ins.clbits))
                 if value == ins.condition:
@@ -106,4 +106,40 @@ def assert_same_behaviour(
     assert set(da) == set(db), (sorted(da), sorted(db))
     for record, rho in da.items():
         error = float(np.max(np.abs(rho - db[record])))
+        assert error < atol, (record, error)
+
+
+def assert_compiled_behaviour(
+    logical: QuantumCircuit,
+    physical: QuantumCircuit,
+    final_layout: list[int],
+    num_physical: int,
+    *,
+    atol: float = 1e-7,
+) -> None:
+    """``physical`` (all physical qubits start in |0>) behaves as ``logical``.
+
+    Same records with the same probabilities, and per record the same state
+    with logical qubit ``q`` on physical qubit ``final_layout[q]`` and every
+    other physical qubit in |0>.
+    """
+    n = len(final_layout)
+    m = max(logical.num_clbits, physical.num_clbits)
+    want = branches(logical, n, m)
+    got = densities(physical, num_physical, m)
+    assert set(want) == set(got), (sorted(want), sorted(got))
+    free = [p for p in range(num_physical) if p not in final_layout]
+    zeros = np.zeros(2 ** len(free), dtype=complex)
+    zeros[0] = 1.0
+    order = [
+        final_layout.index(p) if p in final_layout else n + free.index(p)
+        for p in range(num_physical)
+    ]
+    for record, ensemble in want.items():
+        rho = np.zeros((2**num_physical, 2**num_physical), dtype=complex)
+        for state in ensemble:
+            tensor = np.kron(state.reshape(-1), zeros).reshape([2] * num_physical)
+            vec = np.transpose(tensor, order).reshape(-1)
+            rho += np.outer(vec, vec.conj())
+        error = float(np.max(np.abs(rho - got[record])))
         assert error < atol, (record, error)

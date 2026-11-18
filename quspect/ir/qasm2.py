@@ -590,11 +590,11 @@ class QASM2Exporter:
         """
         from quspect.circuit.instruction import CircuitInstruction, InstructionType
 
-        assert instr.gate is not None and instr.condition is not None
+        assert instr.conditional_gate is not None and instr.condition is not None
         start = instr.clbits[0]
         name = next(n for n, s, size in self._cregs if s == start)
         plain = CircuitInstruction(
-            type=InstructionType.GATE, gate=instr.gate, qubits=instr.qubits
+            type=InstructionType.GATE, gate=instr.conditional_gate, qubits=instr.qubits
         )
         saved, self._declared_gates = self._declared_gates, {}
         try:
