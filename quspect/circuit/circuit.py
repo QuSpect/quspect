@@ -11,6 +11,7 @@ import dataclasses
 import json
 import math
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from numbers import Real
 from typing import TYPE_CHECKING, Any
 
@@ -88,6 +89,9 @@ class QuantumCircuit:
         3
     """
 
+    #: Condition ``(clbits, value)`` of the active :meth:`if_test` block.
+    _condition: tuple[tuple[int, ...], int] | None = None
+
     def __init__(self, *, name: str = "") -> None:
         """Initialize an empty quantum circuit.
 
@@ -123,8 +127,9 @@ class QuantumCircuit:
     def num_clbits(self) -> int:
         """Return the number of classical bits inferred from the circuit.
 
-        Computed as ``max(clbit_index) + 1`` across all measurement
-        instructions. Returns 0 if there are no measurements.
+        Computed as ``max(clbit_index) + 1`` across all instructions that
+        write (measurements) or read (classically controlled gates) classical
+        bits. Returns 0 if there are none.
         """
         counts = _bit_counts(self._instructions)
         if counts is not None:
@@ -205,6 +210,8 @@ class QuantumCircuit:
         gate: Gate,
         qubits: Sequence[int],
         clbits: Sequence[int] = (),
+        *,
+        condition: tuple[int | Sequence[int], int] | None = None,
     ) -> QuantumCircuit:
         """Append a generic gate instruction.
 
@@ -212,15 +219,53 @@ class QuantumCircuit:
             gate: The quantum gate to apply.
             qubits: Qubit indices.
             clbits: Classical bit indices (for measurements).
+            condition: ``(clbits, value)`` to make the gate classically
+                controlled: it is applied only when the classical bits
+                ``clbits`` (an index or a sequence of indices, the first being
+                the least significant bit) hold ``value``.  Inside a
+                :meth:`if_test` block the block's condition is used.
 
         Returns:
             Self, for method chaining.
 
         Raises:
-            ValueError: If the number of qubits doesn't match the gate.
+            ValueError: If the number of qubits doesn't match the gate, or a
+                condition is combined with ``clbits`` or given inside an
+                :meth:`if_test` block.
+
+        Example:
+            >>> from quspect.gates.standard import X
+            >>> circ = QuantumCircuit().h(0).measure([0], [0])
+            >>> circ = circ.append(X, [1], condition=(0, 1))
+            >>> circ[2].is_conditional, circ[2].clbits, circ[2].condition
+            (True, (0,), 1)
         """
         qubits_tuple = tuple(qubits)
         clbits_tuple = tuple(clbits)
+        active = self._condition
+        if condition is not None or active is not None:
+            if condition is not None and active is not None:
+                raise ValueError(
+                    "append(condition=...) cannot be used inside an if_test() "
+                    "block: conditions do not nest."
+                )
+            if clbits_tuple:
+                raise ValueError(
+                    "A classically controlled gate reads its classical bits "
+                    "through the condition; do not pass clbits as well."
+                )
+            if condition is not None:
+                active = _normalize_condition(*condition)
+            self._instructions.append(
+                CircuitInstruction(
+                    type=InstructionType.CONDITIONAL,
+                    gate=gate,
+                    qubits=qubits_tuple,
+                    clbits=active[0],
+                    condition=active[1],
+                )
+            )
+            return self
         instr = CircuitInstruction(
             type=InstructionType.GATE,
             gate=gate,
@@ -229,6 +274,60 @@ class QuantumCircuit:
         )
         self._instructions.append(instr)
         return self
+
+    @contextmanager
+    def if_test(
+        self, clbits: int | Sequence[int], value: int = 1
+    ) -> Iterator[QuantumCircuit]:
+        """Make the gates added inside the ``with`` block classically controlled.
+
+        Every gate appended in the block becomes a
+        :attr:`~quspect.circuit.instruction.InstructionType.CONDITIONAL`
+        instruction: it is applied only on the shots where the classical bits
+        ``clbits`` hold ``value`` when the gate is reached.  Classical bits
+        are written by earlier measurements; a bit that was never written
+        reads 0.
+
+        Only gates can be conditioned.  Measurements, barriers, noise channels
+        and :meth:`compose` are rejected inside the block, and blocks do not
+        nest.
+
+        Args:
+            clbits: Classical bit index, or a sequence of indices read as one
+                integer with the first index as the least significant bit.
+            value: Value the bits must hold (default 1).
+
+        Yields:
+            The circuit itself.
+
+        Raises:
+            ValueError: If ``value`` does not fit in the bits, a bit is listed
+                twice, or a block is already open.
+
+        Example:
+            Teleport-style correction — apply X to qubit 1 if the measurement
+            of qubit 0 gave 1:
+
+            >>> circ = QuantumCircuit().h(0).cx(0, 1).measure([0], [0])
+            >>> with circ.if_test(0, 1):
+            ...     _ = circ.x(1)
+            >>> circ[-1].is_conditional
+            True
+        """
+        if self._condition is not None:
+            raise ValueError("if_test() blocks do not nest.")
+        self._condition = _normalize_condition(clbits, value)
+        try:
+            yield self
+        finally:
+            self._condition = None
+
+    def _refuse_in_condition(self, what: str) -> None:
+        if self._condition is not None:
+            raise ValueError(
+                f"{what} cannot be classically controlled: only gates can be "
+                f"added inside an if_test() block."
+            )
 
     # ------------------------------------------------------------------
     # Single-qubit standard gates (fluent API)
@@ -641,6 +740,7 @@ class QuantumCircuit:
             ValueError: If ``len(qubits) != len(clbits)``, or a classical
                 bit is listed more than once.
         """
+        self._refuse_in_condition("A measurement")
         qubits_tuple = tuple(qubits)
         clbits_tuple = tuple(clbits)
         instr = CircuitInstruction(
@@ -680,6 +780,7 @@ class QuantumCircuit:
         Returns:
             Self, for method chaining.
         """
+        self._refuse_in_condition("A barrier")
         qubits_tuple = qubits if qubits else tuple(sorted(self.active_qubits))
         instr = CircuitInstruction(
             type=InstructionType.BARRIER,
@@ -705,6 +806,7 @@ class QuantumCircuit:
             Self, for method chaining.
         """
 
+        self._refuse_in_condition("A noise channel")
         qubits_tuple = tuple(qubits)
         instr = CircuitInstruction(
             type=InstructionType.CHANNEL,
@@ -933,6 +1035,7 @@ class QuantumCircuit:
                         qubits=instr.qubits,
                         clbits=instr.clbits,
                         label=instr.label,
+                        condition=instr.condition,
                     )
                     new_circuit._instructions.append(new_instr)
                 else:
@@ -975,6 +1078,7 @@ class QuantumCircuit:
         Raises:
             ValueError: If ``len(qubits) != other.num_qubits``.
         """
+        self._refuse_in_condition("compose()")
         qubits_list = list(qubits)
         if len(qubits_list) != other.num_qubits:
             raise ValueError(
@@ -1019,6 +1123,7 @@ class QuantumCircuit:
                     qubits=new_qubits,
                     clbits=new_clbits,
                     label=instr.label,
+                    condition=instr.condition,
                 )
             )
 
@@ -1106,8 +1211,8 @@ class QuantumCircuit:
             A new QuantumCircuit representing U†.
 
         Raises:
-            ValueError: If the circuit contains a measurement or a noise
-                channel.
+            ValueError: If the circuit contains a measurement, a classically
+                controlled gate or a noise channel.
 
         Example:
             >>> circ = QuantumCircuit().z(0).ry(math.pi / 2, 0)
@@ -1124,6 +1229,13 @@ class QuantumCircuit:
                     f"measures qubit(s) {list(instr.qubits)}: a measured circuit "
                     "has no inverse. Take the dagger of the circuit before its "
                     "measurements are added."
+                )
+            if instr.is_conditional:
+                raise ValueError(
+                    f"dagger() needs a unitary circuit, but instruction {index} "
+                    f"is a classically controlled gate on qubit(s) "
+                    f"{list(instr.qubits)}: a circuit with classical feed-forward "
+                    "has no inverse."
                 )
             if instr.is_channel:
                 name = instr.channel.name if instr.channel is not None else "?"
@@ -1257,6 +1369,8 @@ class QuantumCircuit:
                 instr_data["channel"] = ch_data
             if instr.label:
                 instr_data["label"] = instr.label
+            if instr.condition is not None:
+                instr_data["condition"] = instr.condition
             data["instructions"].append(instr_data)
         return json.dumps(data, indent=2)
 
@@ -1333,6 +1447,7 @@ class QuantumCircuit:
                     qubits=qubits,
                     clbits=clbits,
                     label=label,
+                    condition=instr_data.get("condition"),
                 )
             )
 
@@ -1581,3 +1696,12 @@ def _adjoint_gate(gate: Gate) -> Gate:
         return Gate(name=name, num_qubits=gate.num_qubits, params=neg_params)
 
     return gate
+
+
+def _normalize_condition(
+    clbits: int | Sequence[int], value: int
+) -> tuple[tuple[int, ...], int]:
+    """``(clbits tuple, value)`` of a condition; validation is the instruction's."""
+    if isinstance(clbits, Sequence):
+        return tuple(clbits), value
+    return (clbits,), value

@@ -36,6 +36,7 @@ struct RunNames {
     py::str gate = InternedStr("gate");
     py::str label = InternedStr("label");
     py::str channel = InternedStr("channel");
+    py::str condition = InternedStr("condition");
     py::str name = InternedStr("name");
     py::str params = InternedStr("params");
     py::str num_qubits = InternedStr("num_qubits");
@@ -307,6 +308,7 @@ class InstructionFactory {
         set(n.gate, gate);
         set(n.channel, Py_None);
         set(n.label, label);
+        set(n.condition, Py_None);
         return obj;
     }
 
