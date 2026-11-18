@@ -653,7 +653,8 @@ Public exports:
   `(routed_circuit, initial_mapping, final_mapping)`;
   `.route_candidates(...)` returns `RoutingCandidate` objects
 - Passes with `.run(circuit)`: `HighLevelOptimizePass`,
-  `ConsolidateBlocksPass`, `ThreeQubitBlockPass`, `PhaseFoldingPass`, and
+  `ConsolidateBlocksPass`, `ThreeQubitBlockPass`, `PhaseFoldingPass`,
+  `TCountOptimizePass` (opt-in T-count reduction of Clifford+T circuits), and
   their stats classes
 - `check_compilation_consistency(circuit, compiler=None, atol=1e-8)` (needs
   Qiskit) and `generate_random_circuit(num_qubits, depth, seed=None)`

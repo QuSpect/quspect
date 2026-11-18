@@ -56,6 +56,7 @@
 #include "replay_bindings.hpp"
 #include "schedule_bindings.hpp"
 #include "synthesis_bindings.hpp"
+#include "tcount_bindings.hpp"
 
 namespace py = pybind11;
 using namespace quspect::native;
@@ -293,6 +294,7 @@ PYBIND11_MODULE(QSPECT_MODULE_NAME, m) {
     quspect::native::pybind::BindCircuitHelpers(m);
     quspect::native::pybind::BindPhaseFold(m);
     quspect::native::pybind::BindReplay(m);
+    quspect::native::pybind::BindTCount(m);
 
     // ---- CPU 特性探测（供 Python 加载器决定是否导入 AVX2 模块）----
     m.def("cpu_supports_avx2", &kernels::CpuSupportsAVX2,

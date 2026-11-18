@@ -5,6 +5,7 @@ from quspect.transpiler._highlevel import HighLevelOptimizePass, HighLevelStats
 from quspect.transpiler._mapping import SABRE, RoutingCandidate
 from quspect.transpiler._phase_fold import PhaseFoldingPass, PhaseFoldingStats
 from quspect.transpiler._target import CompilationTarget
+from quspect.transpiler._tcount import TCountOptimizePass, TCountStats
 from quspect.transpiler._three_qubit import ThreeQubitBlockPass, ThreeQubitBlockStats
 from quspect.transpiler._transpile import (
     TranspileResult,
@@ -27,6 +28,8 @@ __all__ = [
     "PhaseFoldingPass",
     "PhaseFoldingStats",
     "SABRE",
+    "TCountOptimizePass",
+    "TCountStats",
     "ThreeQubitBlockPass",
     "ThreeQubitBlockStats",
     "RoutingCandidate",
