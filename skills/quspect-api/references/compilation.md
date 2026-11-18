@@ -169,7 +169,8 @@ Exported from `quspect.transpiler` for building custom pipelines:
   `.run(circuit)`; the stats classes (`HighLevelStats`, `ConsolidationStats`,
   `ThreeQubitBlockStats`, `PhaseFoldingStats`) describe what a pass did.
 - `TCountOptimizePass(plateau=None, rm_iterations=0, rm_runs=4,
-  tensor_walks=0, tensor_steps=200_000, lookahead=6, seed=0, native=True)`:
+  tensor_walks=0, tensor_steps=200_000, lookahead=6, seed=0, ancillas=False,
+  max_ancillas=None, native=True)`:
   lowers the number of `t` / `tdg` gates in the Clifford+T regions of a
   circuit (`h s sdg t tdg x y z cx cz swap ccx` and `rz`/`p`/`u1` at multiples
   of π/4); `.run(circuit)` returns an equivalent circuit (up to global phase)
@@ -178,7 +179,14 @@ Exported from `quspect.transpiler` for building custom pipelines:
   circuit before layout and routing, because it ignores connectivity and
   usually adds `cx` gates. `rm_iterations` / `tensor_walks` enable slower
   searches that pay off on large phase polynomials such as finite-field
-  multipliers.
+  multipliers. `ancillas=True` allows Hadamard gadgets for a lower T-count:
+  the output then also has ancilla qubits (indices from `circuit.num_qubits`
+  on, must start in |0>, are returned to |0>), mid-circuit measurements
+  (classical bits from `circuit.num_clbits` on) and classically controlled
+  `x`/`z`/`s`/`sdg` gates; `.stats` adds `ancillas`, `measurements`,
+  `conditional_gates`. It implements the same unitary on the circuit's
+  qubits for every measurement record, so simulate it with `Simulator.run`
+  (not `.statevector`).
 
 `quspect.transpiler._passes` holds the internal building blocks
 (`DecomposePass(target)`, `LayoutRoutingPass(target, ...)`, `OptimizePass()`,

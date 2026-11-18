@@ -261,7 +261,12 @@ Transpiler: T-count Optimization
 
 .. automodule:: quspect.transpiler._tcount
    :members: TCountOptimizePass, TCountStats
-   :exclude-members: t_count_in, t_count_out, regions, regions_improved
+   :exclude-members: t_count_in, t_count_out, regions, regions_improved,
+      ancillas, measurements, conditional_gates
+
+.. automodule:: quspect.transpiler._tcount_ancilla
+   :members: min_h_emit, build_gadget_program, GadgetProgram
+   :exclude-members: num_wires, ops, t_count, measured
 
 Transpiler: Three-Qubit Block Resynthesis
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

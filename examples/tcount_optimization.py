@@ -96,5 +96,33 @@ def main() -> None:
             )
 
 
+def with_ancillas() -> None:
+    """辅助比特版本：Hadamard gadget（干净辅助比特 + 测量 + 经典控制门）。
+
+    线路里夹在 T 门之间的 Hadamard 会把相位多项式切断。``ancillas=True`` 把每个这样的
+    Hadamard 换成一个辅助比特、一次测量和按测量结果施加的 Clifford 修正，于是整个
+    区域的 T 门合成一个相位多项式一起约简。输出对每一种测量结果都实现同一个幺正
+    变换，辅助比特最后回到 |0>。
+    """
+    circuit = QuantumCircuit()
+    for a, b, c in [(0, 1, 3), (2, 3, 4), (0, 1, 3)]:  # 带一个工作比特的三控制 Toffoli
+        circuit.ccx(a, b, c)
+    plain = TCountOptimizePass()
+    plain.run(circuit)
+    optimizer = TCountOptimizePass(ancillas=True)
+    optimized = optimizer.run(circuit)
+    stats = optimizer.stats
+    print()
+    print(
+        f"Toffoli 梯子: T {stats.t_count_in} -> 无辅助比特 {plain.stats.t_count_out}，"
+    )
+    print(
+        f"  有辅助比特 {stats.t_count_out}（辅助比特 {stats.ancillas}，"
+        f"测量 {stats.measurements}，经典控制门 {stats.conditional_gates}，"
+        f"共 {optimized.num_qubits} 个量子比特）"
+    )
+
+
 if __name__ == "__main__":
     main()
+    with_ancillas()
