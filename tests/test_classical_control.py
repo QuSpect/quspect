@@ -819,42 +819,44 @@ def test_text_drawing_shows_the_condition_bits() -> None:
         qc.rz(0.5, 0)
     with qc.if_test(1):
         qc.x(2)
-    art = qc.draw().splitlines()
-    assert (
-        art
-        == [
-            "q0: --[H]----[M]---[RZ(0.5)]--------",
-            "q1: --------[M]--------|------------",
-            "q2: ---------|---------|------[X]---",
-            "c0: =========0========(1)======|====",
-            "c1: =========1========(0)=====(1)===",
-        ]
-        or len({len(line) for line in art}) == 1
-    )
-    assert "(1)" in art[3] and "(0)" in art[4] and "(1)" in art[4]
-    assert "[RZ(0.5)]" in art[0] and "[X]" in art[2]
-    column = art[0].index("[RZ(0.5)]") + len("[RZ(0.5)]") // 2
-    assert art[1][column] == "|" and art[2][column] == "|"
+    # A classically controlled gate carries its condition at the left of its
+    # top edge, one "bit=value" per bit read, and stays to the right of the
+    # measurements that write those bits.
+    assert qc.draw(fold=False).splitlines() == [
+        "     ╭───╮  ╭──────╮  ╭─ c0=1 c1=0 ─╮",
+        "q0 ──┤ H ├──┤ M→c0 ├──┤   RZ(0.5)   ├──",
+        "     ╰───╯  ╰──────╯  ╰─────────────╯",
+        "            ╭──────╮",
+        "q1 ─────────┤ M→c1 ├───────────────────",
+        "            ╰──────╯",
+        "                        ╭─ c1=1 ──╮",
+        "q2 ─────────────────────┤    X    ├────",
+        "                        ╰─────────╯",
+    ]
 
 
-def test_svg_drawing_reserves_the_classical_lanes_and_marks_the_bits() -> None:
-    from quspect.visualization.svg_drawer import (
-        _build_instruction_layers,
-        _instruction_lane_span,
-    )
+def test_svg_drawing_writes_the_condition_on_the_gate() -> None:
+    import xml.etree.ElementTree as ET
 
     qc = QuantumCircuit().h(0).measure([0, 1], [0, 1])
     with qc.if_test([0, 1], 1):
         qc.rz(0.5, 0)
+    with qc.if_test(1, 0):
+        qc.cx(1, 2)
     qc.h(2)
     svg = str(qc.svg())
+    texts = {
+        element.text: float(element.attrib["x"])
+        for element in ET.fromstring(svg).iter()
+        if element.tag.endswith("text")
+    }
+    # the condition is written on the gate, with the full statement as tooltip
+    assert "c0=1 c1=0" in texts and "c1=0" in texts
     assert "<title>rz if (c0, c1) == (1, 0)</title>" in svg
-    assert svg.count('r="5.5"') == 2
-    conditional = qc[2]
-    assert _instruction_lane_span(conditional, 3) == (0, 1, 2, 3, 4)
-    layers = _build_instruction_layers(qc.instructions, 3, 5)
-    # h(2) lies inside the connector's lanes: it cannot share the column
-    column_of = {id(i): k for k, layer in enumerate(layers) for i in layer}
-    assert column_of[id(qc[3])] != column_of[id(conditional)]
+    assert "<title>cx if (c1) == (0)</title>" in svg
+    # no classical wires: only the qubits are labelled
+    assert not any(text and text.startswith("c0:") for text in texts)
+    # a conditional gate is drawn right of the measurement that writes its bits
+    assert texts["RZ(0.5)"] > texts["M→c0"] == texts["M→c1"]
     QuantumCircuit().x(0).svg()  # unchanged for plain circuits
     assert math.isfinite(len(svg))

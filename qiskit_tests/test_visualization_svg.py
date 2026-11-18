@@ -2,7 +2,8 @@
 
 qiskit has no comparable SVG output, so the SVG is parsed with
 ``xml.etree`` and checked structurally: well-formed XML, element counts per
-instruction kind, column packing, style colours and size options.
+instruction kind, style colours and size options.  What each kind of
+instruction looks like is pinned in ``tests/visualization/test_svg_drawer.py``.
 """
 
 from __future__ import annotations
@@ -19,11 +20,18 @@ from qiskit_tests.helpers import random_circuit_pair
 from quspect.circuit.instruction import CircuitInstruction, InstructionType
 from quspect.gates.gate import Gate
 from quspect.visualization import CircuitSVG, SvgStyle, draw_svg_circuit
-from quspect.visualization.svg_drawer import _SVG_THEME_DATA
+from quspect.visualization.svg_drawer import (
+    _FAMILY_STYLE_KEYS,
+    _FAMILY_TINT,
+    _SVG_THEME_DATA,
+    _mix,
+)
 
 NS = "{http://www.w3.org/2000/svg}"
-CONTROLLED = {"cx", "cz", "crx", "cry", "crz", "cp", "cu3", "ccx"}
+XOR_TARGET = {"cx", "ccx"}
+CONTROLLED_CARD = {"crx", "cry", "crz", "cp", "cu3"}
 
+# One colour per role, so that every element can be told apart by its colour.
 CUSTOM_STYLE = {
     "background": "#000001",
     "wire": "#000002",
@@ -51,25 +59,45 @@ def _all(root: ET.Element, tag: str) -> list[ET.Element]:
     return list(root.iter(f"{NS}{tag}"))
 
 
+def _rects_filled(root: ET.Element, colour: str) -> list[ET.Element]:
+    """Cards of the group filled with ``colour``."""
+    return [
+        rect
+        for group in _all(root, "g")
+        if group.get("fill") == colour and group.get("stroke") is not None
+        for rect in group.findall(f"{NS}rect")
+    ]
+
+
+def _path_data(root: ET.Element, **attributes: str | None) -> str:
+    """``d`` of the path with the given attributes ("" when there is none)."""
+    for path in _all(root, "path"):
+        if all(
+            path.get(key.replace("_", "-")) == value
+            for key, value in attributes.items()
+        ):
+            return path.get("d", "")
+    return ""
+
+
 def _expected_counts(circ: quspect.QuantumCircuit) -> dict[str, int]:
-    """Expected number of gate boxes, controls, targets, measures, barriers."""
-    counts = {"gate_box": 0, "control": 0, "plus": 0, "measure": 0, "barrier": 0}
-    counts["swap_lines"] = 0
+    """Expected number of gate cards, dots, targets, swap marks, measures, barriers."""
+    counts = dict.fromkeys(("card", "dot", "target", "swap", "measure", "barrier"), 0)
     for instr in circ.instructions:
         if instr.is_gate and instr.gate is not None:
             name = instr.gate.name
-            if len(instr.qubits) == 1:
-                counts["gate_box"] += 1
-            elif name == "swap":
-                counts["swap_lines"] += 4
-            elif name in CONTROLLED:
-                counts["control"] += len(instr.qubits) - 1
-                if name in {"cx", "ccx"}:
-                    counts["plus"] += 1
-                else:
-                    counts["gate_box"] += 1
+            if name == "swap":
+                counts["swap"] += 2
+            elif name == "cz":
+                counts["dot"] += 2
+            elif name in XOR_TARGET:
+                counts["dot"] += len(instr.qubits) - 1
+                counts["target"] += 1
+            elif name in CONTROLLED_CARD:
+                counts["dot"] += 1
+                counts["card"] += 1
             else:
-                counts["gate_box"] += len(instr.qubits)
+                counts["card"] += 1  # one card, however many qubits
         elif instr.is_measure:
             counts["measure"] += len(instr.qubits)
         elif instr.is_barrier:
@@ -77,32 +105,27 @@ def _expected_counts(circ: quspect.QuantumCircuit) -> dict[str, int]:
     return counts
 
 
-def _observed_counts(root: ET.Element, style: dict[str, str]) -> dict[str, int]:
-    """Count the same features in a parsed SVG."""
-    rects = _all(root, "rect")
-    circles = _all(root, "circle")
-    lines = _all(root, "line")
+def _observed_counts(root: ET.Element) -> dict[str, int]:
+    """Count the same features in a parsed SVG drawn with ``CUSTOM_STYLE``."""
+    control = CUSTOM_STYLE["control"]
+    marks = [
+        path.get("d", "")
+        for path in _all(root, "path")
+        if path.get("stroke") == control and "l" in path.get("d", "")
+    ]
+    dots = [
+        path.get("d", "")
+        for path in _all(root, "path")
+        if path.get("stroke") == control and path.get("d", "").endswith("h0")
+    ]
     return {
-        "gate_box": sum(r.get("fill") == style["gate_fill"] for r in rects),
-        "control": sum(c.get("r") == "5.5" for c in circles),
-        "plus": sum(c.get("r") == "15.0" for c in circles),
-        "measure": sum(
-            r.get("fill") == style["measure_fill"] and r.get("width") == "40.0"
-            for r in rects
-        ),
-        "barrier": sum(r.get("fill-opacity") == "0.38" for r in rects),
-        "swap_lines": sum(
-            ln.get("stroke-width") == "2.4"
-            and ln.get("x1") != ln.get("x2")
-            and ln.get("y1") != ln.get("y2")
-            for ln in lines
-        ),
+        "card": len(_rects_filled(root, CUSTOM_STYLE["gate_fill"])),
+        "dot": sum(d.count("h0") for d in dots),
+        "target": len(_all(root, "circle")),
+        "swap": sum(d.count("l") for d in marks) // 2,
+        "measure": len(_rects_filled(root, CUSTOM_STYLE["measure_fill"])),
+        "barrier": _path_data(root, stroke=CUSTOM_STYLE["barrier"]).count("M"),
     }
-
-
-def _text_x(root: ET.Element, content: str) -> list[float]:
-    """x coordinates of ``<text>`` elements whose text equals ``content``."""
-    return [float(t.get("x", "nan")) for t in _all(root, "text") if t.text == content]
 
 
 # =============================================================================
@@ -112,181 +135,74 @@ def _text_x(root: ET.Element, content: str) -> list[float]:
 
 @pytest.mark.parametrize("seed", range(10))
 def test_random_circuit_element_counts(seed: int) -> None:
-    """Gate boxes, controls, targets, measures and barriers match the circuit."""
+    """Cards, dots, targets, swaps, measures and barriers match the circuit."""
     circ, _ = random_circuit_pair(4, 25, seed)
     circ.barrier(0, 1)
     circ.measure([0, 2], [1, 0])
     root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
-    assert _observed_counts(root, CUSTOM_STYLE) == _expected_counts(circ)
-    # Lane labels: one per qubit and clbit.
-    labels = [t.text for t in _all(root, "text") if t.text and t.text.endswith(":")]
-    assert labels == ["q0:", "q1:", "q2:", "q3:", "c0:", "c1:"]
-    # Dashed wires are exactly the classical lanes.
-    dashed = [
-        ln
-        for ln in _all(root, "line")
-        if ln.get("stroke-dasharray") == "7 5"
-        and ln.get("stroke") == CUSTOM_STYLE["classical_wire"]
+    assert _observed_counts(root) == _expected_counts(circ)
+    # One label and one wire per qubit; classical bits have neither.
+    labels = [
+        text.text
+        for group in _all(root, "g")
+        if group.get("fill-opacity") is not None and group.get("font-size") is None
+        for text in group.findall(f"{NS}text")
     ]
-    assert len(dashed) == 2
+    assert labels == ["q0", "q1", "q2", "q3"]
+    wires = _path_data(root, stroke=CUSTOM_STYLE["wire"], stroke_dasharray=None)
+    assert wires.count("M") == 4
+    texts = [text.text for text in _all(root, "text")]
+    assert "M→c1" in texts and "M→c0" in texts
 
 
 def test_base_document_structure() -> None:
-    """Root attributes, defs/filter, background and one ``<g>`` group."""
+    """Root attributes, a background and one top group; no filters."""
     circ = quspect.QuantumCircuit()
     circ.h(0)
     root = _parse(draw_svg_circuit(circ))
-    assert len(_all(root, "filter")) == 1
-    assert _all(root, "filter")[0].get("id") == "quspect_gate_shadow"
-    assert len(_all(root, "g")) == 1
+    assert not _all(root, "filter") and not _all(root, "defs")
+    assert len(root.findall(f"{NS}g")) == 1
     bg = _all(root, "rect")[0]
     assert bg.get("fill") == _SVG_THEME_DATA["official"]["background"]
-    w, h = float(root.get("width", "0")), float(root.get("height", "0"))
-    assert root.get("viewBox") == f"0 0 {w:.1f} {h:.1f}"
+    w, h = root.get("width", ""), root.get("height", "")
+    assert root.get("viewBox") == f"0 0 {w} {h}"
+    assert bg.get("width") == w and bg.get("height") == h
 
 
-def test_gate_label_text_and_escaping() -> None:
-    """Gate labels appear as text and are XML-escaped."""
+def test_channel_rendering() -> None:
+    """Every channel is one dashed card with its short label."""
     circ = quspect.QuantumCircuit()
-    circ.rx(0.5, 0)
-    circ.append(Gate(name="weird", num_qubits=1, label="<a&b>"), (1,))
-    root = _parse(draw_svg_circuit(circ))
+    for ch, nq in all_channel_examples():
+        circ.append_channel(ch, [0, 2][:nq] if nq == 2 else [0])
+    root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
+    cards = _rects_filled(root, CUSTOM_STYLE["channel_fill"])
+    assert len(cards) == len(all_channel_examples())
+    (group,) = [
+        g for g in _all(root, "g") if g.get("stroke") == CUSTOM_STYLE["channel_stroke"]
+    ]
+    assert group.get("stroke-dasharray")
     texts = [t.text for t in _all(root, "text")]
-    assert "RX(0.5)" in texts
-    assert "<a&b>" in texts
-    assert "&lt;a&amp;b&gt;" in str(draw_svg_circuit(circ))
-
-
-@pytest.mark.parametrize("name", sorted(CONTROLLED))
-def test_controlled_gate_rendering(name: str) -> None:
-    """Controls are dots on the control lanes; target is a plus or a box."""
-    circ = quspect.QuantumCircuit()
-    nparams = {"cu3": 3, "cx": 0, "cz": 0, "ccx": 0}.get(name, 1)
-    qubits = [2, 0, 1] if name == "ccx" else [2, 0]
-    getattr(circ, name)(*[0.3] * nparams, *qubits)
-    root = _parse(draw_svg_circuit(circ))
-    lane_y = {q: 34.0 + 56.0 * q for q in range(3)}
-    dots = [c for c in _all(root, "circle") if c.get("r") == "5.5"]
-    assert sorted(float(c.get("cy", "0")) for c in dots) == sorted(
-        lane_y[q] for q in qubits[:-1]
-    )
-    if name in {"cx", "ccx"}:
-        plus = [c for c in _all(root, "circle") if c.get("r") == "15.0"]
-        assert [float(c.get("cy", "0")) for c in plus] == [lane_y[qubits[-1]]]
-    else:
-        box_texts = [t for t in _all(root, "text") if t.get("font-size") == "12"]
-        assert len(box_texts) == 1
-        assert float(box_texts[0].get("y", "0")) == lane_y[qubits[-1]] + 4
-
-
-def test_controlled_rotation_label_shows_angle() -> None:
-    """The CRZ target box should display the rotation angle."""
-    circ = quspect.QuantumCircuit()
-    circ.crz(0.3, 0, 1)
-    texts = [t.text or "" for t in _all(_parse(draw_svg_circuit(circ)), "text")]
-    assert any("0.3" in t for t in texts)
-
-
-def test_swap_and_generic_multi_qubit_gate() -> None:
-    """SWAP draws two crosses; a custom 2-qubit gate draws a box per operand."""
-    circ = quspect.QuantumCircuit()
-    circ.swap(0, 2)
-    circ.append(Gate(name="rzz", num_qubits=2, params=(0.5,)), (0, 1))
-    root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
-    obs = _observed_counts(root, CUSTOM_STYLE)
-    assert obs["swap_lines"] == 4
-    assert obs["gate_box"] == 2
-    assert [t.text for t in _all(root, "text")].count("RZZ(0.5)") == 2
-
-
-def test_measure_rendering() -> None:
-    """Each measured pair: meter box on the qubit, numbered circle on the clbit."""
-    circ = quspect.QuantumCircuit()
-    circ.h(0).measure([0, 1], [1, 0])
-    root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
-    assert len(_all(root, "path")) == 2
-    clbit_circles = [c for c in _all(root, "circle") if c.get("r") == "8"]
-    assert len(clbit_circles) == 2
-    numbers = [t.text for t in _all(root, "text") if t.get("font-size") == "11"]
-    assert sorted(numbers) == ["0", "1"]
-
-
-def test_gate_named_measure_uses_meter_box() -> None:
-    """A single-qubit Gate named ``measure`` is drawn as a meter box."""
-    circ = quspect.QuantumCircuit()
-    circ.append(Gate(name="measure", num_qubits=1), (0,))
-    root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
-    assert len(_all(root, "path")) == 1
-    assert _observed_counts(root, CUSTOM_STYLE)["measure"] == 1
+    assert "BF(0.11)" in texts and "GAD(0.25,0.4)" in texts
+    # the wire of q1 runs through the two-qubit channel on q0 and q2
+    through = [p for p in _all(root, "path") if p.get("stroke-dasharray") == "2 4"]
+    assert len(through) == 1 and through[0].get("d", "").count("M") == 1
 
 
 def test_barrier_rendering_partial_and_full() -> None:
-    """Barrier rectangles span exactly the listed lanes (all for empty)."""
+    """A barrier is one dotted line over its qubits (all of them when bare)."""
     circ = quspect.QuantumCircuit()
     circ.h(0).h(1).h(2).barrier(1, 2)
     circ._instructions.append(  # qubit-less barrier (means "all qubits")
         CircuitInstruction(type=InstructionType.BARRIER, qubits=())
     )
-    root = _parse(draw_svg_circuit(circ))
-    bars = [r for r in _all(root, "rect") if r.get("fill-opacity") == "0.38"]
-    heights = sorted(float(r.get("height", "0")) for r in bars)
-    assert heights == [56.0 + 36.0, 2 * 56.0 + 36.0]
-
-
-def test_channel_rendering() -> None:
-    """Channels are dashed boxes per qubit; multi-qubit ones get a connector."""
-    circ = quspect.QuantumCircuit()
-    for ch, nq in all_channel_examples():
-        circ.append_channel(ch, [0, 2][:nq] if nq == 2 else [0])
     root = _parse(draw_svg_circuit(circ, style=CUSTOM_STYLE))
-    chan_rects = [r for r in _all(root, "rect") if r.get("stroke-dasharray") == "5 3"]
-    assert len(chan_rects) == len(all_channel_examples()) + 1  # 2q depolarizing
-    assert all(r.get("fill") == CUSTOM_STYLE["channel_fill"] for r in chan_rects)
-    connectors = [
-        ln
-        for ln in _all(root, "line")
-        if ln.get("stroke") == CUSTOM_STYLE["channel_stroke"]
-        and ln.get("stroke-width") == "2.0"
-    ]
-    assert len(connectors) == 1
-    texts = [t.text for t in _all(root, "text")]
-    assert "BF(0.11)" in texts and "GAD(0.25,0.4)" in texts
-
-
-# =============================================================================
-# Column packing
-# =============================================================================
-
-
-def test_independent_gates_share_a_column() -> None:
-    """Gates on disjoint lanes are vertically aligned; dependent ones are not."""
-    circ = quspect.QuantumCircuit()
-    circ.h(0).x(1).y(0)
-    root = _parse(draw_svg_circuit(circ))
-    (hx,), (xx,), (yx,) = _text_x(root, "H"), _text_x(root, "X"), _text_x(root, "Y")
-    assert hx == xx
-    assert yx > hx
-
-
-def test_multi_lane_instruction_blocks_lanes_in_between() -> None:
-    """A CX(0, 2) reserves lane 1, so a later gate on q1 moves right."""
-    circ = quspect.QuantumCircuit()
-    circ.cx(0, 2).h(1)
-    root = _parse(draw_svg_circuit(circ))
-    plus = next(c for c in _all(root, "circle") if c.get("r") == "15.0")
-    (hx,) = _text_x(root, "H")
-    assert hx > float(plus.get("cx", "0"))
-
-
-def test_measure_reserves_classical_lanes() -> None:
-    """A measure into c0 blocks the qubit lanes below the measured qubit."""
-    circ = quspect.QuantumCircuit()
-    circ.measure([0], [0]).h(1)
-    root = _parse(draw_svg_circuit(circ))
-    meter = next(p for p in _all(root, "path"))
-    (hx,) = _text_x(root, "H")
-    meter_center = float(meter.get("d", "M 0").split()[1]) + 10
-    assert hx > meter_center
+    data = _path_data(root, stroke=CUSTOM_STYLE["barrier"])
+    pieces = [piece for piece in data.split("M") if piece]
+    spans = []
+    for piece in pieces:
+        start, end = piece.split("V")
+        spans.append(float(end) - float(start.split()[1]))
+    assert len(spans) == 2 and spans[1] - spans[0] == pytest.approx(44.0)
 
 
 # =============================================================================
@@ -294,17 +210,50 @@ def test_measure_reserves_classical_lanes() -> None:
 # =============================================================================
 
 
-@pytest.mark.parametrize("name", ["official", "light", "dark"])
+@pytest.mark.parametrize("name", ["official", "mono", "light", "dark"])
 def test_named_themes(name: str) -> None:
-    """Each named theme colours background, wires and gate boxes."""
+    """Each named theme colours background, wires, cards and measurements."""
     circ = quspect.QuantumCircuit()
-    circ.h(0).measure([0], [0])
+    circ.append(Gate(name="custom", num_qubits=1), (0,))
+    circ.measure([0], [0])
     root = _parse(draw_svg_circuit(circ, style=name))
     theme = _SVG_THEME_DATA[name]
     assert _all(root, "rect")[0].get("fill") == theme["background"]
-    strokes = {ln.get("stroke") for ln in _all(root, "line")}
-    assert theme["wire"] in strokes and theme["classical_wire"] in strokes
-    assert any(r.get("fill") == theme["gate_fill"] for r in _all(root, "rect"))
+    assert _path_data(root, stroke=theme["wire"])
+    assert len(_rects_filled(root, theme["gate_fill"])) == 1
+    (measure,) = [g for g in _all(root, "g") if g.get("fill") == theme["measure_fill"]]
+    assert measure.get("stroke") == theme["classical_wire"]
+
+
+@pytest.mark.parametrize("name", ["official", "mono", "light", "dark"])
+def test_theme_text_is_readable(name: str) -> None:
+    """Labels contrast with what they are written on (WCAG AA for text)."""
+
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+        linear = [
+            c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+            for c in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    def contrast(first: str, second: str) -> float:
+        high, low = sorted((luminance(first), luminance(second)), reverse=True)
+        return (high + 0.05) / (low + 0.05)
+
+    theme = _SVG_THEME_DATA[name]
+    assert contrast(theme["text"], theme["gate_fill"]) >= 4.5
+    assert contrast(theme["text"], theme["channel_fill"]) >= 4.5
+    assert contrast(theme["classical_wire"], theme["measure_fill"]) >= 4.5
+    assert contrast(theme["classical_wire"], theme["background"]) >= 4.5
+    assert contrast(theme["gate_stroke"], theme["background"]) >= 4.5
+    assert contrast(theme["wire"], theme["background"]) >= 3
+    # family colours: visible as an outline, and their tint keeps labels readable
+    for key in _FAMILY_STYLE_KEYS:
+        if key in theme:
+            assert contrast(theme[key], theme["background"]) >= 3
+            tinted = _mix(theme["gate_fill"], theme[key], _FAMILY_TINT)
+            assert contrast(theme["text"], tinted) >= 7
 
 
 def test_default_style_is_official() -> None:
@@ -353,8 +302,16 @@ def test_width_and_scale() -> None:
     assert float(scaled.get("width", "0")) == pytest.approx(2 * bw, abs=0.11)
     assert float(scaled.get("height", "0")) == pytest.approx(2 * bh, abs=0.11)
     assert scaled.get("viewBox") == base.get("viewBox")
-    # Height grows with the number of lanes.
-    assert bh == 34 + 34 + 56
+    # Height grows by one wire pitch per qubit.
+    three = quspect.QuantumCircuit()
+    three.h(0).cx(0, 2)
+    assert float(_parse(draw_svg_circuit(three)).get("height", "0")) == bh + 44
+    # A wider page lengthens the wires, not the gaps between gates.
+    wire = _SVG_THEME_DATA["official"]["wire"]
+    assert _path_data(wide, stroke=wire).count("M") == 2
+    assert str(draw_svg_circuit(circ)).count("<text") == str(
+        draw_svg_circuit(circ, width=bw + 100)
+    ).count("<text")
 
 
 @pytest.mark.parametrize(
@@ -381,11 +338,11 @@ def test_empty_circuit_svg() -> None:
     empty = quspect.QuantumCircuit()
     root = _parse(draw_svg_circuit(empty, style="dark", scale=2))
     assert [t.text for t in _all(root, "text")] == ["(empty circuit)"]
-    assert root.get("viewBox") == "0 0 220.0 72.0"
-    assert root.get("width") == "440.0"
+    assert root.get("viewBox") == "0 0 220 72"
+    assert root.get("width") == "440"
     assert _all(root, "rect")[0].get("fill") == _SVG_THEME_DATA["dark"]["background"]
     wide = _parse(draw_svg_circuit(empty, width=500))
-    assert wide.get("viewBox") == "0 0 500.0 72.0"
+    assert wide.get("viewBox") == "0 0 500 72"
 
 
 # =============================================================================

@@ -11,7 +11,7 @@
 
 ---
 
-QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASCII 图表或可缩放 SVG
+QuSpect 提供直观、流式的 Python API，用于构建量子线路、以终端文本图或可缩放 SVG
 进行可视化展示，以及态矢量演化与多次采样模拟。模拟和精确伴随梯度由 C++ 高性能
 引擎提供支持。
 
@@ -37,7 +37,7 @@ QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASC
   - [Operator 算符](#operator-算符)
   - [IR 导出](#ir-导出)
 - [可视化详解](#可视化详解)
-  - [ASCII 文本图](#ascii-文本图)
+  - [终端文本图](#终端文本图)
   - [SVG 渲染](#svg-渲染)
   - [采样结果图表](#采样结果图表)
 - [模拟引擎](#模拟引擎)
@@ -64,7 +64,7 @@ QuSpect 提供直观、流式的 Python API，用于构建量子线路、以 ASC
 - **态矢量模拟** — 原生 C++ 引擎提供高效的门作用、投影测量与多次采样
 - **变分目标** — 通过统一的结构化 API 提供精确 C++ 伴随梯度和基于 shots 的参数移位梯度
 - **可恢复批量执行** — 具名线路批次、扁平化参数扫描和不含凭据的任务引用
-- **可视化** — ASCII 终端线路图、SVG 线路渲染（3 种主题）、采样结果图（hbar、vbar、dot、SVG）
+- **可视化** — 终端文本线路图、SVG 线路渲染（3 种主题）、采样结果图（hbar、vbar、dot、SVG）
 - **IR 导出** — OpenQASM 2.0 与 QSAL（原生 JSON）导出
 - **云端 QPU** — 通过统一 `Backend` 接口连接本地模拟器与 LogicalQubit、夸父 Quafu-SQC 真机
 - **iSing 优化** — QUBO/Ising 模型转换、可恢复的云端提交与目标函数解码，需安装
@@ -168,8 +168,17 @@ print(len(circ))         # 3 条指令
 ### 可视化
 
 ```python
-# 终端 ASCII 线路图
+# 终端文本线路图
 print(circ.draw())
+```
+
+```text
+     ╭───╮       ╭──────╮
+q0 ──┤ H ├───●───┤ M→c0 ├──
+     ╰───╯   │   ╰──────╯
+             │   ╭──────╮
+q1 ──────────⊕───┤ M→c1 ├──
+                 ╰──────╯
 ```
 
 ```python
@@ -182,7 +191,7 @@ svg.to_file("bell_circuit.svg")
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_dark.svg">
-  <img src="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_light.svg" alt="Bell 线路：q0 上的 H 门，q0 控制 q1 的 CNOT，随后测量两个量子比特" width="342">
+  <img src="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_light.svg" alt="Bell 线路：q0 上的 H 门，q0 控制 q1 的 CNOT，随后测量两个量子比特" width="217">
 </picture>
 
 ### 模拟
@@ -334,7 +343,7 @@ API 与 envelopes-qc 0.1.5（`envelopes.evc`）一致，解码出的波形逐位
 | `.compose(other, qubits, clbits, inplace=False)` | 组合另一个线路，默认返回副本 |
 | `.bind_parameters({p: v})` | 绑定符号参数 |
 | `.to_dag()` | 编译为 DAG 中间表示 |
-| `.draw()` | ASCII 线路图 |
+| `.draw(width, fold)` | 文本线路图 |
 | `.svg(style, width, scale)` | SVG 线路图 |
 
 ### `Gate` 量子门
@@ -432,18 +441,45 @@ print(qsal_dumps(circ))
 
 ## 可视化详解
 
-### ASCII 文本图
+### 终端文本图
 
-零依赖终端线路图，通过 `circuit.draw()` 获取：
+零依赖终端线路图，通过 `circuit.draw()` 获取。量子门是比特线上的圆角卡片，用 Unicode 制表符绘制：
 
-- 量子线 `-`，经典线 `=`
-- 量子门标签 `[方括号]`，控制点 `o`，目标位标注门名
-- SWAP 门以 `x` 标记垂直相连
-- 屏障线 `|`
+```text
+     ╭───╮       ╭──────────╮  ╭──────╮
+q0 ──┤ H ├───●───┤          ├──┤ M→c0 ├───────────────
+     ╰───╯   │   │ RZZ(π/4) │  ╰──────╯
+             │   │          │  ╭──────╮  ╭─ c0=1 ──╮
+q1 ──────────⊕───┤          ├──┤ M→c1 ├──┤    X    ├──
+                 ╰──────────╯  ╰──────╯  ╰─────────╯
+```
+
+- 多比特门是一张整卡片，卡片内不受作用的比特线以 `┄` 穿过；非对称门的操作数在进线口标出编号
+- 控制点 `●`，CX / Toffoli 的目标位 `⊕`，SWAP 为 `╳`，之间以竖线相连
+- 角度是 π 的倍数时按 π 显示（`RZ(π/4)`）
+- 测量直接标出它写入的经典位（`M→c0`），经典位不单独画线
+- 经典控制门的条件写成 `╭─ c0=1`：在卡片上沿的左侧，或作为一面小旗挂在最上面的符号上
+- 噪声信道是虚线边框（`╌`、`╎`）的卡片
+- 屏障是一条独占一列的竖虚线（`┆`）
+- 作用在不相交比特上的门共用一列，空闲的比特只占一行
+
+线路比显示区域宽时，在列与列之间切成宽度相近的几段，自上而下排列；在下一段继续的比特线以 `┄` 淡出。
+宽度取终端宽度（设置了 `COLUMNS` 环境变量时以它为准；输出不是终端时取 80）；
+可以用 `width=` 指定，或用 `fold=False` 让每条比特线只占一行：
+
+```python
+print(circ.draw(width=60))
+print(circ.draw(fold=False))
+```
 
 ### SVG 渲染
 
-通过 `circuit.svg()` 生成可缩放矢量图形，支持 Jupyter Notebook 内联显示：
+通过 `circuit.svg()` 生成可缩放矢量图形，支持 Jupyter Notebook 内联显示。
+SVG 与终端文本图是同一套画法，列与列一一对应：圆角卡片、多比特门一张整卡片、
+用 `M→c0` 表示测量而不画经典线、条件写在受控的门上、噪声是虚线卡片、屏障是一条点线。
+每个主题有一种墨色、一种只用于经典信息（测量和条件）的强调色，以及每类门各一种颜色：
+Pauli 门（X、Y、Z）、Hadamard 类（H、√X）、相位门（S、T、P、RZ）、旋转门（RX、RY、U3）
+和两比特相互作用门（RXX、RYY、RZZ）。
 
 ```python
 svg = circ.svg(style="dark", width=600, scale=1.2)
@@ -451,13 +487,14 @@ print(svg)                # SVG 字符串
 svg.to_file("out.svg")    # 保存到文件
 ```
 
-**三种内置主题：**
+**四种内置主题：**
 
 | 主题 | 背景 | 适用场景 |
 |------|------|---------|
-| `"official"` | 白色，石板色文字 | 论文、出版物 |
-| `"light"` | 冷灰色 | 浅色 IDE、文档 |
-| `"dark"` | 深海军蓝 | 深色 Notebook、演示幻灯片 |
+| `"official"` | 白底，石板色墨线，蓝色强调 | Notebook、文档 |
+| `"mono"` | 同 `"official"`，但不按门的种类上色 | 论文、出版物 |
+| `"light"` | 淡紫底，深紫墨线，琥珀色强调 | 浅色 IDE、文档 |
+| `"dark"` | 深紫底，浅色墨线，金色强调 | 深色 Notebook、演示幻灯片 |
 
 **自定义主题：**
 
@@ -467,18 +504,26 @@ from quspect.visualization import SvgStyle, draw_svg_circuit
 custom = SvgStyle(
     background="#1a1a2e",
     wire="#e94560",
-    classical_wire="#8892a8",
+    classical_wire="#b8adc8",
     gate_fill="#0f3460",
-    gate_stroke="#16213e",
+    gate_stroke="#e8e8f0",
     text="#ffffff",
-    control="#e94560",
-    barrier="#8892a8",
-    measure_fill="#53354a",
-    channel_fill="#3a2f52",
-    channel_stroke="#f0a500",
+    control="#e8e8f0",
+    barrier="#8a744d",
+    measure_fill="#211040",
+    channel_fill="#0f3460",
+    channel_stroke="#e8e8f0",
 )
 svg = draw_svg_circuit(circ, style=custom)
 ```
+
+`wire`、`barrier` 是导线和屏障的颜色，`gate_stroke`、`text`、`control` 是门的颜色，
+`classical_wire` 是测量和条件用的强调色。
+另有五种可选颜色，每类门一种：`pauli_gate`、`hadamard_gate`、`phase_gate`、`rotation_gate`、
+`interaction_gate`。门类颜色用作该类门卡片的边框，并给卡片填充染上一层淡色；
+不设置的门类按 `gate_fill` 和 `gate_stroke` 绘制。
+
+生成的文件小、渲染快：不使用滤镜，所有导线、所有连接线、所有控制点各自只是一个 `<path>`。
 
 ### 采样结果图表
 

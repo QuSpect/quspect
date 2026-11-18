@@ -5,6 +5,7 @@ gate symbols drawn by quspect with the sequence drawn by qiskit's
 ``QuantumCircuit.draw("text")`` for the same circuit (converted with
 :func:`qiskit_tests.helpers.to_qiskit`).  The remaining tests pin the lane
 layout, labels, control/target placement and every instruction branch.
+Exact drawings are pinned in ``tests/visualization/test_text_drawer.py``.
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ from quspect.gates.gate import Gate
 from quspect.noise.channel import DepolarizingChannel, KrausChannel, NoiseChannel
 from quspect.visualization import draw_text_circuit
 
-_QUSPECT_TOKEN = re.compile(r"\[([^\]]*)\]|(?<=-)([ox])(?=-)")
+_QUSPECT_TOKEN = re.compile(r"┤\s*([^├┤]*?)\s*├|(●)|(╳)|(⊕)")
 _QISKIT_TOKEN = re.compile(r"┤\s*([^├]*?)\s*├|(■)|(X)")
 _CANON = {"U1": "P", "U2": "U", "U3": "U", "I": "ID", "S†": "SDG", "T†": "TDG"}
+_WIRE_LINE = re.compile(r"\s*(q\d+) (.*)")
 
 # cz / cp are drawn symmetrically by qiskit (two dots), so they are excluded.
 _STRUCT_GATES = [
@@ -57,25 +59,51 @@ _STRUCT_GATES = [
 
 def _canon(label: str) -> str:
     """Canonical gate symbol: base name, upper case, qiskit aliases merged."""
+    if label.startswith("M→"):  # quspect names the bit a measurement writes
+        return "M"
     base = label.split("(")[0].strip().upper()
     return _CANON.get(base, base)
 
 
-def _quspect_wire_tokens(text: str, num_qubits: int) -> list[list[str]]:
-    """Per qubit line: gate symbols left to right (``o`` control, ``x`` swap)."""
-    lines = text.splitlines()[:num_qubits]
-    out: list[list[str]] = []
-    for line in lines:
-        body = line.split(": ", 1)[1]
-        toks = []
-        for m in _QUSPECT_TOKEN.finditer(body):
-            toks.append(_canon(m.group(1)) if m.group(1) is not None else m.group(2))
-        out.append(toks)
-    return out
+def _wires(circ: quspect.QuantumCircuit) -> dict[str, str]:
+    """Wire rows of the unfolded drawing by qubit label (``q0``, ``q1``, ...)."""
+    wires: dict[str, str] = {}
+    for line in draw_text_circuit(circ, fold=False).splitlines():
+        match = _WIRE_LINE.fullmatch(line)
+        if match is not None:
+            wires[match.group(1)] = line
+    return wires
+
+
+def _rows(circ: quspect.QuantumCircuit) -> list[str]:
+    """All rows of the unfolded drawing, padded to one length."""
+    lines = draw_text_circuit(circ, fold=False).splitlines()
+    width = max(len(line) for line in lines)
+    return [line.ljust(width) for line in lines]
+
+
+def _column(circ: quspect.QuantumCircuit, col: int) -> str:
+    """Characters of column ``col`` from the top row to the bottom row."""
+    return "".join(row[col] for row in _rows(circ))
+
+
+def _tokens(wire: str) -> list[str]:
+    """Gate symbols of one wire, left to right (``o`` control, ``x`` swap)."""
+    toks = []
+    for m in _QUSPECT_TOKEN.finditer(wire):
+        if m.group(1) is not None:
+            toks.append(_canon(m.group(1)))
+        elif m.group(2) is not None:
+            toks.append("o")
+        elif m.group(3) is not None:
+            toks.append("x")
+        else:
+            toks.append("X")  # the ⊕ target of cx / ccx
+    return toks
 
 
 def _qiskit_wire_tokens(text: str, num_qubits: int) -> list[list[str]]:
-    """Same as :func:`_quspect_wire_tokens` for qiskit's text drawing."""
+    """Same as :func:`_tokens`, per qubit, for qiskit's text drawing."""
     out: list[list[str]] = []
     for q in range(num_qubits):
         line = next(ln for ln in text.splitlines() if ln.startswith(f"q_{q}: "))
@@ -92,16 +120,6 @@ def _qiskit_wire_tokens(text: str, num_qubits: int) -> list[list[str]]:
     return out
 
 
-def _columns_of(line: str, symbol: str) -> list[int]:
-    """Character indices of ``symbol`` in ``line``."""
-    return [i for i, ch in enumerate(line) if ch == symbol]
-
-
-def _lines(circ: quspect.QuantumCircuit) -> list[str]:
-    """Rendered lines of ``circ``."""
-    return draw_text_circuit(circ).splitlines()
-
-
 # =============================================================================
 # Structure versus qiskit's text drawer
 # =============================================================================
@@ -115,9 +133,27 @@ def test_wire_gate_order_matches_qiskit_drawer(seed: int) -> None:
     circ, _ = random_circuit_pair(nq, 18, seed, gate_set=_STRUCT_GATES)
     circ.measure(list(range(nq)), list(range(nq)))
     qiskit_text = str(to_qiskit(circ).draw("text", fold=-1))
-    ours = _quspect_wire_tokens(draw_text_circuit(circ), nq)
+    wires = _wires(circ)
+    ours = [_tokens(wires[f"q{q}"]) for q in range(nq)]
     theirs = _qiskit_wire_tokens(qiskit_text, nq)
     assert ours == theirs
+
+
+@pytest.mark.parametrize("seed", range(10))
+@pytest.mark.parametrize("width", [40, 80])
+def test_folded_drawing_has_the_same_wires(seed: int, width: int) -> None:
+    """Folding cuts between columns: each wire still reads the same."""
+    nq = 3 + seed % 2
+    circ, _ = random_circuit_pair(nq, 18, seed, gate_set=_STRUCT_GATES)
+    circ.measure(list(range(nq)), list(range(nq)))
+    folded: dict[str, list[str]] = {}
+    text = draw_text_circuit(circ, width=width)
+    for line in text.splitlines():
+        match = _WIRE_LINE.fullmatch(line)
+        if match is not None:
+            folded.setdefault(match.group(1), []).extend(_tokens(match.group(2)))
+    assert folded == {label: _tokens(wire) for label, wire in _wires(circ).items()}
+    assert max(len(line) for line in text.splitlines()) <= width
 
 
 # =============================================================================
@@ -132,21 +168,22 @@ def test_empty_circuit() -> None:
 
 @pytest.mark.parametrize(("nq", "nc"), [(1, 0), (3, 0), (2, 2), (11, 3)])
 def test_lane_count_labels_and_alignment(nq: int, nc: int) -> None:
-    """One line per qubit then per clbit; right-aligned labels; equal widths."""
+    """One wire per qubit with right-aligned labels; no classical wires."""
     circ = quspect.QuantumCircuit()
     circ.h(nq - 1)
     if nc:
         circ.measure([0], [nc - 1])
-    lines = _lines(circ)
-    assert len(lines) == nq + nc
-    width = len(f"q{nq - 1}") if nq + nc else 0
-    width = max(width, len(f"c{nc - 1}") if nc else 0)
-    expected = [f"q{i}".rjust(width) + ": " for i in range(nq)]
-    expected += [f"c{i}".rjust(width) + ": " for i in range(nc)]
-    assert [ln[: width + 2] for ln in lines] == expected
-    assert len({len(ln) for ln in lines}) == 1
-    for ln in lines[nq:]:
-        assert set(ln[width + 2 :]) <= set("=|0123456789")
+    lines = draw_text_circuit(circ, fold=False).splitlines()
+    width = len(f"q{nq - 1}")
+    labelled = [ln for ln in lines if ln[:width].strip()]
+    assert [ln[: width + 1] for ln in labelled] == [
+        f"q{i}".rjust(width) + " " for i in range(nq)
+    ]
+    assert len({len(ln) for ln in labelled}) == 1
+    # only the two gates need rows above and below their wire
+    assert len(lines) == nq + (4 if nc else 2)
+    if nc:
+        assert f"┤ M→c{nc - 1} ├" in labelled[0]
 
 
 def test_draw_method_delegates() -> None:
@@ -156,12 +193,21 @@ def test_draw_method_delegates() -> None:
     assert circ.draw() == draw_text_circuit(circ)
 
 
-def test_one_column_per_instruction() -> None:
-    """Instructions are not packed: two gates on different qubits get two columns."""
+def test_disjoint_gates_share_a_column() -> None:
+    """Instructions are packed: two gates on different qubits get one column."""
     circ = quspect.QuantumCircuit()
     circ.h(0).h(1)
-    q0, q1 = _lines(circ)
-    assert q0.index("[H]") < q1.index("[H]")
+    wires = _wires(circ)
+    assert wires["q0"].index("┤ H ├") == wires["q1"].index("┤ H ├")
+
+
+def test_gates_on_one_qubit_get_successive_columns() -> None:
+    """Gates sharing a qubit keep their order from left to right."""
+    circ = quspect.QuantumCircuit()
+    circ.h(0).cx(0, 1).h(1)
+    wires = _wires(circ)
+    assert wires["q0"].index("┤ H ├") < wires["q0"].index("●")
+    assert wires["q1"].index("⊕") < wires["q1"].index("┤ H ├")
 
 
 # =============================================================================
@@ -170,36 +216,47 @@ def test_one_column_per_instruction() -> None:
 
 
 def test_single_qubit_labels_on_correct_lines() -> None:
-    """Gate labels (with ``:g`` params) appear only on their own qubit line."""
+    """Gate labels (with their parameters) appear only on their own qubit line."""
     theta = Parameter("theta")
     circ = quspect.QuantumCircuit()
     circ.h(0).rx(0.5, 1).u3(1.0, 2.25, -0.125, 2).rz(theta, 0).ry(2 * theta + 1, 1)
-    q0, q1, q2 = _lines(circ)
-    assert "[H]" in q0 and "[RZ(theta)]" in q0
-    assert "[RX(0.5)]" in q1
-    assert "[U3(1, 2.25, -0.125)]" in q2
-    expr_label = re.search(r"\[RY\(([^\]]*)\)\]", q1)
+    wires = _wires(circ)
+    q0, q1, q2 = wires["q0"], wires["q1"], wires["q2"]
+    assert "┤ H ├" in q0 and "┤ RZ(theta) ├" in q0
+    assert "┤ RX(0.5) ├" in q1
+    assert "┤ U3(1, 2.25, -0.125) ├" in q2
+    expr_label = re.search(r"┤ RY\(([^├]*)\) ├", q1)
     assert expr_label is not None and "theta" in expr_label.group(1)
-    for label, line in (("[H]", q0), ("[RX(0.5)]", q1)):
+    for label, line in (("┤ H ├", q0), ("┤ RX(0.5) ├", q1)):
         others = [ln for ln in (q0, q1, q2) if ln is not line]
         assert all(label not in ln for ln in others)
+
+
+def test_angles_that_are_multiples_of_pi_are_shown_as_such() -> None:
+    """``π/2`` rather than ``1.5708``; other values keep four digits."""
+    circ = quspect.QuantumCircuit()
+    circ.rx(np.pi / 2, 0).rz(-3 * np.pi / 4, 0).ry(0.123456, 0)
+    q0 = _wires(circ)["q0"]
+    assert "┤ RX(π/2) ├" in q0 and "┤ RZ(-3π/4) ├" in q0 and "┤ RY(0.1235) ├" in q0
 
 
 def test_custom_gate_label_is_used() -> None:
     """A Gate ``label`` overrides the upper-cased name."""
     circ = quspect.QuantumCircuit()
     circ.append(Gate(name="rx", num_qubits=1, params=(0.25,), label="Drive"), (0,))
-    assert "[Drive(0.25)]" in _lines(circ)[0]
+    assert "┤ Drive(0.25) ├" in _wires(circ)["q0"]
 
 
-def test_wide_labels_widen_the_column_symmetrically() -> None:
-    """The cell width grows with the label and stays odd (centred symbols)."""
+def test_wide_labels_widen_the_column() -> None:
+    """A column is as wide as its widest card; narrower items are centred in it."""
     circ = quspect.QuantumCircuit()
-    circ.u3(0.123456, 1.5, 2.75, 0)
-    circ.cx(0, 1)
-    q0, q1 = _lines(circ)
-    assert q0.startswith("q0: -[U3(0.123456, 1.5, 2.75)]-")
-    assert len(q0) == len(q1)
+    circ.u3(0.123456, 1.5, 2.75, 0).h(1)
+    wires = _wires(circ)
+    wide = "┤ U3(0.1235, 1.5, 2.75) ├"
+    assert wires["q0"] == f"q0 ──{wide}──"
+    assert len(wires["q1"]) == len(wires["q0"])
+    offset = wires["q1"].index("┤ H ├") - wires["q0"].index(wide)
+    assert offset == (len(wide) - len("┤ H ├")) // 2
 
 
 @pytest.mark.parametrize("name", ["crx", "cry", "crz", "cp", "cu3"])
@@ -208,7 +265,7 @@ def test_controlled_rotation_shows_angle(name: str) -> None:
     circ = quspect.QuantumCircuit()
     params = [0.3, 0.4, 0.5][: 3 if name == "cu3" else 1]
     getattr(circ, name)(*params, 0, 1)
-    assert "0.3" in _lines(circ)[1]
+    assert "0.3" in _wires(circ)["q1"]
 
 
 # =============================================================================
@@ -218,51 +275,73 @@ def test_controlled_rotation_shows_angle(name: str) -> None:
 
 @pytest.mark.parametrize(
     ("name", "target_label"),
-    [("cx", "X"), ("cz", "Z"), ("crx", "RX"), ("cry", "RY"), ("crz", "RZ")]
-    + [("cp", "P"), ("cu3", "U3")],
+    [("crx", "RX"), ("cry", "RY"), ("crz", "RZ"), ("cp", "P"), ("cu3", "U3")],
 )
 def test_controlled_gate_layout(name: str, target_label: str) -> None:
-    """Control ``o`` and target box share a column; wire ``|`` on lanes between."""
+    """Control ``●`` under the target card; the line between crosses wires as ``┼``."""
     circ = quspect.QuantumCircuit()
-    params = {"cu3": (0.1, 0.2, 0.3)}.get(name, (0.7,) if name[1] in "rp" else ())
+    params = {"cu3": (0.1, 0.2, 0.3)}.get(name, (0.7,))
     getattr(circ, name)(*params, 2, 0)
-    q0, q1, q2 = _lines(circ)
-    if params:
-        target_label += "(" + ", ".join(f"{p:g}" for p in params) + ")"
-    assert f"[{target_label}]" in q0
-    ctrl = _columns_of(q2, "o")
-    assert len(ctrl) == 1
-    target_center = q0.index(f"[{target_label}]") + (len(target_label) + 2) // 2
-    assert target_center == ctrl[0]
-    assert _columns_of(q1, "|") == ctrl
+    wires = _wires(circ)
+    card = f"┤ {target_label}(" + ", ".join(f"{p:g}" for p in params) + ") ├"
+    assert card in wires["q0"]
+    col = wires["q2"].index("●")
+    assert wires["q2"].count("●") == 1
+    assert wires["q0"].index(card) < col < wires["q0"].index(card) + len(card)
+    # from the bottom edge of the card down to the control: one unbroken line
+    assert _column(circ, col)[2:] == "┬┼│●"
+
+
+def test_cx_layout() -> None:
+    """CX: ``●`` on the control, ``⊕`` on the target, a line between them."""
+    circ = quspect.QuantumCircuit()
+    circ.cx(2, 0)
+    assert _column(circ, _wires(circ)["q0"].index("⊕")) == "⊕│┼│●"
+
+
+def test_cz_layout() -> None:
+    """CZ is symmetric: a dot on both qubits."""
+    circ = quspect.QuantumCircuit()
+    circ.cz(2, 0)
+    assert _column(circ, _wires(circ)["q0"].index("●")) == "●│┼│●"
 
 
 def test_toffoli_layout() -> None:
-    """CCX: two controls and an X target in one column."""
+    """CCX: two controls and a ``⊕`` target in one column."""
     circ = quspect.QuantumCircuit()
     circ.ccx(0, 3, 1)
-    q0, q1, q2, q3 = _lines(circ)
-    col = _columns_of(q0, "o")
-    assert col == _columns_of(q3, "o")
-    assert q1[col[0] - 1 : col[0] + 2] == "[X]"
-    assert _columns_of(q2, "|") == col
+    assert _column(circ, _wires(circ)["q0"].index("●")) == "●│⊕│┼│●"
 
 
 def test_swap_layout() -> None:
-    """SWAP: ``x`` on both qubits and a vertical wire between them."""
+    """SWAP: ``╳`` on both qubits and a vertical line between them."""
     circ = quspect.QuantumCircuit()
     circ.swap(2, 0)
-    q0, q1, q2 = _lines(circ)
-    assert _columns_of(q0, "x") == _columns_of(q2, "x") == _columns_of(q1, "|")
+    assert _column(circ, _wires(circ)["q0"].index("╳")) == "╳│┼│╳"
 
 
 def test_generic_multi_qubit_gate() -> None:
-    """A non-controlled multi-qubit gate is boxed on every operand."""
+    """A non-controlled multi-qubit gate is one card entered by its operands."""
     circ = quspect.QuantumCircuit()
     circ.append(Gate(name="rzz", num_qubits=2, params=(0.5,)), (0, 2))
-    q0, q1, q2 = _lines(circ)
-    assert "[RZZ(0.5)]" in q0 and "[RZZ(0.5)]" in q2
-    assert len(_columns_of(q1, "|")) == 1
+    rows = _rows(circ)
+    assert sum("RZZ(0.5)" in row for row in rows) == 1
+    wires = _wires(circ)
+    left = wires["q0"].index("┤")
+    right = wires["q0"].index("├")
+    assert wires["q2"][left] == "┤" and wires["q2"][right] == "├"
+    # the wire of q1 runs through the card
+    assert wires["q1"][left] == "┼" and wires["q1"][right] == "┼"
+    assert set(wires["q1"][left + 1 : right]) == {"┄"}
+    assert _column(circ, left) == "╭┤│┼│┤╰"
+
+
+def test_generic_gate_operand_numbers() -> None:
+    """Operands of a gate that is not symmetric are numbered in the card."""
+    circ = quspect.QuantumCircuit()
+    circ.append(Gate(name="foo", num_qubits=2), (1, 0))
+    wires = _wires(circ)
+    assert "┤1 " in wires["q0"] and "┤0 " in wires["q1"]
 
 
 # =============================================================================
@@ -270,26 +349,20 @@ def test_generic_multi_qubit_gate() -> None:
 # =============================================================================
 
 
-def test_measurement_connects_qubit_and_clbit() -> None:
-    """``[M]`` on the qubit, clbit index on its classical lane, wire between."""
+def test_measurement_names_its_classical_bit() -> None:
+    """A measurement is a card on the qubit that names the bit it writes."""
     circ = quspect.QuantumCircuit()
     circ.h(0).measure([0], [1])
-    q0, c0, c1 = _lines(circ)[0], _lines(circ)[1], _lines(circ)[2]
-    m_col = q0.index("[M]") + 1
-    assert c1[m_col] == "1"
-    assert c0[m_col] == "|"
-    assert set(c0.split(": ")[1]) == {"=", "|"}
+    assert _wires(circ)["q0"] == "q0 ──┤ H ├──┤ M→c1 ├──"
 
 
-def test_multi_measure_single_column() -> None:
-    """A multi-qubit measure draws every pair in one column."""
+def test_multi_measure_one_card_each() -> None:
+    """Each pair of a multi-qubit measure has its own card, in one column."""
     circ = quspect.QuantumCircuit()
     circ.x(1).measure([0, 2], [1, 0])
-    q0, q1, q2, c0, c1 = _lines(circ)
-    col = q0.index("[M]") + 1
-    assert q2[col - 1 : col + 2] == "[M]"
-    assert c0[col] == "0" and c1[col] == "1"
-    assert q1[col] == "|"
+    wires = _wires(circ)
+    assert wires["q0"].index("┤ M→c1 ├") == wires["q2"].index("┤ M→c0 ├")
+    assert "M" not in wires["q1"]
 
 
 def test_barrier_partial_and_full() -> None:
@@ -299,23 +372,28 @@ def test_barrier_partial_and_full() -> None:
     circ._instructions.append(  # qubit-less barrier (means "all qubits")
         CircuitInstruction(type=InstructionType.BARRIER, qubits=())
     )
-    q0, q1, q2 = _lines(circ)
-    assert len(_columns_of(q0, "|")) == 2
-    assert len(_columns_of(q1, "|")) == 1
-    assert len(_columns_of(q2, "|")) == 2
-    assert _columns_of(q1, "|")[0] == _columns_of(q0, "|")[1]
+    wires = _wires(circ)
+    marks = {q: [i for i, ch in enumerate(wires[q]) if ch == "┆"] for q in wires}
+    assert len(marks["q0"]) == 2
+    assert len(marks["q1"]) == 1
+    assert len(marks["q2"]) == 2
+    assert marks["q1"][0] == marks["q0"][1]
+    # the full barrier is one unbroken line; the wire of q1 passes in front
+    # of the partial one
+    assert set(_column(circ, marks["q1"][0])) == {"┆"}
+    assert _column(circ, marks["q0"][0]) == "┆┆┆┆─┆┆┆┆"
 
 
 _EXPECTED_CHANNEL_LABELS = {
-    "bit_flip": "╡BF(0.11)╞",
-    "phase_flip": "╡PF(0.12)╞",
-    "bit_phase_flip": "╡BPF(0.13)╞",
-    "depolarizing": "╡DP(0.14)╞",
-    "pauli": "╡PC(0.1,0.05,0.02)╞",
-    "amplitude_damping": "╡AD(0.2)╞",
-    "phase_damping": "╡PD(0.3)╞",
-    "generalized_amplitude_damping": "╡GAD(0.25,0.4)╞",
-    "readout": "╡REA╞",
+    "bit_flip": "BF(0.11)",
+    "phase_flip": "PF(0.12)",
+    "bit_phase_flip": "BPF(0.13)",
+    "depolarizing": "DP(0.14)",
+    "pauli": "PC(0.1,0.05,0.02)",
+    "amplitude_damping": "AD(0.2)",
+    "phase_damping": "PD(0.3)",
+    "generalized_amplitude_damping": "GAD(0.25,0.4)",
+    "readout": "REA",
 }
 
 
@@ -323,26 +401,33 @@ _EXPECTED_CHANNEL_LABELS = {
     "index", range(len(all_channel_examples())), ids=lambda i: str(i)
 )
 def test_channel_labels(index: int) -> None:
-    """Each channel type has its double-bordered short label."""
+    """Each channel type has its short label in a card with a dashed outline."""
     ch, nq = all_channel_examples()[index]
     circ = quspect.QuantumCircuit()
     circ.append_channel(ch, list(range(nq)))
-    lines = _lines(circ)
+    rows = _rows(circ)
+    label = "DP(0.05)" if nq == 2 else _EXPECTED_CHANNEL_LABELS[ch.name]
+    assert rows[0].strip() == "╭" + "╌" * (len(label) + 2) + "╮"
+    assert rows[-1].strip() == "╰" + "╌" * (len(label) + 2) + "╯"
     if nq == 1:
-        assert _EXPECTED_CHANNEL_LABELS[ch.name] in lines[0]
+        assert f"┤ {label} ├" in rows[1]
     else:
-        assert "╡DP(0.05)╞" in lines[0] and "╡DP(0.05)╞" in lines[1]
+        assert f"╎ {label} ╎" in rows[2]
 
 
-def test_multi_qubit_channel_spans_with_wire() -> None:
-    """A 2-qubit channel on non-adjacent qubits draws a wire through the gap."""
+def test_multi_qubit_channel_spans_the_gap() -> None:
+    """A 2-qubit channel on non-adjacent qubits is one card over the gap."""
     circ = quspect.QuantumCircuit()
     circ.append_channel(
         DepolarizingChannel(name="depolarizing", num_qubits=2, p=0.2), [0, 2]
     )
-    q0, q1, q2 = _lines(circ)
-    assert "╡DP(0.2)╞" in q0 and "╡DP(0.2)╞" in q2
-    assert len(_columns_of(q1, "|")) == 1
+    rows = _rows(circ)
+    assert sum("DP(0.2)" in row for row in rows) == 1
+    wires = _wires(circ)
+    left = wires["q0"].index("┤")
+    assert wires["q2"][left] == "┤"
+    assert wires["q1"][left] == "┼" and "┄" in wires["q1"]
+    assert _column(circ, left) == "╭┤╎┼╎┤╰"
 
 
 def test_kraus_and_custom_label_channels() -> None:
@@ -357,7 +442,7 @@ def test_kraus_and_custom_label_channels() -> None:
 
     circ.append_channel(Custom(name="leak", num_qubits=1, label="leakage-model"), [0])
     circ.append_channel(Custom(name="leak", num_qubits=1), [0])
-    line = _lines(circ)[0]
-    assert "╡KC(kraus)╞" in line
-    assert "╡leakage-╞" in line  # label truncated to 8 characters
-    assert "╡LEA╞" in line
+    line = _wires(circ)["q0"]
+    assert "┤ KC(kraus) ├" in line
+    assert "┤ leakage- ├" in line  # label truncated to 8 characters
+    assert "┤ LEA ├" in line

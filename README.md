@@ -12,7 +12,7 @@
 ---
 
 QuSpect provides an intuitive, fluent Python API for constructing quantum circuits,
-visualizing them as ASCII diagrams or scalable SVG, and simulating state-vector
+visualizing them as terminal text diagrams or scalable SVG, and simulating state-vector
 evolution with shot-based sampling. Simulation and exact adjoint gradients are backed
 by the C++ high-performance engine.
 
@@ -179,8 +179,17 @@ print(len(circ))         # 3 instructions
 ### Visualize
 
 ```python
-# Terminal ASCII diagram
+# Terminal text diagram
 print(circ.draw())
+```
+
+```text
+     ╭───╮       ╭──────╮
+q0 ──┤ H ├───●───┤ M→c0 ├──
+     ╰───╯   │   ╰──────╯
+             │   ╭──────╮
+q1 ──────────⊕───┤ M→c1 ├──
+                 ╰──────╯
 ```
 
 ```python
@@ -193,7 +202,7 @@ The Bell circuit rendered by `circ.svg()` (`"light"` / `"dark"` themes, followin
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_dark.svg">
-  <img src="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_light.svg" alt="Bell circuit: H on q0, CNOT from q0 to q1, then both qubits measured" width="342">
+  <img src="https://raw.githubusercontent.com/QuSpect/quspect/main/docs/source/_static/readme/bell_circuit_light.svg" alt="Bell circuit: H on q0, CNOT from q0 to q1, then both qubits measured" width="217">
 </picture>
 
 ### Simulate
@@ -348,7 +357,7 @@ The central class for building quantum programs. Qubit and classical bit counts 
 | `.compose(other, qubits, clbits, inplace=False)` | Compose another circuit, returning a copy by default |
 | `.bind_parameters({p: v})` | Bind symbolic parameters |
 | `.to_dag()` | Compile to DAG IR |
-| `.draw()` | ASCII circuit diagram |
+| `.draw(width, fold)` | Text circuit diagram |
 | `.svg(style, width, scale)` | SVG circuit diagram |
 
 ### Gates
@@ -447,16 +456,53 @@ print(qsal_dumps(circ))
 
 ### Terminal Diagrams
 
-Zero-dependency terminal circuit diagrams via `circuit.draw()`:
+Zero-dependency terminal circuit diagrams via `circuit.draw()`. Gates are
+rounded cards on the qubit wires, drawn with Unicode box-drawing characters:
 
-- Quantum wires as `-`, classical wires as `=`
-- Gate labels in `[brackets]`, controls as `o`, targets labelled
-- SWAP gates as `x` marks connected vertically
-- Barriers as `|`
+```text
+     ╭───╮       ╭──────────╮  ╭──────╮
+q0 ──┤ H ├───●───┤          ├──┤ M→c0 ├───────────────
+     ╰───╯   │   │ RZZ(π/4) │  ╰──────╯
+             │   │          │  ╭──────╮  ╭─ c0=1 ──╮
+q1 ──────────⊕───┤          ├──┤ M→c1 ├──┤    X    ├──
+                 ╰──────────╯  ╰──────╯  ╰─────────╯
+```
+
+- A multi-qubit gate is one card; a wire it does not act on runs through it
+  as `┄`, and the operands of a gate that is not symmetric are numbered where
+  their wires enter the card
+- Controls as `●`, CX / Toffoli targets as `⊕`, SWAP as `╳`, joined by a
+  vertical line
+- Angles as multiples of π where they are one (`RZ(π/4)`)
+- A measurement names the classical bit it writes (`M→c0`); classical bits
+  have no wires of their own
+- A classically controlled gate carries its condition as `╭─ c0=1`: at the
+  left of its card's top edge, or as a flag on its topmost symbol
+- Noise channels are cards with a dashed outline (`╌`, `╎`)
+- A barrier is a dashed vertical line (`┆`) in a column of its own
+- Gates on disjoint qubits share a column, and an idle qubit takes one line
+
+A circuit wider than the display is cut between columns into parts of about
+the same width, drawn one below the other; a wire that goes on in the next
+part fades out as `┄`. The width is that of the terminal (the `COLUMNS`
+variable if set, 80 when the output is not a terminal); pass `width=` to
+choose it, or `fold=False` for one long line per qubit:
+
+```python
+print(circ.draw(width=60))
+print(circ.draw(fold=False))
+```
 
 ### SVG Rendering
 
-Scalable vector graphics via `circuit.svg()`, with Jupyter notebook inline support:
+Scalable vector graphics via `circuit.svg()`, with Jupyter notebook inline support.
+The SVG speaks the same language as the terminal diagram, column for column:
+rounded cards, one card per multi-qubit gate, `M→c0` measurements instead of
+classical wires, conditions written on the gates they control, dashed cards for
+noise and a dotted line for a barrier. Each theme has one ink, one accent kept
+for what is classical (measurements and conditions), and one colour per family
+of gates: Pauli (X, Y, Z), Hadamard-like (H, √X), phase (S, T, P, RZ),
+rotation (RX, RY, U3) and two-qubit interaction (RXX, RYY, RZZ).
 
 ```python
 svg = circ.svg(style="dark", width=600, scale=1.2)
@@ -464,13 +510,14 @@ print(svg)                # SVG string
 svg.to_file("out.svg")    # save to file
 ```
 
-**Three built-in themes:**
+**Four built-in themes:**
 
 | Theme | Background | Best for |
 |-------|-----------|----------|
-| `"official"` | White, slate text | Publications, papers |
-| `"light"` | Cool gray | Light-mode IDEs, docs |
-| `"dark"` | Dark navy | Dark-mode notebooks, slides |
+| `"official"` | White, slate ink, blue accent | Notebooks, docs |
+| `"mono"` | As `"official"`, without a colour per gate family | Publications, papers |
+| `"light"` | Pale lavender, deep-purple ink, amber accent | Light-mode IDEs, docs |
+| `"dark"` | Deep purple, pale ink, gold accent | Dark-mode notebooks, slides |
 
 **Custom themes:**
 
@@ -482,16 +529,26 @@ custom = SvgStyle(
     wire="#e94560",
     classical_wire="#b8adc8",
     gate_fill="#0f3460",
-    gate_stroke="#16213e",
+    gate_stroke="#e8e8f0",
     text="#ffffff",
-    control="#e94560",
+    control="#e8e8f0",
     barrier="#8a744d",
     measure_fill="#211040",
-    channel_fill="#2a153c",
-    channel_stroke="#c77532",
+    channel_fill="#0f3460",
+    channel_stroke="#e8e8f0",
 )
 svg = draw_svg_circuit(circ, style=custom)
 ```
+
+`wire` and `barrier` colour the scaffolding, `gate_stroke`, `text` and `control`
+the gates, and `classical_wire` is the accent of measurements and conditions.
+Five more colours are optional, one per family of gates: `pauli_gate`,
+`hadamard_gate`, `phase_gate`, `rotation_gate` and `interaction_gate`. A family
+colour outlines the cards of its gates and tints their fill; a family left out
+is drawn with `gate_fill` and `gate_stroke`.
+
+The files are small and quick to render: there are no filters, and all wires,
+all connectors and all control dots are one `<path>` each.
 
 ### Sampling Charts
 
