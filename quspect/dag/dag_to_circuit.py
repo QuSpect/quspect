@@ -149,10 +149,9 @@ class DAGToCircuitCompiler:
                 circuit.append_channel(instr.channel, instr.qubits)
 
             else:
-                logger.warning(
-                    "DAGToCircuit: unknown instruction type %s on node %d, skipping",
-                    instr.type,
-                    node.node_id,
-                )
+                # Classically controlled gates, and any instruction type added
+                # later: keep the immutable instruction as it is.  Dropping an
+                # instruction here would silently change the circuit.
+                instructions.append(instr)
 
         return circuit

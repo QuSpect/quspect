@@ -98,6 +98,16 @@ class DAGNode:
         )
 
     @property
+    def is_conditional(self) -> bool:
+        """Return True if this is a classically controlled gate node."""
+        instruction = self.instruction
+        return (
+            self.node_type is _OPERATION
+            and instruction is not None
+            and instruction.is_conditional
+        )
+
+    @property
     def is_barrier(self) -> bool:
         """Return True if this is a barrier operation node."""
         instruction = self.instruction
