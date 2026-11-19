@@ -53,7 +53,10 @@ circuit's qubits for *every* measurement record, returns every ancilla to
 indices from ``circuit.num_qubits`` on and must be in ``|0⟩``; the gadget
 measurements write the classical bits from ``circuit.num_clbits`` on.
 Published T-counts with Hadamard gadgets are far lower than without, e.g.
-``rc_adder_6`` 47 → 37 and ``mod_red_21`` 67 → 51 here.
+``rc_adder_6`` 47 → 37 and ``mod_red_21`` 67 → 51 here.  The default
+settings go below the best published counts with Hadamard-gadget ancillas
+(AlphaTensor-Quantum and earlier) on ``qcla_adder_10`` (116 → 109),
+``ham15-med`` (156 → 141) and ``adder_8`` (129 → 117).
 
 **Reference results** (ancilla-free, verified exactly; see ``docs``): on the
 standard arithmetic benchmarks of Nam et al. the default settings match or
@@ -108,8 +111,8 @@ _ROTATION_NAMES = frozenset({"rz", "p", "u1"})
 #: ``plateau`` is automatic (they pay off on these large polynomials).
 _GADGET_PLATEAU = 200
 #: A gadget form with more variables (qubits of the region plus ancillas) than
-#: the compiled search handles is not tried.
-_GADGET_MAX_VARIABLES = 64
+#: the compiled search handles (256-bit columns) is not tried.
+_GADGET_MAX_VARIABLES = poly.NATIVE_MAX_VARIABLES
 _CONDITIONAL_GATES = {
     "x": standard.X,
     "z": standard.Z,
@@ -357,9 +360,11 @@ class TCountOptimizePass:
             docstring).  Off by default: the output of the default pass is a
             unitary circuit on the input's qubits.
         max_ancillas: With ``ancillas``, the most ancillas a region may use
-            (``None``: no limit).  A gadget form needing more than 64
+            (``None``: no limit).  A gadget form needing more than 256
             variables (qubits of the region plus its ancillas) is never
-            tried.
+            tried.  The search on a gadget form takes seconds up to about 64
+            variables and minutes beyond (``ham15-med``, 72–73 variables:
+            about 25 minutes); ``max_ancillas`` bounds it.
         native: Use the compiled implementation of the searches when it is
             available (same results as the Python one, much faster).
 

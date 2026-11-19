@@ -186,7 +186,9 @@ Exported from `quspect.transpiler` for building custom pipelines:
   `x`/`z`/`s`/`sdg` gates; `.stats` adds `ancillas`, `measurements`,
   `conditional_gates`. It implements the same unitary on the circuit's
   qubits for every measurement record, so simulate it with `Simulator.run`
-  (not `.statevector`).
+  (not `.statevector`). Gadget forms of up to 256 variables (qubits of a
+  region plus its ancillas) are searched; beyond about 64 variables this takes
+  minutes, and `max_ancillas` bounds it.
 
 `quspect.transpiler._passes` holds the internal building blocks
 (`DecomposePass(target)`, `LayoutRoutingPass(target, ...)`, `OptimizePass()`,

@@ -72,12 +72,16 @@ class GadgetProgram:
             and ends in ``|0⟩`` and every logical qubit ends on its own wire.
         t_count: Number of ``T`` / ``T†`` gates.
         measured: The measured wires, in order.
+        logical_wire: ``logical_wire[i]`` is the wire holding logical qubit
+            ``i`` at the end (``i`` itself unless built with
+            ``restore=False``).
     """
 
     num_wires: int
     ops: list[tuple[object, ...]] = field(default_factory=list)
     t_count: int = 0
     measured: list[int] = field(default_factory=list)
+    logical_wire: list[int] = field(default_factory=list)
 
     @property
     def ancillas(self) -> int:
@@ -359,7 +363,7 @@ def _correction(
 
 
 def build_gadget_program(
-    gates: Sequence[GateT], n: int, reduce: Reducer
+    gates: Sequence[GateT], n: int, reduce: Reducer, *, restore: bool = True
 ) -> GadgetProgram | None:
     """Rewrite a Clifford+T gate list with Hadamard gadgets.
 
@@ -369,6 +373,12 @@ def build_gadget_program(
         reduce: ``reduce(terms, columns, k)`` returning an equivalent, shorter
             column set of the phase polynomial with ``(column, +1)`` terms
             over ``k`` variables.
+        restore: Move every logical qubit back to its wire and reset the
+            ancillas (default).  With ``False`` the program stops after the
+            corrections: logical qubit ``i`` is then on wire
+            ``logical_wire[i]``, the tail acts there and the measured wires
+            are left as measured (the form used to verify a program by
+            deferred measurement).
 
     Returns:
         The program, or ``None`` when the gadget form cannot be built for
@@ -419,6 +429,16 @@ def build_gadget_program(
             measured.append(frozen)
     except _GadgetError:
         return None
+    if not restore:
+        at = ps.logical_wire
+        ops += [(GATE, (g[0], at[g[1]], at[g[2]] if g[2] >= 0 else -1)) for g in tail]
+        return GadgetProgram(
+            num_wires=ps.num_wires,
+            ops=ops,
+            t_count=len(columns),
+            measured=measured,
+            logical_wire=list(at),
+        )
     # Every logical qubit back to its own wire, every ancilla back to |0>.
     holders = set(ps.logical_wire)
     for logical, wire in enumerate(ps.logical_wire):
@@ -434,5 +454,9 @@ def build_gadget_program(
             ops.append((CONDITIONAL, wire, "x", wire))
     ops += [(GATE, g) for g in tail]
     return GadgetProgram(
-        num_wires=ps.num_wires, ops=ops, t_count=len(columns), measured=measured
+        num_wires=ps.num_wires,
+        ops=ops,
+        t_count=len(columns),
+        measured=measured,
+        logical_wire=list(range(n)),
     )

@@ -318,6 +318,107 @@ def test_max_ancillas_limits_the_gadgets() -> None:
         TCountOptimizePass(max_ancillas=-1)
 
 
+def _toffolis_and_a_hadamard_chain(length: int) -> QuantumCircuit:
+    # 21 T gates on qubits 0-4 that gadgets bring down to 13, and a chain of
+    # T gates on qubit 5 with a Hadamard between each two of them
+    qc = QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3)
+    for _ in range(length):
+        qc.h(5).t(5)
+    return qc.h(5)
+
+
+@pytest.mark.parametrize(
+    "qc",
+    [
+        QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3),
+        QuantumCircuit().ccx(0, 1, 2).h(2).ccx(0, 1, 2).h(1).ccx(0, 2, 1),
+    ],
+)
+def test_unrestored_gadget_program_is_the_circuit_by_deferred_measurement(
+    qc: QuantumCircuit,
+) -> None:
+    # Without the restoration logical qubit i ends on wire logical_wire[i]
+    # and the measured ancillas stay as they are.  Deferring the measurements
+    # (an X-measurement becomes H, a correction a controlled gate) gives a
+    # unitary that maps |x>|0...0> to (U|x>) ⊗ |phi> with |phi> independent of x.
+    from quspect.transpiler import _tcount_ancilla as gadget
+    from quspect.transpiler._tcount import _OUT_GATES, _translate
+
+    n = _num_qubits(qc)
+    gates = [g for ins in qc for g in _translate(ins) or []]
+    reduce = TCountOptimizePass(ancillas=True)._gadget_reduce
+    restored = gadget.build_gadget_program(gates, n, reduce)
+    program = gadget.build_gadget_program(gates, n, reduce, restore=False)
+    assert restored is not None and program is not None
+    assert restored.logical_wire == list(range(n))
+    t_in = sum(1 for g in gates if g[0] in (rot.T, rot.TDG))
+    assert program.t_count == restored.t_count < t_in
+    assert program.ancillas > 0
+    nw = program.num_wires
+    deferred = QuantumCircuit()
+    controlled = {"x": "cx", "z": "cz"}
+    for op in program.ops:
+        if op[0] == gadget.GATE:
+            g = op[1]
+            assert isinstance(g, tuple)
+            deferred.append(_OUT_GATES[g[0]], [g[1]] if g[2] < 0 else [g[1], g[2]])
+        elif op[0] == gadget.MEASURE_X:
+            deferred.h(op[1])
+        else:
+            _, control, name, target = op
+            if name in controlled:
+                getattr(deferred, controlled[str(name)])(control, target)
+            else:
+                deferred.cp(
+                    math.pi / 2 if name == "s" else -math.pi / 2, control, target
+                )
+    # move logical qubit i to wire i
+    at = list(program.logical_wire)
+    for i in range(n):
+        if at[i] != i:
+            j = at.index(i) if i in at else None
+            deferred.swap(i, at[i])
+            if j is not None:
+                at[j] = at[i]
+            at[i] = i
+    u = circuit_unitary(deferred, nw)
+    v = circuit_unitary(qc, n)
+    junk = 2 ** (nw - n)
+    blocks = u[:, ::junk].reshape(2**n, junk, 2**n)  # [logical out, junk, input]
+    weights = np.einsum("ij,ikj->k", v.conj(), blocks) / 2**n
+    assert abs(float(np.sum(np.abs(weights) ** 2)) - 1.0) < 1e-9
+    for k in range(junk):
+        assert np.max(np.abs(blocks[:, k, :] - weights[k] * v)) < 1e-9
+
+
+@needs_native
+def test_gadget_forms_with_more_than_64_variables() -> None:
+    # 6 qubits and 61 ancillas: the phase polynomial of the gadget form has 67
+    # variables and is searched by the native kernel with 256-bit columns
+    qc = _toffolis_and_a_hadamard_chain(60)
+    p = TCountOptimizePass(ancillas=True, plateau=0)
+    out = p.run(qc)
+    assert p.stats == TCountStats(81, 72, 1, 1, 61, 61, 248)
+    assert out.num_qubits == 6 + 61 and out.num_clbits == 61
+    assert _t_count(out) == 72
+    assert sum(i.is_measure for i in out) == 61
+
+
+def test_gadget_forms_above_the_variable_limit_are_not_tried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quspect.transpiler._tcount as tcount_module
+
+    qc = QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3)
+    p = TCountOptimizePass(ancillas=True)
+    monkeypatch.setattr(tcount_module, "_GADGET_MAX_VARIABLES", 7)
+    p.run(qc)
+    assert (p.stats.t_count_out, p.stats.ancillas) == (13, 2)  # 5 qubits + 2
+    monkeypatch.setattr(tcount_module, "_GADGET_MAX_VARIABLES", 6)
+    p.run(qc)
+    assert (p.stats.t_count_out, p.stats.ancillas) == (15, 0)
+
+
 def test_the_default_pass_adds_no_ancilla_measurement_or_condition() -> None:
     qc = QuantumCircuit().ccx(0, 1, 3).ccx(2, 3, 4).ccx(0, 1, 3)
     p = TCountOptimizePass()
@@ -509,6 +610,45 @@ def test_todd_keeps_the_polynomial_and_native_matches_python(seed: int) -> None:
     assert poly.clifford_difference([(c, 1) for c in cols], ref) is not None
     if _HAS_NATIVE:
         assert poly.todd(cols, k, plateau=plateau, seed=seed, native=True) == ref
+
+
+def _spread(col: int, places: list[int]) -> int:
+    return sum(1 << places[i] for i in range(len(places)) if col >> i & 1)
+
+
+@needs_native
+@pytest.mark.parametrize("seed", range(4))
+def test_more_than_64_variables_use_the_wide_native_kernel(seed: int) -> None:
+    rng = random.Random(200 + seed)
+    k = 7
+    cols = rng.sample(range(1, 1 << k), rng.randint(18, 26))
+    # the same polynomial on variables spread over four 64-bit words
+    places = sorted(rng.sample(range(256), k))
+    wide = [_spread(c, places) for c in cols]
+    for narrow_result, wide_result in (
+        (
+            poly.todd(cols, k, plateau=8, seed=seed),
+            poly.todd(wide, 256, plateau=8, seed=seed),
+        ),
+        (
+            poly.rm_search([(cols, k, 2, seed)])[0],
+            poly.rm_search([(wide, 256, 2, seed)])[0],
+        ),
+    ):
+        assert wide_result == [_spread(c, places) for c in narrow_result]
+        assert poly.clifford_difference([(c, 1) for c in wide], wide_result) is not None
+
+
+@needs_native
+def test_wide_native_kernel_matches_python() -> None:
+    cols: set[int] = set()
+    for t in [(0, 1, 2), (2, 3, 4), (1, 4, 5), (0, 3, 5), (1, 2, 6), (4, 5, 6)]:
+        cols ^= _ccz_columns(*t)
+    k = 66
+    wide = sorted(_spread(c, [0, 1, 2, 3, 63, 64, 65]) for c in cols)
+    ref = poly.todd(wide, k, native=False)
+    assert len(ref) == 17
+    assert poly.todd(wide, k, native=True) == ref
 
 
 def test_todd_reduces_six_toffolis() -> None:
