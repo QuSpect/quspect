@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 // T 门数优化（quspect.transpiler.TCountOptimizePass）的原生搜索内核。
@@ -21,19 +23,56 @@ namespace quspect::native::transpiler {
 using TCountColumns = std::vector<std::uint64_t>;
 using TCountTerm = std::array<std::uint64_t, 3>;
 
-struct TCountToddProblem {
-    TCountColumns cols;
+// 256 位的列（w[0] 为最低的 64 位），用于多于 64 个变量的相位多项式。大小比较按整数值，
+// 与 Python 中对整数排序的结果一致。
+struct TCountWide {
+    std::array<std::uint64_t, 4> w{};
+
+    TCountWide operator^(const TCountWide& o) const {
+        TCountWide r;
+        for (std::size_t i = 0; i < 4; ++i)
+            r.w[i] = w[i] ^ o.w[i];
+        return r;
+    }
+    TCountWide& operator^=(const TCountWide& o) {
+        for (std::size_t i = 0; i < 4; ++i)
+            w[i] ^= o.w[i];
+        return *this;
+    }
+    bool operator==(const TCountWide& o) const {
+        return w == o.w;
+    }
+    bool operator!=(const TCountWide& o) const {
+        return w != o.w;
+    }
+    bool operator<(const TCountWide& o) const {
+        for (std::size_t i = 4; i-- > 0;)
+            if (w[i] != o.w[i])
+                return w[i] < o.w[i];
+        return false;
+    }
+};
+using TCountWideColumns = std::vector<TCountWide>;
+
+template <class Col>
+struct TCountToddProblemT {
+    std::vector<Col> cols;
     int k = 0;
     int plateau = 0;
     std::uint64_t seed = 0;
 };
+using TCountToddProblem = TCountToddProblemT<std::uint64_t>;
+using TCountToddProblemWide = TCountToddProblemT<TCountWide>;
 
-struct TCountRmProblem {
-    TCountColumns cols;
+template <class Col>
+struct TCountRmProblemT {
+    std::vector<Col> cols;
     int k = 0;
     int iterations = 0;
     std::uint64_t seed = 0;
 };
+using TCountRmProblem = TCountRmProblemT<std::uint64_t>;
+using TCountRmProblemWide = TCountRmProblemT<TCountWide>;
 
 struct TCountFlipProblem {
     std::vector<TCountTerm> start;
@@ -49,8 +88,26 @@ std::vector<TCountColumns> TCountToddBatch(const std::vector<TCountToddProblem>&
 // 平面扰动，以 2^-d 的概率接受（d 为列数的增加）。问题之间并行。
 std::vector<TCountColumns> TCountRmSearch(const std::vector<TCountRmProblem>& problems, int samples, int threads);
 
+// 同上，列为 256 位（k <= 256）。结果与 64 位版本在 k <= 64 时相同。
+std::vector<TCountWideColumns> TCountToddBatchWide(const std::vector<TCountToddProblemWide>& problems, int threads);
+std::vector<TCountWideColumns> TCountRmSearchWide(const std::vector<TCountRmProblemWide>& problems, int samples,
+                                                  int threads);
+
 // 翻转图随机游走；返回每个问题见到的秩最低的分解。连续 plus_after 步没有降秩时做一次 plus 移动。
 std::vector<std::vector<TCountTerm>> TCountFlipWalks(const std::vector<TCountFlipProblem>& problems,
                                                      int plus_after, int threads);
 
 }  // namespace quspect::native::transpiler
+
+namespace std {
+template <>
+struct hash<quspect::native::transpiler::TCountWide> {
+    size_t operator()(const quspect::native::transpiler::TCountWide& c) const noexcept {
+        std::uint64_t h = 0x9E3779B97F4A7C15ull;
+        for (std::uint64_t word : c.w) {
+            h ^= word + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+        }
+        return static_cast<size_t>(h);
+    }
+};
+}  // namespace std

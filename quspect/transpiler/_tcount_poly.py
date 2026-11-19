@@ -47,8 +47,12 @@ __all__: list[str] = []
 
 Term = tuple[int, int, int]  # rank-one term u ⊗ v ⊗ w (masks over the three parts)
 
-#: Columns must fit in 64 bits for the native implementation.
+#: Columns of the fast native implementation are 64-bit masks; the wide one
+#: takes up to 256 variables (four 64-bit words per column).  Larger problems
+#: run in Python.
 _NATIVE_MAX_VARS = 64
+NATIVE_MAX_VARIABLES = 256
+_WORD = (1 << 64) - 1
 #: 4-flats sampled per step of the Reed–Muller search.
 _FLAT_SAMPLES = 4000
 #: Flip-graph walk: steps without progress before a "plus" move.
@@ -254,13 +258,43 @@ def _todd_python(cols: Sequence[int], k: int, plateau: int, seed: int) -> list[i
     return best
 
 
+_Problem = tuple[Sequence[int], int, int, int]
+
+
+def _words(c: int) -> tuple[int, int, int, int]:
+    return (c & _WORD, (c >> 64) & _WORD, (c >> 128) & _WORD, c >> 192)
+
+
+def _run_native(
+    name: str, problems: Sequence[_Problem], native: bool, *extra: int
+) -> list[list[int]] | None:
+    """Run the 64-bit or the 256-bit native kernel; ``None`` when neither fits."""
+    width = max((k for _, k, _, _ in problems), default=0)
+    if width <= _NATIVE_MAX_VARS:
+        run = _core_function(name, native)
+        if run is None:
+            return None
+        packed = [(list(c), k, b, s) for c, k, b, s in problems]
+        return [list(r) for r in run(packed, *extra)]
+    if width <= NATIVE_MAX_VARIABLES:
+        run = _core_function(name + "_wide", native)
+        if run is None:
+            return None
+        wide = [([_words(x) for x in c], k, b, s) for c, k, b, s in problems]
+        return [
+            [w[0] | (w[1] << 64) | (w[2] << 128) | (w[3] << 192) for w in r]
+            for r in run(wide, *extra)
+        ]
+    return None
+
+
 def todd_batch(
     problems: Sequence[tuple[Sequence[int], int, int, int]], *, native: bool = True
 ) -> list[list[int]]:
     """TODD on several ``(columns, k, plateau, seed)`` problems (native: concurrent)."""
-    run = _core_function("_tcount_todd_batch", native)
-    if run is not None and all(k <= _NATIVE_MAX_VARS for _, k, _, _ in problems):
-        return [list(r) for r in run([(list(c), k, p, s) for c, k, p, s in problems])]
+    done = _run_native("_tcount_todd_batch", problems, native)
+    if done is not None:
+        return done
     return [_todd_python(c, k, p, s) for c, k, p, s in problems]
 
 
@@ -368,12 +402,9 @@ def rm_search(
     flat kick accepted with probability ``2^{-loss}``.  Native runs are
     concurrent.
     """
-    run = _core_function("_tcount_rm_search", native)
-    if run is not None and all(k <= _NATIVE_MAX_VARS for _, k, _, _ in problems):
-        return [
-            list(r)
-            for r in run([(list(c), k, i, s) for c, k, i, s in problems], _FLAT_SAMPLES)
-        ]
+    done = _run_native("_tcount_rm_search", problems, native, _FLAT_SAMPLES)
+    if done is not None:
+        return done
     return [_rm_python(c, k, i, s) for c, k, i, s in problems]
 
 

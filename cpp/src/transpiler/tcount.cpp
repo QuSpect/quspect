@@ -25,7 +25,43 @@ namespace quspect::native::transpiler {
 
 namespace {
 
-using Col = std::uint64_t;
+// ---------------------------------------------------------------------------------------------
+// 列类型：64 位掩码（std::uint64_t）或 256 位掩码（TCountWide）。内核对列类型是泛型的。
+// ---------------------------------------------------------------------------------------------
+inline bool IsZero(std::uint64_t c) {
+    return c == 0;
+}
+inline bool IsZero(const TCountWide& c) {
+    return (c.w[0] | c.w[1] | c.w[2] | c.w[3]) == 0;
+}
+inline bool BitOf(std::uint64_t c, int i) {
+    return ((c >> i) & 1u) != 0;
+}
+inline bool BitOf(const TCountWide& c, int i) {
+    return ((c.w[static_cast<std::size_t>(i >> 6)] >> (i & 63)) & 1u) != 0;
+}
+inline int TopBit(std::uint64_t c) {  // c != 0
+    int h = 63;
+    while (!((c >> h) & 1u))
+        --h;
+    return h;
+}
+inline int TopBit(const TCountWide& c) {  // c != 0
+    for (int word = 3; word >= 0; --word)
+        if (c.w[static_cast<std::size_t>(word)] != 0)
+            return word * 64 + TopBit(c.w[static_cast<std::size_t>(word)]);
+    return -1;
+}
+template <class Col>
+struct ColumnBits;
+template <>
+struct ColumnBits<std::uint64_t> {
+    static constexpr int value = 64;
+};
+template <>
+struct ColumnBits<TCountWide> {
+    static constexpr int value = 256;
+};
 using Word = std::uint64_t;
 
 // ---------------------------------------------------------------------------------------------
@@ -135,11 +171,12 @@ struct Eliminator {
 };
 
 // 去掉零列并成对消去相同的列，保持首次出现的顺序（Python 的 normalise）。
-TCountColumns Normalise(const TCountColumns& cols) {
+template <class Col>
+std::vector<Col> Normalise(const std::vector<Col>& cols) {
     std::unordered_map<Col, int> count;
     count.reserve(cols.size() * 2);
     for (Col c : cols)
-        if (c != 0)
+        if (!IsZero(c))
             ++count[c];
     // Python 的字典语义：出现奇数次的值保留；删除后重新插入的值排到末尾。一个值出现三次以上时
     // 它的位置是最后一次"从无到有"的插入处，这里按该语义重放。
@@ -149,18 +186,18 @@ TCountColumns Normalise(const TCountColumns& cols) {
             simple = false;
             break;
         }
-    TCountColumns out;
+    std::vector<Col> out;
     if (simple) {
         out.reserve(cols.size());
         for (Col c : cols)
-            if (c != 0 && count[c] == 1)
+            if (!IsZero(c) && count[c] == 1)
                 out.push_back(c);
         return out;
     }
     std::vector<std::pair<Col, bool>> order;  // (值, 是否仍然存在)
     std::unordered_map<Col, std::size_t> where;
     for (Col c : cols) {
-        if (c == 0)
+        if (IsZero(c))
             continue;
         auto it = where.find(c);
         if (it != where.end()) {
@@ -178,30 +215,29 @@ TCountColumns Normalise(const TCountColumns& cols) {
 }
 
 // A 的各行（变量 a 在哪些列中出现）。
-BitRows MatrixRows(const TCountColumns& cols, int k) {
+template <class Col>
+BitRows MatrixRows(const std::vector<Col>& cols, int k) {
     const int m = static_cast<int>(cols.size());
     BitRows rows;
     rows.words = (m + 63) / 64;
     rows.data.assign(static_cast<std::size_t>(k) * static_cast<std::size_t>(rows.words), 0);
     for (int j = 0; j < m; ++j) {
-        Col c = cols[static_cast<std::size_t>(j)];
-        while (c != 0) {
-            const int a = common::Ctz64(c);
-            c &= c - 1;
-            if (a < k)
+        const Col& c = cols[static_cast<std::size_t>(j)];
+        for (int a = 0; a < k; ++a)
+            if (BitOf(c, a))
                 SetBit(rows.Row(a), j);
-        }
     }
     return rows;
 }
 
 // 把依赖 z 的约束行插入消元器（Python 的 _constraints 中的二次、三次行）。
+template <class Col>
 void InsertZConstraints(Eliminator& el, const BitRows& rows, int k, Col z) {
     const int words = rows.words;
     std::vector<Word> r(static_cast<std::size_t>(words));
     std::vector<int> in_z(static_cast<std::size_t>(k));
     for (int i = 0; i < k; ++i)
-        in_z[static_cast<std::size_t>(i)] = static_cast<int>((z >> i) & 1u);
+        in_z[static_cast<std::size_t>(i)] = BitOf(z, i) ? 1 : 0;
     for (int i = 0; i < k; ++i) {
         for (int j = i + 1; j < k; ++j) {
             const int zi = in_z[static_cast<std::size_t>(i)], zj = in_z[static_cast<std::size_t>(j)];
@@ -234,6 +270,7 @@ void InsertZConstraints(Eliminator& el, const BitRows& rows, int k, Col z) {
 }
 
 // {y : A + z y^T 保持三次部分} 的基。base 是只含 A 的各行的消元器（对所有 z 相同）。
+template <class Col>
 std::vector<std::vector<Word>> MoveBasis(const Eliminator& base, const BitRows& rows, int k, Col z) {
     Eliminator el = base;
     InsertZConstraints(el, rows, k, z);
@@ -252,9 +289,10 @@ Eliminator BaseEliminator(const BitRows& rows, int k, int m) {
 }
 
 // A + z y^T 之后的列（Python 的 _move）。
-TCountColumns ApplyMove(const TCountColumns& cols, Col z, const std::vector<Word>& y) {
+template <class Col>
+std::vector<Col> ApplyMove(const std::vector<Col>& cols, Col z, const std::vector<Word>& y) {
     const int m = static_cast<int>(cols.size());
-    TCountColumns next;
+    std::vector<Col> next;
     next.reserve(cols.size() + 1);
     int weight = 0;
     for (int j = 0; j < m; ++j) {
@@ -273,7 +311,8 @@ struct MoveChoice {
     std::vector<Word> y;
 };
 
-MoveChoice BestMoveForZ(const TCountColumns& cols, const std::unordered_map<Col, int>& index,
+template <class Col>
+MoveChoice BestMoveForZ(const std::vector<Col>& cols, const std::unordered_map<Col, int>& index,
                         const Eliminator& base, const BitRows& rows, int k, Col z) {
     const int m = static_cast<int>(cols.size());
     const int words = rows.words;
@@ -338,7 +377,8 @@ MoveChoice BestMoveForZ(const TCountColumns& cols, const std::unordered_map<Col,
 }
 
 // 贪心 TODD 到局部极小（Python 的 _todd_once）。
-TCountColumns ToddOnce(TCountColumns cols, int k, int threads) {
+template <class Col>
+std::vector<Col> ToddOnce(std::vector<Col> cols, int k, int threads) {
     while (true) {
         const int m = static_cast<int>(cols.size());
         if (m < 4)
@@ -393,18 +433,19 @@ std::pair<std::uint64_t, std::uint64_t> TwoDistinct(CPythonRandom& rng, std::uin
 }
 
 // TODD 加平台移动（Python 的 _todd_python）。
-TCountColumns Todd(const TCountColumns& input, int k, int plateau, std::uint64_t seed, int threads) {
-    TCountColumns best = ToddOnce(Normalise(input), k, threads);
+template <class Col>
+std::vector<Col> Todd(const std::vector<Col>& input, int k, int plateau, std::uint64_t seed, int threads) {
+    std::vector<Col> best = ToddOnce(Normalise(input), k, threads);
     if (plateau <= 0 || best.size() < 4)
         return best;
     CPythonRandom rng(seed);
-    TCountColumns cur = best;
+    std::vector<Col> cur = best;
     for (int step = 0; step < plateau; ++step) {
         const int m = static_cast<int>(cur.size());
         if (m < 4)
             break;
         const auto [a, b] = TwoDistinct(rng, static_cast<std::uint64_t>(m));
-        const Col z = rng.RandBelow(10) < 7 ? (cur[a] ^ cur[b]) : cur[a];
+        const Col z = rng.RandBelow(10) < 7 ? Col(cur[a] ^ cur[b]) : cur[a];
         const BitRows rows = MatrixRows(cur, k);
         const Eliminator base = BaseEliminator(rows, k, m);
         const std::vector<std::vector<Word>> basis = MoveBasis(base, rows, k, z);
@@ -417,7 +458,7 @@ TCountColumns Todd(const TCountColumns& input, int k, int plateau, std::uint64_t
                     y[static_cast<std::size_t>(w)] ^= v[static_cast<std::size_t>(w)];
         if (std::all_of(y.begin(), y.end(), [](Word w) { return w == 0; }))
             y = basis[rng.RandBelow(basis.size())];
-        TCountColumns next = ApplyMove(cur, z, y);
+        std::vector<Col> next = ApplyMove(cur, z, y);
         if (next.empty() || static_cast<int>(next.size()) > m)
             continue;
         cur = ToddOnce(std::move(next), k, threads);
@@ -432,14 +473,13 @@ TCountColumns Todd(const TCountColumns& input, int k, int plateau, std::uint64_t
 // ---------------------------------------------------------------------------------------------
 // Reed–Muller 平面搜索
 // ---------------------------------------------------------------------------------------------
+template <class Col>
 bool Independent(const std::array<Col, 4>& dirs) {
-    Col piv[64];
-    bool has[64] = {false};
+    Col piv[ColumnBits<Col>::value];
+    bool has[ColumnBits<Col>::value] = {false};
     for (Col d : dirs) {
-        while (d != 0) {
-            int h = 63;
-            while (!((d >> h) & 1u))
-                --h;
+        while (!IsZero(d)) {
+            const int h = TopBit(d);
             if (!has[h]) {
                 has[h] = true;
                 piv[h] = d;
@@ -447,14 +487,15 @@ bool Independent(const std::array<Col, 4>& dirs) {
             }
             d ^= piv[h];
         }
-        if (d == 0)
+        if (IsZero(d))
             return false;
     }
     return true;
 }
 
 // 过五个不同的随机列的 4 维平面的点（去掉 0）；五列相关时返回 false。
-bool PickFlat(const TCountColumns& cs, CPythonRandom& rng, std::vector<Col>& pts) {
+template <class Col>
+bool PickFlat(const std::vector<Col>& cs, CPythonRandom& rng, std::vector<Col>& pts) {
     std::array<std::uint64_t, 5> picked{};
     int count = 0;
     while (count < 5) {
@@ -477,24 +518,26 @@ bool PickFlat(const TCountColumns& cs, CPythonRandom& rng, std::vector<Col>& pts
         for (int t = 0; t < 4; ++t)
             if ((mask >> t) & 1u)
                 p ^= dirs[static_cast<std::size_t>(t)];
-        if (p != 0)
+        if (!IsZero(p))
             pts.push_back(p);
     }
     return true;
 }
 
 // 升序的 cs 与点集的对称差，升序。
-TCountColumns SymmetricDifference(const TCountColumns& cs, const std::vector<Col>& pts) {
+template <class Col>
+std::vector<Col> SymmetricDifference(const std::vector<Col>& cs, const std::vector<Col>& pts) {
     std::vector<Col> a = cs;
     std::vector<Col> b = pts;
     std::sort(a.begin(), a.end());
     std::sort(b.begin(), b.end());
-    TCountColumns out;
+    std::vector<Col> out;
     std::set_symmetric_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(out));
     return out;
 }
 
-bool BestFlatMove(const TCountColumns& cs, CPythonRandom& rng, int samples, TCountColumns& out) {
+template <class Col>
+bool BestFlatMove(const std::vector<Col>& cs, CPythonRandom& rng, int samples, std::vector<Col>& out) {
     if (cs.size() < 5)
         return false;
     std::unordered_set<Col> sset(cs.begin(), cs.end());
@@ -518,12 +561,13 @@ bool BestFlatMove(const TCountColumns& cs, CPythonRandom& rng, int samples, TCou
     return true;
 }
 
-TCountColumns RmSearch(const TCountRmProblem& prob, int samples) {
+template <class Col>
+std::vector<Col> RmSearch(const TCountRmProblemT<Col>& prob, int samples) {
     CPythonRandom rng(prob.seed);
-    TCountColumns cur = Todd(prob.cols, prob.k, 0, 0, 1);
-    TCountColumns best = cur;
+    std::vector<Col> cur = Todd(prob.cols, prob.k, 0, 0, 1);
+    std::vector<Col> best = cur;
     std::vector<Col> pts;
-    TCountColumns next;
+    std::vector<Col> next;
     for (int it = 0; it < prob.iterations; ++it) {
         if (BestFlatMove(cur, rng, samples, next)) {
             cur = Todd(next, prob.k, 0, 0, 1);
@@ -535,7 +579,7 @@ TCountColumns RmSearch(const TCountRmProblem& prob, int samples) {
                 found = PickFlat(cur, rng, pts);
             if (!found)
                 continue;
-            TCountColumns cand = Todd(SymmetricDifference(cur, pts), prob.k, 0, 0, 1);
+            std::vector<Col> cand = Todd(SymmetricDifference(cur, pts), prob.k, 0, 0, 1);
             const std::int64_t d = static_cast<std::int64_t>(cand.size()) - static_cast<std::int64_t>(cur.size());
             if (d <= 0 || (d <= 60 && rng.GetRandBits(static_cast<int>(d)) == 0))
                 cur = std::move(cand);
@@ -559,7 +603,7 @@ void Reduce(Terms& dec) {
         dec.erase(std::remove_if(dec.begin(), dec.end(),
                                  [](const TCountTerm& t) { return t[0] == 0 || t[1] == 0 || t[2] == 0; }),
                   dec.end());
-        std::map<std::tuple<int, Col, Col>, std::size_t> seen;
+        std::map<std::tuple<int, std::uint64_t, std::uint64_t>, std::size_t> seen;
         for (std::size_t idx = 0; idx < dec.size() && !changed; ++idx) {
             const TCountTerm t = dec[idx];
             for (int p = 0; p < 3; ++p) {
@@ -585,14 +629,14 @@ Terms FlipWalk(const TCountFlipProblem& prob, int plus_after) {
     Terms best = dec;
     std::int64_t since = 0;
     std::vector<std::vector<int>> groups;
-    std::unordered_map<Col, std::size_t> group_of;
+    std::unordered_map<std::uint64_t, std::size_t> group_of;
     std::vector<std::size_t> cands;
     for (std::int64_t step = 0; step < prob.steps; ++step) {
         const int p = static_cast<int>(rng.RandBelow(3));
         groups.clear();
         group_of.clear();
         for (std::size_t i = 0; i < dec.size(); ++i) {
-            const Col key = dec[i][static_cast<std::size_t>(p)];
+            const std::uint64_t key = dec[i][static_cast<std::size_t>(p)];
             auto it = group_of.find(key);
             if (it == group_of.end()) {
                 group_of.emplace(key, groups.size());
@@ -641,17 +685,17 @@ Terms FlipWalk(const TCountFlipProblem& prob, int plus_after) {
     return best;
 }
 
+template <class Col>
 void CheckK(int k) {
-    if (k < 0 || k > 64)
-        throw std::invalid_argument("tcount: the number of variables must be in [0, 64]");
+    if (k < 0 || k > ColumnBits<Col>::value)
+        throw std::invalid_argument("tcount: too many variables for this column type");
 }
 
-}  // namespace
-
-std::vector<TCountColumns> TCountToddBatch(const std::vector<TCountToddProblem>& problems, int threads) {
+template <class Col>
+std::vector<std::vector<Col>> ToddBatch(const std::vector<TCountToddProblemT<Col>>& problems, int threads) {
     for (const auto& p : problems)
-        CheckK(p.k);
-    std::vector<TCountColumns> out(problems.size());
+        CheckK<Col>(p.k);
+    std::vector<std::vector<Col>> out(problems.size());
     if (problems.size() == 1) {
         out[0] = Todd(problems[0].cols, problems[0].k, problems[0].plateau, problems[0].seed, threads);
         return out;
@@ -666,16 +710,37 @@ std::vector<TCountColumns> TCountToddBatch(const std::vector<TCountToddProblem>&
     return out;
 }
 
-std::vector<TCountColumns> TCountRmSearch(const std::vector<TCountRmProblem>& problems, int samples, int threads) {
+template <class Col>
+std::vector<std::vector<Col>> RmSearchBatch(const std::vector<TCountRmProblemT<Col>>& problems, int samples,
+                                            int threads) {
     for (const auto& p : problems)
-        CheckK(p.k);
-    std::vector<TCountColumns> out(problems.size());
+        CheckK<Col>(p.k);
+    std::vector<std::vector<Col>> out(problems.size());
     std::vector<std::function<void()>> tasks;
     tasks.reserve(problems.size());
     for (std::size_t i = 0; i < problems.size(); ++i)
         tasks.emplace_back([&, i]() { out[i] = RmSearch(problems[i], samples); });
     common::RunTasks(tasks, threads);
     return out;
+}
+
+}  // namespace
+
+std::vector<TCountColumns> TCountToddBatch(const std::vector<TCountToddProblem>& problems, int threads) {
+    return ToddBatch(problems, threads);
+}
+
+std::vector<TCountWideColumns> TCountToddBatchWide(const std::vector<TCountToddProblemWide>& problems, int threads) {
+    return ToddBatch(problems, threads);
+}
+
+std::vector<TCountColumns> TCountRmSearch(const std::vector<TCountRmProblem>& problems, int samples, int threads) {
+    return RmSearchBatch(problems, samples, threads);
+}
+
+std::vector<TCountWideColumns> TCountRmSearchWide(const std::vector<TCountRmProblemWide>& problems, int samples,
+                                                  int threads) {
+    return RmSearchBatch(problems, samples, threads);
 }
 
 std::vector<std::vector<TCountTerm>> TCountFlipWalks(const std::vector<TCountFlipProblem>& problems,
