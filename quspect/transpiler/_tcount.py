@@ -53,10 +53,10 @@ circuit's qubits for *every* measurement record, returns every ancilla to
 indices from ``circuit.num_qubits`` on and must be in ``|0⟩``; the gadget
 measurements write the classical bits from ``circuit.num_clbits`` on.
 Published T-counts with Hadamard gadgets are far lower than without, e.g.
-``rc_adder_6`` 47 → 37 and ``mod_red_21`` 67 → 51 here.  The default
-settings go below the best published counts with Hadamard-gadget ancillas
-(AlphaTensor-Quantum and earlier) on ``qcla_adder_10`` (116 → 109),
-``ham15-med`` (156 → 141) and ``adder_8`` (129 → 117).
+``rc_adder_6`` 47 → 37 and ``mod_red_21`` 67 → 51 here.  With gadgets the
+default settings give ``adder_8`` 117 (best published 119, FastTODD),
+``qcla_adder_10`` 109 (FastTODD 109) and ``ham15-med`` 141 (FastTODD 137,
+AlphaTensor-Quantum 156).
 
 **Reference results** (ancilla-free, verified exactly; see ``docs``): on the
 standard arithmetic benchmarks of Nam et al. the default settings match or
