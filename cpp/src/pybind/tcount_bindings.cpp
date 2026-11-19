@@ -1,11 +1,13 @@
 // T 门数优化搜索内核的 Python 绑定（见 quspect_native/transpiler/tcount.hpp）。
-// 只做数据搬运：列是 64 位掩码，问题按元组给出；计算期间释放 GIL。
+// 只做数据搬运：列是 64 位掩码（宽版本为四个 64 位字），问题按元组给出；计算期间释放 GIL。
 
 #include "tcount_bindings.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <pybind11/pybind11.h>
@@ -23,6 +25,34 @@ namespace {
 using Columns = std::vector<std::uint64_t>;
 using ColumnProblem = std::tuple<Columns, int, int, std::uint64_t>;
 using Term = std::array<std::uint64_t, 3>;
+using WideWords = std::array<std::uint64_t, 4>;
+using WideProblem = std::tuple<std::vector<WideWords>, int, int, std::uint64_t>;
+
+template <class Problem>
+std::vector<Problem> WideProblems(const std::vector<WideProblem>& problems) {
+    std::vector<Problem> probs;
+    probs.reserve(problems.size());
+    for (const auto& [cols, k, budget, seed] : problems) {
+        Problem prob;
+        prob.cols.reserve(cols.size());
+        for (const WideWords& w : cols)
+            prob.cols.push_back(transpiler::TCountWide{w});
+        prob.k = k;
+        prob.seed = seed;
+        probs.push_back(std::move(prob));
+    }
+    return probs;
+}
+
+std::vector<std::vector<WideWords>> WideResult(const std::vector<transpiler::TCountWideColumns>& out) {
+    std::vector<std::vector<WideWords>> res(out.size());
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        res[i].reserve(out[i].size());
+        for (const transpiler::TCountWide& c : out[i])
+            res[i].push_back(c.w);
+    }
+    return res;
+}
 using FlipProblem = std::tuple<std::vector<Term>, std::int64_t, std::uint64_t>;
 
 }  // namespace
@@ -61,6 +91,38 @@ void BindTCount(py::module_& m) {
         },
         py::arg("problems"), py::arg("samples"),
         "Reed-Muller flat search: problems are (columns, k, iterations, seed); list of the best column lists.");
+
+    m.def(
+        "_tcount_todd_batch_wide",
+        [](const std::vector<WideProblem>& problems) {
+            auto probs = WideProblems<transpiler::TCountToddProblemWide>(problems);
+            for (std::size_t i = 0; i < probs.size(); ++i)
+                probs[i].plateau = std::get<2>(problems[i]);
+            std::vector<transpiler::TCountWideColumns> out;
+            {
+                py::gil_scoped_release release;
+                out = transpiler::TCountToddBatchWide(probs, common::CompileThreads());
+            }
+            return WideResult(out);
+        },
+        py::arg("problems"),
+        "TODD with 256-bit columns given as four 64-bit words (lowest first); otherwise as _tcount_todd_batch.");
+
+    m.def(
+        "_tcount_rm_search_wide",
+        [](const std::vector<WideProblem>& problems, int samples) {
+            auto probs = WideProblems<transpiler::TCountRmProblemWide>(problems);
+            for (std::size_t i = 0; i < probs.size(); ++i)
+                probs[i].iterations = std::get<2>(problems[i]);
+            std::vector<transpiler::TCountWideColumns> out;
+            {
+                py::gil_scoped_release release;
+                out = transpiler::TCountRmSearchWide(probs, samples, common::CompileThreads());
+            }
+            return WideResult(out);
+        },
+        py::arg("problems"), py::arg("samples"),
+        "Reed-Muller flat search with 256-bit columns (four 64-bit words); otherwise as _tcount_rm_search.");
 
     m.def(
         "_tcount_flip_walks",

@@ -1,6 +1,7 @@
 // T 门数优化搜索内核（tcount）的 gtest：结果必须与输入差一个 Clifford 相位多项式，
 // 并且与线程数无关。
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -21,6 +22,12 @@ using quspect::native::transpiler::TCountRmSearch;
 using quspect::native::transpiler::TCountTerm;
 using quspect::native::transpiler::TCountToddBatch;
 using quspect::native::transpiler::TCountToddProblem;
+using quspect::native::transpiler::TCountRmProblemWide;
+using quspect::native::transpiler::TCountRmSearchWide;
+using quspect::native::transpiler::TCountToddBatchWide;
+using quspect::native::transpiler::TCountToddProblemWide;
+using quspect::native::transpiler::TCountWide;
+using quspect::native::transpiler::TCountWideColumns;
 
 // f_a - f_b 的多线性形式：三次系数 mod 8、二次系数 mod 4、一次系数 mod 2 全为 0 时两者差一个 Clifford。
 bool CliffordEquivalent(const TCountColumns& a, const TCountColumns& b, int k) {
@@ -140,6 +147,74 @@ TEST(TCount, FlipWalkFindsKaratsubaRankForTwoByTwoProduct) {
 
 TEST(TCount, RejectsMoreThan64Variables) {
     EXPECT_THROW(TCountToddBatch({TCountToddProblem{{1, 2, 3}, 65, 0, 0}}, 1), std::invalid_argument);
+}
+
+// 把 64 位的列放到 256 位的列里，变量 i 挪到 spread[i] 位。
+TCountWideColumns Spread(const TCountColumns& cols, const std::vector<int>& spread) {
+    TCountWideColumns out;
+    for (std::uint64_t c : cols) {
+        TCountWide w;
+        for (std::size_t i = 0; i < spread.size(); ++i)
+            if ((c >> i) & 1u)
+                w.w[static_cast<std::size_t>(spread[i] >> 6)] |= std::uint64_t{1} << (spread[i] & 63);
+        out.push_back(w);
+    }
+    return out;
+}
+
+TCountColumns Gather(const TCountWideColumns& cols, const std::vector<int>& spread) {
+    TCountColumns out;
+    for (const TCountWide& w : cols) {
+        std::uint64_t c = 0;
+        TCountWide rest = w;
+        for (std::size_t i = 0; i < spread.size(); ++i) {
+            const std::size_t word = static_cast<std::size_t>(spread[i] >> 6);
+            const std::uint64_t bit = std::uint64_t{1} << (spread[i] & 63);
+            if (w.w[word] & bit) {
+                c |= std::uint64_t{1} << i;
+                rest.w[word] &= ~bit;
+            }
+        }
+        EXPECT_EQ(rest, TCountWide{});  // 结果只用到输入出现过的变量
+        out.push_back(c);
+    }
+    return out;
+}
+
+TEST(TCount, WideColumnsMatchTheNarrowKernel) {
+    // 同一个问题用 256 位的列来算，结果与 64 位内核逐列相同（TODD 和平面搜索）。
+    TCountColumns cols;
+    for (const auto& t : {Ccz(0, 1, 2), Ccz(2, 3, 4), Ccz(1, 4, 5), Ccz(0, 3, 5), Ccz(1, 2, 6), Ccz(4, 5, 6)})
+        cols = Xor(cols, t);
+    const std::vector<int> same = {0, 1, 2, 3, 4, 5, 6};
+    const auto narrow = TCountToddBatch({TCountToddProblem{cols, 7, 20, 5}}, 1);
+    const auto wide = TCountToddBatchWide({TCountToddProblemWide{Spread(cols, same), 7, 20, 5}}, 2);
+    EXPECT_EQ(Gather(wide[0], same), narrow[0]);
+    const auto rm_narrow = TCountRmSearch({TCountRmProblem{cols, 7, 5, 1}}, 200, 1);
+    const auto rm_wide = TCountRmSearchWide({TCountRmProblemWide{Spread(cols, same), 7, 5, 1}}, 200, 1);
+    EXPECT_EQ(Gather(rm_wide[0], same), rm_narrow[0]);
+}
+
+TEST(TCount, WideColumnsUseAllFourWords) {
+    // 变量散布在 256 位里（顺序不变），结果仍与 64 位内核相同。
+    TCountColumns cols;
+    for (const auto& t : {Ccz(0, 1, 2), Ccz(2, 3, 4), Ccz(1, 4, 5), Ccz(0, 3, 5), Ccz(1, 2, 6), Ccz(4, 5, 6)})
+        cols = Xor(cols, t);
+    const std::vector<int> spread = {3, 63, 64, 100, 128, 191, 255};
+    const auto narrow = TCountToddBatch({TCountToddProblem{cols, 7, 0, 0}}, 1);
+    const auto wide = TCountToddBatchWide({TCountToddProblemWide{Spread(cols, spread), 256, 0, 0}}, 2);
+    ASSERT_EQ(wide.size(), 1u);
+    EXPECT_EQ(wide[0].size(), 17u);
+    EXPECT_TRUE(CliffordEquivalent(cols, Gather(wide[0], spread), 7));
+    EXPECT_EQ(Gather(wide[0], spread), narrow[0]);
+    const auto rm = TCountRmSearchWide({TCountRmProblemWide{Spread(cols, spread), 256, 3, 1}}, 200, 1);
+    EXPECT_LE(rm[0].size(), 17u);
+    EXPECT_TRUE(CliffordEquivalent(cols, Gather(rm[0], spread), 7));
+}
+
+TEST(TCount, WideColumnsRejectMoreThan256Variables) {
+    EXPECT_THROW(TCountToddBatchWide({TCountToddProblemWide{{}, 257, 0, 0}}, 1), std::invalid_argument);
+    EXPECT_THROW(TCountRmSearchWide({TCountRmProblemWide{{}, 257, 0, 0}}, 10, 1), std::invalid_argument);
 }
 
 }  // namespace
